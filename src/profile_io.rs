@@ -15,7 +15,9 @@ use crate::frontmatter::{self, glob_list, opt, string};
 use crate::model::{
     Command, FORMAT_VERSION, McpServer, Profile, Rule, Skill, SkillFile, is_valid_name,
 };
-use crate::secrets::{redact_server, refs_in, sensitive_file, strong_secret_kind};
+use crate::secrets::{
+    redact_server, refs_in, sensitive_file, strong_secret_kind, text_secret_kind,
+};
 
 pub const MANIFEST: &str = "kitbag.toml";
 const MAX_SKILL_FILES: usize = 200;
@@ -477,14 +479,19 @@ pub fn save(p: &Profile, dir: &Path, force: bool) -> Result<Vec<PathBuf>> {
 pub fn scan_for_secrets(p: &Profile) -> Vec<String> {
     let mut out = Vec::new();
     let mut out_extra = Vec::new();
-    let mut check = |where_: String, v: &str| {
-        if let Some(k) = strong_secret_kind(v) {
+    let mut check = |where_: String, v: &str, free_text: bool| {
+        let kind = if free_text {
+            text_secret_kind(v)
+        } else {
+            strong_secret_kind(v)
+        };
+        if let Some(k) = kind {
             out.push(format!("{where_}: looks like a {k}"));
         }
     };
     for (n, s) in &p.mcp_servers {
         for (loc, v) in s.strings() {
-            check(format!("mcp_servers.{n}.{loc}"), v);
+            check(format!("mcp_servers.{n}.{loc}"), v, false);
         }
         // Anything capture-time redaction would still replace is a secret too.
         for r in redact_server(n, s).1 {
@@ -495,21 +502,22 @@ pub fn scan_for_secrets(p: &Profile) -> Vec<String> {
         check(
             format!("settings.{t}"),
             &Value::Object(m.clone()).to_string(),
+            false,
         );
     }
     if let Some(i) = &p.instructions {
-        check("instructions.md".into(), i);
+        check("instructions.md".into(), i, true);
     }
     for r in &p.rules {
-        check(format!("rules/{}.md", r.name), &r.body);
+        check(format!("rules/{}.md", r.name), &r.body, true);
     }
     for c in &p.commands {
-        check(format!("commands/{}.md", c.name), &c.body);
+        check(format!("commands/{}.md", c.name), &c.body, true);
     }
     for s in &p.skills {
         for f in &s.files {
             if let Ok(t) = std::str::from_utf8(&f.content) {
-                check(format!("skills/{}/{}", s.name, f.path), t);
+                check(format!("skills/{}/{}", s.name, f.path), t, true);
             }
             if let Some(why) = sensitive_file(&f.path, &f.content) {
                 out_extra.push(format!("skills/{}/{}: {why}", s.name, f.path));

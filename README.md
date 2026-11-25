@@ -219,6 +219,10 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
    secrets passed through `args`, as in `--api-key=…`, `--token …`, `NAME=value` (e.g.
    `docker -e`), `Authorization: Bearer …` (e.g. `mcp-remote --header`) and URLs.
    Known token formats are also redacted from instructions, rules, commands and skill files.
+   There, a token becomes `[REDACTED:<kind>]`, and in a URL only the password is replaced
+   (`postgres://admin:[REDACTED]@db/app`), so the Markdown around it survives. Placeholder
+   passwords in documentation examples (`user:pass@`, `:password@`, `:<password>@`,
+   `:${DB_PASSWORD}@`, `:xxx@`) are left alone.
    Credential files inside skills are left out of the profile with a warning. This covers
    key files, `credentials.json`, `.env`, JSON/TOML/YAML files with secret-named values, and
    binaries containing tokens.

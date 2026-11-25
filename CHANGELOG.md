@@ -19,3 +19,4 @@ All notable changes to this project are documented here. The format follows
 ### Fixed
 
 - xAI, Groq, Perplexity, Tavily, Supabase, Replicate, OpenRouter and Firecrawl keys are recognised (free text, env values, headers and args).
+- Free-text redaction of URL credentials replaces only the password, instead of swallowing the host and the Markdown after it. Placeholder passwords in documentation examples are left alone.

@@ -725,12 +725,81 @@ fn redact_url(server_name: &str, url: &str) -> (String, Vec<(String, &'static st
     (value, found)
 }
 
+/// What a URL password is replaced with in free text.
+pub const REDACTED_PASSWORD: &str = "[REDACTED]";
+
+/// Passwords in documentation examples (`postgres://user:pass@host/db`,
+/// `https://u:<password>@x`, `redis://:${REDIS_PASSWORD}@cache`) are not secrets.
+fn placeholder_password(pw: &str) -> bool {
+    let p = pw.trim();
+    let wrapped = |open: char, close: char| {
+        p.chars().count() >= 2 && p.starts_with(open) && p.ends_with(close)
+    };
+    if p.starts_with('$')
+        || has_ref(p)
+        || wrapped('<', '>')
+        || wrapped('{', '}')
+        || wrapped('[', ']')
+        || wrapped('%', '%')
+    {
+        return true;
+    }
+    if !p.is_empty()
+        && p.chars()
+            .all(|c| matches!(c, 'x' | 'X' | '*' | '.' | '•' | '#' | '_' | '-'))
+    {
+        return true;
+    }
+    let norm: String = p
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    matches!(
+        norm.as_str(),
+        "pass"
+            | "password"
+            | "passwd"
+            | "pwd"
+            | "secret"
+            | "changeme"
+            | "changeit"
+            | "yourpassword"
+            | "mypassword"
+            | "userpassword"
+            | "dbpassword"
+            | "example"
+            | "placeholder"
+            | "redacted"
+    )
+}
+
+/// The kind of credential in free text (instructions, rules, commands, skills).
+/// Like [`strong_secret_kind`], except that only the password of a URL counts,
+/// and placeholder passwords in documentation examples don't.
+pub fn text_secret_kind(text: &str) -> Option<&'static str> {
+    if let Some(p) = STRONG
+        .iter()
+        .filter(|p| p.kind != "url-credentials")
+        .find(|p| p.re.find_iter(text).any(|m| !has_ref(m.as_str())))
+    {
+        return Some(p.kind);
+    }
+    URL_PASSWORD
+        .captures_iter(text)
+        .any(|c| !placeholder_password(&c[2]))
+        .then_some("url-credentials")
+}
+
 /// Redact high-confidence secrets from free text (instructions, rules, commands, skills).
 /// Returns the new text and the kinds of secret found.
+///
+/// Tokens become `[REDACTED:<kind>]`. In URLs only the password is replaced
+/// (`postgres://user:[REDACTED]@host/db`), so the surrounding Markdown survives.
 pub fn redact_text(text: &str) -> (String, Vec<&'static str>) {
     let mut kinds = Vec::new();
     let mut out = text.to_string();
-    for p in STRONG.iter() {
+    for p in STRONG.iter().filter(|p| p.kind != "url-credentials") {
         let mut hit = false;
         let replaced =
             p.re.replace_all(&out, |c: &Captures| {
@@ -746,6 +815,22 @@ pub fn redact_text(text: &str) -> (String, Vec<&'static str>) {
             kinds.push(p.kind);
             out = replaced;
         }
+    }
+    // Last, so a token used as a password has already become a marker.
+    let mut hit = false;
+    let replaced = URL_PASSWORD
+        .replace_all(&out, |c: &Captures| {
+            if placeholder_password(&c[2]) {
+                c[0].to_string()
+            } else {
+                hit = true;
+                format!("{}{REDACTED_PASSWORD}@", &c[1])
+            }
+        })
+        .into_owned();
+    if hit {
+        kinds.push("url-credentials");
+        out = replaced;
     }
     (out, kinds)
 }
@@ -1250,6 +1335,48 @@ mod tests {
         let (t, kinds) = redact_text("use ghp_FAKE0123456789abcdefghijklmnopqrstuv please");
         assert_eq!(t, "use [REDACTED:github-token] please");
         assert_eq!(kinds, vec!["github-token"]);
+    }
+
+    #[test]
+    fn free_text_url_passwords_keep_the_markdown_around_them() {
+        let (t, kinds) = redact_text(
+            "connect with `postgres://admin:Xk93jdLq0@db.internal:5432/app`. Then run it.",
+        );
+        assert_eq!(
+            t,
+            "connect with `postgres://admin:[REDACTED]@db.internal:5432/app`. Then run it."
+        );
+        assert_eq!(kinds, vec!["url-credentials"]);
+        assert_eq!(text_secret_kind(&t), None, "redacted text passes the scan");
+        assert_eq!(
+            text_secret_kind("see https://u:Xk93jdLq0@x.dev/"),
+            Some("url-credentials")
+        );
+        // A token used as the password is named after the token.
+        let (t, kinds) =
+            redact_text("https://x:ghp_FAKE0123456789abcdefghijklmnopqrstuv@github.com/o/r");
+        assert_eq!(t, "https://x:[REDACTED:github-token]@github.com/o/r");
+        assert_eq!(kinds, vec!["github-token"]);
+    }
+
+    #[test]
+    fn documentation_placeholder_passwords_are_not_secrets() {
+        for doc in [
+            "e.g. `postgres://user:pass@host/db`. This is desired state, ...",
+            "mysql://root:password@localhost/app",
+            "redis://default:secret@cache:6379",
+            "amqp://guest:changeme@mq",
+            "https://user:xxx@example.com",
+            "https://user:***@example.com",
+            "postgres://u:<password>@h/db",
+            "postgres://u:${DB_PASSWORD}@h/db",
+            "postgres://u:$DB_PASSWORD@h/db",
+            "postgres://u:{password}@h/db",
+            "postgres://u:YOUR_PASSWORD@h/db",
+        ] {
+            assert_eq!(redact_text(doc), (doc.to_string(), vec![]), "{doc}");
+            assert_eq!(text_secret_kind(doc), None, "{doc}");
+        }
     }
 
     #[test]
