@@ -6,21 +6,31 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-25
+
 ### Security
 
-- Capture redacts secrets in the frontmatter of rules and commands (`description`, `allowed-tools` ...) and in Claude Code permission rules (`Bash(curl -H 'X-Api-Key: …' *)`), and `doctor` flags any left there. Free text also loses values assigned to secret-sounding names (`export DB_PASSWORD=…`, `password: …`, `--token …`, `Authorization: Bearer …`). Permission rules holding `[REDACTED]` markers are not applied back (#5).
-- More secret shapes in MCP config are redacted on capture: any value under a secret-sounding name however short (`DB_PASSWORD = "rootE"`), more names (`PGPASSWORD`, `*_PASSPHRASE`, `*_SECRET_ID`, `APITOKEN`, `*AUTH`, custom headers such as `X-Auth` or `X-Session`), the literal in `${VAR:-literal}` (kept as `${VAR}`), slash-prefixed tokens, and password-only URL userinfo (`redis://:pass@host`). Empty values, booleans, small numbers, file paths and `${VAR}` references are still left alone (#6).
-- Tokens in URLs are redacted wherever a URL appears (`url`, args, `--flag=URL`, `NAME=URL`, env values, free text): secret-named query parameters, Slack and Discord webhook paths, Zapier-style `/mcp/s/<token>/` paths, random-looking path segments in MCP config, and a token used as the username (`https://<token>@host`, HTTP(S) and WebSocket only; `git@` and short usernames stay) (#7).
-- A value holding an env reference is no longer exempt from redaction as a whole: only the `${…}` spans are, and literal secrets next to them (`api_key=…-${X}`, `Bearer … ${X}`, `Authorization:Bearer … ${X}` args, `postgres://u:…${X}@db`) are redacted (#8).
+- Profiles from git sources are untrusted by default. They no longer add `permissions.allow` rules (#1), install commands or skills that run shell snippets (``!`cmd` ``, Gemini CLI's `!{cmd}`), or keep `hooks` and `allowed-tools` in skill and command frontmatter (#2). The plan lists what was left out; `--allow-risky-settings` (new alias: `--trust-source`) applies it anyway. `ask` and `deny` rules still apply.
+- Local env vars are no longer resolved into MCP servers that a git-sourced profile defines (Claude Desktop, parts of Codex); pass `--secrets resolve` to opt in (#3).
+- An MCP server whose command, arguments or URL changes is replaced as a whole, so `npx -y evil-pkg` can no longer inherit the `trust`, `headersHelper`, OAuth or credential keys given to `npx -y good-pkg`. The plan names the dropped keys (#4).
+- Capture redacts more secrets: in rule, command and skill frontmatter and in Claude Code permission rules (#5); any value under a secret-sounding name however short, more names (`PGPASSWORD`, `*_PASSPHRASE`, `APITOKEN`, `X-Auth` ...), `${VAR:-literal}` fallbacks and password-only URLs such as `redis://:pass@host` (#6); tokens in URLs wherever they appear, including webhook paths and tokens used as the username (#7); and literal secrets next to a `${VAR}` reference in the same value (#8). `doctor` flags anything left behind.
+- With `--project`, every write must resolve inside the real project root, so a symbolic link can't redirect it elsewhere; the apply stops before writing anything. `capture --project` skips, with a warning, project files that link outside the project (such as `~/.aws/credentials`).
+- Files that `apply` writes a resolved secret into, from your environment or a `${VAR:-fallback}`, end up mode 0600 on Unix, also when they existed with looser permissions. `undo` puts the old mode back.
+- Errors about a broken TOML, JSON or JSONC file give the path, line, column and parser message only. They no longer quote the offending line, which could hold a secret.
+- Control characters and bidi overrides in profile or config text are printed as escapes (`\x1b`, `\r`, `\u{202e}`) in diffs, plans, notes, `doctor`, `history` and errors, so a profile can't rewrite or hide lines of the review on a terminal. Files are written unchanged.
 
-- Profiles from git sources no longer add any `permissions.allow` rule unless `--allow-risky-settings` (new alias: `--trust-source`) is given; the plan lists the rules it left out. `ask` and `deny` rules still apply. The broad-rule warning for local profiles now ignores case and extra whitespace, and also names `Bash(*:*)`, whole-file-system `Read`/`Edit`/`Write` rules, interpreters, package runners, containers and piping into a shell (#1).
-- Profiles from git sources no longer install commands or skills that run shell snippets (``!`cmd` ``, Gemini CLI's `!{cmd}`), and `hooks` and `allowed-tools` are removed from the frontmatter of the rest, unless `--allow-risky-settings` is given. Local profiles get a warning listing hooks, tool grants and shell snippets (#2).
-- `--secrets` defaults to `never` for profiles from git sources, so local env vars are no longer resolved into servers a remote profile defines (Claude Desktop, parts of Codex); pass `--secrets resolve` to opt in. Every plan lists each MCP server it adds or changes, with its command and arguments or URL and the names of its env vars and headers. `doctor` and `apply` flag a `${VAR:-fallback}` whose literal fallback looks like a secret (#3).
-- Replacing an MCP server whose command, arguments or URL changed no longer carries over the old entry's other keys (`trust`, `headersHelper`, `oauth`, `bearer_token_env_var`, `env_http_headers` ...); the entry is replaced as a whole and the plan names the dropped keys, so `npx -y evil-pkg` can't inherit the `trust` given to `npx -y good-pkg`. Servers that keep their command and arguments (env references in arguments aside) or URL still keep your own keys (#4).
-- With `--project`, every write must resolve inside the real (canonical) project root, so a symbolic link can no longer redirect it elsewhere, also when the project path itself goes through a link; the apply stops before writing anything. `capture --project` skips, with a warning, project files and directories (`CLAUDE.md`, rules, MCP config ...) that are links to somewhere outside the project, such as `~/.aws/credentials`.
-- A file that `apply` writes a resolved secret into ends up mode 0600 on Unix, also when it already existed with looser permissions (the plan says so; `undo` puts the old mode back). A secret-looking `${VAR:-fallback}` written because `VAR` is unset now counts as such a secret too (Claude Desktop, Codex, Cursor), is masked in diffs, and the warning says it came from the fallback instead of "resolved from your environment".
-- Errors about a broken TOML, JSON or JSONC file (tool configs, `kitbag.toml`) give the path, line, column and the parser's message only. They no longer quote the offending source line, which could hold a secret, and quoted values or secret-looking text in the message are elided.
-- Text from profiles and tool configs that kitbag prints (diffs, plans, notes, names, paths, `doctor`, `history`, errors) shows control characters and bidi overrides as escapes (`\x1b`, `\r`, `\u{202e}`), so a profile can no longer use them to rewrite or hide lines of the review on a terminal. Files are written unchanged.
+### Changed
+
+- `--secrets` defaults to `never` for profiles from git sources (#3).
+- Every plan lists each MCP server it adds or changes, with its command and arguments or URL and the names of its env vars and headers (#3).
+- The broad-permission warning for local profiles ignores case and extra whitespace, and also names `Bash(*:*)`, whole-file-system `Read`/`Edit`/`Write` rules, interpreters, package runners, containers and piping into a shell (#1). Local profiles also get a warning listing hooks, tool grants and shell snippets (#2).
+- A changed argument list, including a version bump such as `pkg` to `pkg@latest`, now counts as a different server: your own keys on that entry (such as `timeout`) are dropped, with a note. Differences in env references alone don't count (#4).
+
+### Fixed
+
+- `doctor` and `apply` flag a `${VAR:-fallback}` whose literal fallback looks like a secret, and diffs mask it (#3).
+- A secret written from a `${VAR:-fallback}` is no longer described as "resolved from your environment".
+- Permission rules holding `[REDACTED]` markers are not applied back to the tool (#5).
 
 ## [0.1.0] - 2026-11-25
 
@@ -53,5 +63,6 @@ All notable changes to this project are documented here. The format follows
 - `capture` with several tools (`--from all`, `detected` or a list) reports a tool whose config can't be read and captures the rest; it fails only if nothing could be read. A single `--from` still fails loudly.
 - `install.sh` and `install.ps1` download `kitbag-<target>.sha256`, the checksum name the release workflow uploads (found in the v0.1.0-rc.1 dry run).
 
-[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/cargopete/kitbag/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/cargopete/kitbag/releases/tag/v0.1.0
