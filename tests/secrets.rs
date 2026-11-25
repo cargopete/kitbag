@@ -303,7 +303,14 @@ fn escaped_secret_values_are_masked_and_private() {
             .args(["apply", "p", "--to", "claude-desktop", "--yes"])
             .assert()
             .success();
-        let f = sb.home().join(".config/Claude/claude_desktop_config.json");
+        // The CLI runs with the real OS, so on macOS the Claude Desktop config is
+        // under Library/Application Support (this test used to assume Linux).
+        let rel = if cfg!(target_os = "macos") {
+            "Library/Application Support/Claude/claude_desktop_config.json"
+        } else {
+            ".config/Claude/claude_desktop_config.json"
+        };
+        let f = sb.home().join(rel);
         assert_eq!(fs::metadata(f).unwrap().permissions().mode() & 0o777, 0o600);
     }
 }
