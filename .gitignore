@@ -2,3 +2,4 @@
 /node_modules
 *.kitbag-*.tmp
 /kitbag-profile
+/npm-dist
