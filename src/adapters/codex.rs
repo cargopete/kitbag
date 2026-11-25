@@ -356,11 +356,22 @@ impl Adapter for Codex {
                     work.warn(ID, format!("kept existing MCP server '{name}' in {} because --no-overwrite was given", p.config.display()));
                     continue;
                 }
+                super::common::note_dropped_server_keys(
+                    work,
+                    ID,
+                    &name,
+                    &p.config,
+                    &merged.dropped,
+                );
                 match servers.get_mut(&name).and_then(Item::as_table_mut) {
                     // Update in place so the table keeps its position and comments.
                     Some(t) => {
-                        for k in MANAGED_KEYS {
-                            if !want.contains_key(*k) {
+                        for k in MANAGED_KEYS
+                            .iter()
+                            .copied()
+                            .chain(merged.dropped.iter().map(String::as_str))
+                        {
+                            if !want.contains_key(k) {
                                 t.remove(k);
                             }
                         }
@@ -373,7 +384,7 @@ impl Adapter for Codex {
                         }
                     }
                     None => {
-                        servers.insert(&name, Item::Table(json_to_table(&merged)));
+                        servers.insert(&name, Item::Table(json_to_table(&merged.def)));
                     }
                 }
                 work.changed_servers.push((ID.to_string(), name));

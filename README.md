@@ -291,7 +291,10 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
   `kitbag diff --exit-code` fails when a machine has drifted from the profile, which is useful in CI.
 - **Merge, don't clobber.** JSON and TOML edits go through format-preserving editors: comments,
   key order and indentation of everything else stay as they were. A server kitbag updates keeps
-  keys it doesn't manage, such as `startup_timeout_sec`, `timeout` or `trust`.
+  keys it doesn't manage, such as `startup_timeout_sec`, `timeout` or `trust`, as long as it
+  still runs the same command or connects to the same URL. A same-named server that now points
+  somewhere else is replaced as a whole, so `trust`, `headersHelper` or OAuth settings granted
+  to the old one don't carry over; the plan names the keys it dropped.
   `--no-overwrite` keeps existing same-named entries.
 - **Managed blocks.** In files you also edit (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`) kitbag owns
   only the text between `<!-- kitbag:begin <name> -->` and `<!-- kitbag:end <name> -->`.

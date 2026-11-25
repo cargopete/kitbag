@@ -299,3 +299,90 @@ fn symlinked_config_files_stay_symlinks() {
     );
     assert_eq!(fs::read_to_string(&real).unwrap(), "# Mine\n");
 }
+
+fn one_server(name: &str, s: McpServer) -> Profile {
+    let mut p = Profile::new("x");
+    p.mcp_servers.insert(name.into(), s);
+    p
+}
+
+#[test]
+fn a_server_with_a_new_command_or_url_does_not_inherit_trust_or_credentials() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::User);
+    fs::create_dir_all(sb.home().join(".gemini")).unwrap();
+    fs::write(
+        sb.home().join(".gemini/settings.json"),
+        r#"{"mcpServers":{"docs":{"command":"trusted-docs","trust":true,"timeout":5000}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        sb.home().join(".claude.json"),
+        r#"{"mcpServers":{"api":{"type":"http","url":"https://good.example/mcp","headersHelper":"/usr/local/bin/get-token.sh"}}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(sb.home().join(".codex")).unwrap();
+    fs::write(
+        sb.home().join(".codex/config.toml"),
+        "[mcp_servers.api]\nurl = \"https://good.example/mcp\"\nbearer_token_env_var = \"GOOD_TOKEN\"\noauth_resource = \"https://good.example\"\n",
+    )
+    .unwrap();
+
+    let evil = one_server(
+        "docs",
+        McpServer {
+            command: Some("evil-binary".into()),
+            ..Default::default()
+        },
+    );
+    let plan = apply(&sb, &evil, &["gemini-cli"], &env);
+    assert_eq!(
+        sb.json("home/.gemini/settings.json")["mcpServers"]["docs"],
+        serde_json::json!({"command": "evil-binary"})
+    );
+    assert!(
+        plan.notes
+            .iter()
+            .any(|n| n.message.contains("'docs'") && n.message.contains("trust, timeout")),
+        "{:?}",
+        plan.notes
+    );
+
+    let evil = one_server(
+        "api",
+        McpServer {
+            url: Some("https://evil.example/mcp".into()),
+            ..Default::default()
+        },
+    );
+    apply(&sb, &evil, &["claude-code", "codex"], &env);
+    assert_eq!(
+        sb.json("home/.claude.json")["mcpServers"]["api"],
+        serde_json::json!({"type": "http", "url": "https://evil.example/mcp"})
+    );
+    let codex = sb.read("home/.codex/config.toml");
+    assert!(
+        !codex.contains("GOOD_TOKEN") && !codex.contains("oauth_resource"),
+        "{codex}"
+    );
+
+    // Same command: the user's own keys stay.
+    let same = one_server(
+        "docs",
+        McpServer {
+            command: Some("evil-binary".into()),
+            args: vec!["--v2".into()],
+            ..Default::default()
+        },
+    );
+    fs::write(
+        sb.home().join(".gemini/settings.json"),
+        r#"{"mcpServers":{"docs":{"command":"evil-binary","trust":true}}}"#,
+    )
+    .unwrap();
+    apply(&sb, &same, &["gemini-cli"], &env);
+    assert_eq!(
+        sb.json("home/.gemini/settings.json")["mcpServers"]["docs"]["trust"],
+        true
+    );
+}

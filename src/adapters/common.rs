@@ -351,27 +351,75 @@ impl<'a> Resolver<'a> {
     }
 }
 
+/// What a server entry runs or connects to: its `command`, or its URL
+/// (`url`, or Gemini CLI's `httpUrl`).
+fn server_identity(def: &Map<String, Value>) -> (Option<&Value>, Option<&Value>) {
+    (
+        def.get("command"),
+        def.get("url").or_else(|| def.get("httpUrl")),
+    )
+}
+
+/// The result of [`merge_server_def`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergedServer {
+    pub def: Map<String, Value>,
+    /// Keys of the existing entry that were not carried over, because the
+    /// server now runs a different command or connects to a different URL.
+    pub dropped: Vec<String>,
+}
+
 /// Combine an existing server definition with the one kitbag wants: keys kitbag
 /// manages come from `want`; anything else the user set (timeouts, trust flags,
-/// tool filters...) is preserved. Returns `None` when nothing would change.
+/// tool filters...) is preserved, as long as the entry still runs the same
+/// command or connects to the same URL. If it doesn't, it is a different server,
+/// and keys such as `trust`, `headersHelper` or `oauth` granted to the old one
+/// must not carry over: the entry is replaced wholesale. Returns `None` when
+/// nothing would change.
 pub fn merge_server_def(
     existing: Option<&Map<String, Value>>,
     want: &Map<String, Value>,
     managed: &[&str],
-) -> Option<Map<String, Value>> {
+) -> Option<MergedServer> {
     let Some(cur) = existing else {
-        return Some(want.clone());
+        return Some(MergedServer {
+            def: want.clone(),
+            dropped: Vec::new(),
+        });
     };
-    let mut out: Map<String, Value> = cur
-        .iter()
-        .filter(|(k, _)| !managed.contains(&k.as_str()))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
+    let extra = cur.iter().filter(|(k, _)| !managed.contains(&k.as_str()));
+    let mut dropped = Vec::new();
+    let mut out: Map<String, Value> = if server_identity(cur) == server_identity(want) {
+        extra.map(|(k, v)| (k.clone(), v.clone())).collect()
+    } else {
+        dropped = extra.map(|(k, _)| k.clone()).collect();
+        Map::new()
+    };
     for (k, v) in want {
         out.insert(k.clone(), v.clone());
     }
     let same = out.len() == cur.len() && out.iter().all(|(k, v)| cur.get(k) == Some(v));
-    (!same).then_some(out)
+    (!same).then_some(MergedServer { def: out, dropped })
+}
+
+/// Note the keys a replaced server entry lost.
+pub fn note_dropped_server_keys(
+    work: &mut Work,
+    target: &str,
+    name: &str,
+    path: &Path,
+    dropped: &[String],
+) {
+    if !dropped.is_empty() {
+        work.warn(
+            target,
+            format!(
+                "MCP server '{name}' in {} now runs a different command or URL, so settings of the old entry were not kept: {}",
+                path.display(),
+                dropped.join(", ")
+            ),
+        );
+    }
 }
 
 /// Merge server definitions into the object at `key_path` of a JSON file,
@@ -408,9 +456,10 @@ pub fn merge_json_servers(
             );
             continue;
         }
+        note_dropped_server_keys(work, target, name, path, &merged.dropped);
         let mut full: Vec<&str> = key_path.to_vec();
         full.push(name);
-        doc.set(&full, &Value::Object(merged));
+        doc.set(&full, &Value::Object(merged.def));
         work.changed_servers
             .push((target.to_string(), name.clone()));
         changed = true;
