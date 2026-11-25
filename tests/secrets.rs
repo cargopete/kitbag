@@ -610,3 +610,33 @@ fn tokens_in_url_paths_queries_and_usernames_are_redacted() {
         assert!(text.contains(kept), "{kept} missing:\n{text}");
     }
 }
+
+#[test]
+fn literal_secrets_next_to_env_references_are_redacted() {
+    let sb = Sandbox::empty();
+    fs::write(
+        sb.home().join(".claude.json"),
+        r#"{"mcpServers":{
+  "h":{"type":"http","url":"https://example.test/?api_key=hunter2LITERAL-${UNRELATED}",
+       "headers":{"Authorization":"Bearer abcdefLITERALtok ${UNRELATED}","X-Keep":"Bearer ${TOKEN}","X-Api-Key":"${A}-${B}"}},
+  "a":{"command":"npx","args":["--header","Authorization:Bearer abcdefLITERALarg ${UNRELATED}","--header","X-Api-Key:${API_KEY}","postgres://u:hunter2LITERALpw${X}@db/app","postgres://u:${PW}@db/app"],
+       "env":{"API_KEY":"s3cretLITERALenv${SUFFIX}","URL":"https://${HOST}:${PORT}/mcp"}}
+}}"#,
+    )
+    .unwrap();
+    sb.cli()
+        .args(["capture", "--from", "claude-code", "-o", "prof"])
+        .assert()
+        .success();
+    let text = sb.read("prof/kitbag.toml");
+    assert!(!text.contains("LITERAL"), "{text}");
+    for kept in [
+        r#""Bearer ${TOKEN}""#,
+        r#""${A}-${B}""#,
+        r#""X-Api-Key:${API_KEY}""#,
+        r#""postgres://u:${PW}@db/app""#,
+        r#""https://${HOST}:${PORT}/mcp""#,
+    ] {
+        assert!(text.contains(kept), "{kept} missing:\n{text}");
+    }
+}

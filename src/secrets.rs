@@ -42,6 +42,18 @@ pub fn has_ref(value: &str) -> bool {
     REF_RE.is_match(value)
 }
 
+/// `value` without its `${...}` references: the literal text that still has
+/// to be checked for secrets.
+pub fn strip_refs(value: &str) -> String {
+    REF_RE.replace_all(value, "").into_owned()
+}
+
+/// A literal part long enough to matter next to a reference
+/// (`hunter2-${X}`, not `${A}-${B}` or `key=${K}`).
+fn substantial_literal(literal: &str) -> bool {
+    literal.chars().filter(char::is_ascii_alphanumeric).count() >= 6
+}
+
 /// If the whole string is exactly one reference, return it.
 pub fn sole_ref(value: &str) -> Option<EnvRef> {
     SOLE_REF_RE.captures(value).map(|c| EnvRef {
@@ -362,8 +374,17 @@ static STRONG: LazyLock<Vec<Pattern>> =
 pub fn strong_secret_kind(value: &str) -> Option<&'static str> {
     STRONG
         .iter()
-        .find(|p| p.re.find_iter(value).any(|m| !has_ref(m.as_str())))
+        .find(|p| {
+            p.re.find_iter(value)
+                .any(|m| literal_match(&p.re, m.as_str()))
+        })
         .map(|p| p.kind)
+}
+
+/// A pattern match is a secret unless it only matched thanks to `${...}`
+/// references in it (`postgres://u:${PW}@db`).
+fn literal_match(re: &Regex, m: &str) -> bool {
+    !has_ref(m) || re.is_match(&strip_refs(m))
 }
 
 fn shannon(s: &str) -> f64 {
@@ -461,6 +482,9 @@ fn clearly_a_path(v: &str) -> bool {
 }
 
 /// Why `value` (stored under `name`) should be treated as a secret, if it should.
+///
+/// Only `${...}` spans are exempt: the literal parts of a value that also holds
+/// a reference (`hunter2-${SUFFIX}`, `Bearer tok ${X}`) are still checked.
 pub fn classify(name: Option<&str>, value: &str) -> Option<&'static str> {
     if value.is_empty() || sole_ref(value).is_some() {
         return None;
@@ -468,18 +492,24 @@ pub fn classify(name: Option<&str>, value: &str) -> Option<&'static str> {
     if let Some(k) = strong_secret_kind(value) {
         return Some(k);
     }
+    let mixed = has_ref(value);
+    let literal = strip_refs(value);
+    let enough = |l: &str| !mixed || substantial_literal(l);
     // `Bearer <token>` / `Basic <creds>` is a credential whatever it is called.
-    if let Some(c) = BEARER.captures(value)
-        && !has_ref(&c[2])
-        && c[2].len() >= 6
-    {
-        return Some("authorization-header");
+    if let Some(c) = BEARER.captures(value) {
+        let token = strip_refs(&c[2]);
+        if token.trim().len() >= 6 && enough(&token) {
+            return Some("authorization-header");
+        }
+        if mixed {
+            return None;
+        }
     }
     // Under a secret-sounding name any value counts, however short (`rootE`).
-    if name.is_some_and(is_secret_name) && !has_ref(value) && !obviously_not_secret(value) {
+    if name.is_some_and(is_secret_name) && enough(&literal) && !obviously_not_secret(&literal) {
         return Some("secret-named-field");
     }
-    if looks_random_token(value) {
+    if looks_random_token(&literal) {
         return Some("high-entropy-value");
     }
     None
@@ -609,8 +639,10 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
         if sole_ref(&raw).is_some() {
             continue;
         }
-        let reason = classify(Some(header_key(k)), &raw)
-            .or_else(|| (scheme.is_some() && !has_ref(&raw)).then_some("authorization-header"));
+        let reason = classify(Some(header_key(k)), &raw).or_else(|| {
+            (scheme.is_some() && !strip_refs(&raw).trim().is_empty())
+                .then_some("authorization-header")
+        });
         if let Some(reason) = reason {
             let part = if k.eq_ignore_ascii_case("authorization") {
                 "token"
@@ -821,7 +853,7 @@ fn redact_header_arg(server_name: &str, arg: &str) -> HeaderArg {
         Some(b) => (Some(b[1].to_string()), b[2].to_string()),
         None => (None, value.clone()),
     };
-    if has_ref(&raw) {
+    if has_ref(&raw) && !substantial_literal(&strip_refs(&raw)) {
         return HeaderArg::Referenced;
     }
     let Some(reason) =
@@ -928,7 +960,7 @@ fn redact_url(server_name: &str, url: &str) -> (String, Vec<(String, &'static st
     let mut found = Vec::new();
     let value = URL_USERINFO
         .replace(url, |c: &Captures| {
-            if has_ref(&c[3]) {
+            if strip_refs(&c[3]).is_empty() {
                 return c[0].to_string();
             }
             let env_var = env_var_name(&[server_name, "password"]);
@@ -976,9 +1008,6 @@ fn redact_url(server_name: &str, url: &str) -> (String, Vec<(String, &'static st
     let value = URL_QUERY
         .replace_all(&value, |c: &Captures| {
             let decoded = percent_decode(&c[3]);
-            if has_ref(&decoded) {
-                return c[0].to_string();
-            }
             match classify(Some(&c[2]), &decoded) {
                 Some(reason) => {
                     let env_var = env_var_name(&[server_name, &c[2]]);
@@ -1048,7 +1077,11 @@ pub const REDACTED_PASSWORD: &str = "[REDACTED]";
 /// Passwords in documentation examples (`postgres://user:pass@host/db`,
 /// `https://u:<password>@x`, `redis://:${REDIS_PASSWORD}@cache`) are not secrets.
 fn placeholder_password(pw: &str) -> bool {
-    let p = pw.trim();
+    let stripped = strip_refs(pw.trim());
+    let p = stripped.as_str();
+    if p.is_empty() {
+        return true;
+    }
     let wrapped = |open: char, close: char| {
         p.chars().count() >= 2 && p.starts_with(open) && p.ends_with(close)
     };
@@ -1165,11 +1198,11 @@ pub fn redact_text(text: &str) -> (String, Vec<&'static str>) {
         let mut hit = false;
         let replaced =
             p.re.replace_all(&out, |c: &Captures| {
-                if has_ref(&c[0]) {
-                    c[0].to_string()
-                } else {
+                if literal_match(&p.re, &c[0]) {
                     hit = true;
                     format!("[REDACTED:{}]", p.kind)
+                } else {
+                    c[0].to_string()
                 }
             })
             .into_owned();

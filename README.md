@@ -245,7 +245,8 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
    - it sits under a secret-sounding name (`*_TOKEN`, `*_KEY`, `*PASSWORD`, `*_PASSPHRASE`,
      `*_SECRET_ID`, `*AUTH`, `Authorization`, or a header mentioning auth, key, token, secret,
      session or cookie), however short. Empty values, booleans, small numbers, file paths and
-     `${VAR}` references don't count;
+     `${VAR}` references don't count. Only the `${…}` spans of a value are exempt: in
+     `Bearer tok ${X}` or `pw-${SUFFIX}`, the literal part is still checked;
    - it is a high-entropy opaque string.
 
    Redaction covers env values, headers, URL credentials (`user:pass@` and `:pass@`), query
