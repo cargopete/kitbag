@@ -25,7 +25,9 @@ use super::common::{
     str_of, string_list, string_map, write_instructions, write_owned, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
-use crate::edit::toml::{item_to_json, json_to_table, json_to_value, parse, table_mut};
+use crate::edit::toml::{
+    item_to_json, json_to_table, json_to_value, parse, set_keep_decor, table_mut,
+};
 use crate::model::{McpServer, Profile, Transport};
 use crate::plan_fs::read_text_opt;
 use crate::policy;
@@ -368,7 +370,7 @@ impl Adapter for Codex {
                             if let Some(val) = json_to_value(v)
                                 && t.get(k).map(item_to_json).as_ref() != Some(v)
                             {
-                                t.insert(k, Item::Value(val));
+                                set_keep_decor(t, k, val);
                             }
                         }
                     }
@@ -400,7 +402,7 @@ impl Adapter for Codex {
                 continue;
             }
             if let Some(val) = json_to_value(&v) {
-                doc[k.as_str()] = Item::Value(val);
+                set_keep_decor(doc.as_table_mut(), &k, val);
                 changed = true;
             }
         }

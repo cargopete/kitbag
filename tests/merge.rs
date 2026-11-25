@@ -238,3 +238,64 @@ fn invalid_existing_config_fails_before_writing_anything() {
         .unwrap()
     );
 }
+
+#[test]
+fn no_overwrite_protects_nested_settings_too() {
+    let sb = Sandbox::empty();
+    let settings = sb.home().join(".claude/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(
+        &settings,
+        r#"{"permissions": {"defaultMode": "default", "allow": ["A"]}}"#,
+    )
+    .unwrap();
+    let mut p = Profile::new("x");
+    p.settings.insert(
+        "claude-code".into(),
+        serde_json::json!({"permissions": {"defaultMode": "bypassPermissions", "allow": ["B"]}})
+            .as_object()
+            .cloned()
+            .unwrap(),
+    );
+    let o = ApplyOptions {
+        overwrite: false,
+        ..opts(&p)
+    };
+    let pl = engine::plan(&p, &targets(&["claude-code"]), &sb.env(Scope::User), &o).unwrap();
+    engine::commit(&pl, "t", &sb.state()).unwrap();
+    let v = sb.json("home/.claude/settings.json");
+    assert_eq!(v["permissions"]["defaultMode"], "default");
+    assert_eq!(v["permissions"]["allow"], serde_json::json!(["A", "B"]));
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_config_files_stay_symlinks() {
+    let sb = Sandbox::empty();
+    let real = sb.path("dotfiles/CLAUDE.md");
+    fs::create_dir_all(real.parent().unwrap()).unwrap();
+    fs::write(&real, "# Mine\n").unwrap();
+    fs::create_dir_all(sb.home().join(".claude")).unwrap();
+    let link = sb.home().join(".claude/CLAUDE.md");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    apply(&sb, &profile(), &["claude-code"], &sb.env(Scope::User));
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        fs::read_to_string(&real)
+            .unwrap()
+            .contains("Team instructions.")
+    );
+    Store::new(sb.state()).undo(None, false).unwrap();
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_to_string(&real).unwrap(), "# Mine\n");
+}

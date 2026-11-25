@@ -134,6 +134,31 @@ impl McpServer {
         s
     }
 
+    /// Apply `f` to the one string at `location` (as named by [`McpServer::strings`]).
+    pub fn map_string_at(&mut self, location: &str, f: impl FnOnce(&str) -> String) {
+        let slot: Option<&mut String> = if location == "command" {
+            self.command.as_mut()
+        } else if location == "cwd" {
+            self.cwd.as_mut()
+        } else if location == "url" {
+            self.url.as_mut()
+        } else if let Some(i) = location
+            .strip_prefix("args[")
+            .and_then(|r| r.strip_suffix(']'))
+        {
+            i.parse::<usize>().ok().and_then(|i| self.args.get_mut(i))
+        } else if let Some(k) = location.strip_prefix("env.") {
+            self.env.get_mut(k)
+        } else if let Some(k) = location.strip_prefix("headers.") {
+            self.headers.get_mut(k)
+        } else {
+            None
+        };
+        if let Some(v) = slot {
+            *v = f(v);
+        }
+    }
+
     /// Problems that make this definition unusable.
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();

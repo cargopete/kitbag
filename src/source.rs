@@ -177,7 +177,18 @@ pub fn resolve(src: &str, subdir: Option<&str>) -> Result<Resolved> {
     }
     let sub = subdir.map(str::to_string).or(git.subdir.clone());
     let dir = match &sub {
-        Some(s) => tmp.path().join(safe_subdir(s)?),
+        Some(s) => {
+            let rel = safe_subdir(s)?;
+            // A symlinked sub-directory could point anywhere on this machine.
+            let mut cur = tmp.path().to_path_buf();
+            for part in rel.components() {
+                cur.push(part);
+                if std::fs::symlink_metadata(&cur).is_ok_and(|m| m.file_type().is_symlink()) {
+                    bail!("'{s}' is a symbolic link in the repository; refusing to follow it");
+                }
+            }
+            cur
+        }
         None => tmp.path().to_path_buf(),
     };
     if !dir.join(MANIFEST).exists() {

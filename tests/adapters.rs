@@ -27,7 +27,7 @@ fn claude_code_user_capture() {
     assert_eq!(linear.headers["Authorization"], "Bearer ${LINEAR_API_KEY}");
     assert_eq!(
         p.mcp_servers["postgres"].args[2],
-        "${POSTGRES_CONNECTION_STRING}"
+        "postgresql://admin:${POSTGRES_PASSWORD}@db.internal:5432/app"
     );
     assert_eq!(p.mcp_servers["postgres"].env["LOG_LEVEL"], "debug");
 

@@ -155,12 +155,13 @@ with a bounded effect are applied. Anything else is dropped with a warning:
 |---|---|
 | `claude-code` | `model`, `effortLevel`, `permissions`, `outputStyle`, `alwaysThinkingEnabled`, `includeCoAuthoredBy`, `cleanupPeriodDays` |
 | `codex` | `model`, `model_reasoning_effort`, `model_reasoning_summary`, `model_verbosity`, `approval_policy`, `sandbox_mode`, `web_search`, `file_opener` |
-| `gemini-cli` | `model`, `context`, `general`, `ui` |
+| `gemini-cli` | `model`, `ui` |
 
 Hooks, `env` blocks, `apiKeyHelper`, provider endpoints and similar keys are never carried.
-Settings that let agents act without asking get an explicit warning in the plan, for example
-`permissions.defaultMode = bypassPermissions`, allow rules, `approval_policy = never` and
-`sandbox_mode = danger-full-access`.
+Anything that lets agents act without asking gets an explicit warning in the plan. That
+covers `permissions.defaultMode = bypassPermissions`, allow rules, `approval_policy = never`
+and `sandbox_mode = danger-full-access`. It also covers commands and skills whose frontmatter
+pre-approves tools (`allowed-tools`) and commands that run shell snippets (``!`cmd` ``).
 
 ### Rules: `rules/<name>.md`
 
@@ -213,11 +214,18 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
    - it sits under a secret-sounding name (`*_TOKEN`, `*_KEY`, `password`, `Authorization` ...);
    - it is a high-entropy opaque string.
 
-   Redaction covers env values, headers, flags in `args`, URL credentials and query
-   parameters. Known token formats are also redacted from instructions, rules, commands
-   and skill files.
-2. **The profile is checked before it is written.** If anything still matches a known token
-   format, kitbag refuses to write the profile at all.
+   Redaction covers env values, headers, URL credentials and query parameters. It also covers
+   secrets passed through `args`, as in `--api-key=…`, `--token …`, `NAME=value` (e.g.
+   `docker -e`), `Authorization: Bearer …` (e.g. `mcp-remote --header`) and URLs.
+   Known token formats are also redacted from instructions, rules, commands and skill files.
+   Credential files inside skills are left out of the profile with a warning. This covers
+   key files, `credentials.json`, `.env`, JSON/TOML/YAML files with secret-named values, and
+   binaries containing tokens.
+   Two servers with different secrets under the same key get separate variables
+   (`API_KEY`, `MONGO_API_KEY`).
+2. **The profile is checked before it is written.** If anything still looks like a credential
+   (the same checks as capture), kitbag refuses to write the profile at all. `kitbag doctor`
+   runs the same check on any profile.
 3. **Apply prefers references.** Tools that expand env vars get references in their own syntax,
    so the secret never touches disk. Codex gets `env_vars`, `bearer_token_env_var` and
    `env_http_headers`, which read from the environment at runtime.
@@ -227,8 +235,10 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
    masked as `••••••••` in every diff. New files containing resolved values are created `0600`.
    `--secrets never` keeps the `${VAR}` placeholder instead. Unset variables are reported and
    left as placeholders.
-5. **Profiles from git are untrusted input.** kitbag rejects symlinks inside a profile, which
-   could otherwise copy files such as `~/.ssh/id_rsa` into a tool's config. It rejects path
+5. **Profiles from git are untrusted input.** kitbag rejects symlinks inside a profile, both
+   files and directories, including a `--path` sub-directory. A symlink could otherwise copy
+   files such as `~/.ssh/id_rsa` into a tool's config. Profile text can't break out of its
+   managed block, because kitbag markers inside content are neutralised. It rejects path
    tricks in names and sub-directories, applies only allow-listed settings, and lists every
    command the configured MCP servers will run before you confirm.
 
@@ -246,6 +256,8 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
   Re-applying replaces the block in place. Paragraphs already in your own text are not
   duplicated into the block.
 - **Idempotent.** Applying the same profile twice changes nothing.
+- **Symlinks are respected.** If a config file is a symlink (say into a dotfiles repo), kitbag
+  writes to its target and the link stays a link, including after undo.
 - **Backups and undo.** Every apply is a transaction. The originals are copied to the state
   directory first, writes are atomic, and a failure part-way through rolls back.
   `kitbag history` lists applies, and `kitbag undo [id]` restores them byte for byte. Undo
@@ -262,7 +274,7 @@ already applied to. Use `kitbag undo`, or remove it in the tool.
 | Command | What it does |
 |---|---|
 | `kitbag init [DIR]` | Write a commented starter profile |
-| `kitbag capture [--from IDS] [-o DIR] [--dry-run]` | Read the current setup into a profile (secrets redacted) |
+| `kitbag capture [--from IDS] [-o DIR] [--dry-run] [--force]` | Read the current setup into a profile (secrets redacted). Writes only into a new or empty directory. `--force` replaces an existing profile's files and leaves anything else in the directory alone |
 | `kitbag diff <SOURCE> [--to IDS] [--exit-code]` | Show exactly what `apply` would change; never writes |
 | `kitbag apply <SOURCE> [--to IDS] [--yes] [--dry-run]` | Plan, confirm, write with backups |
 | `kitbag undo [ID] [--force]` | Revert the latest (or a specific) apply |

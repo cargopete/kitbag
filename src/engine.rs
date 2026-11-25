@@ -1,6 +1,6 @@
 //! High-level operations: capture from several tools, plan an apply, commit it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -9,7 +9,7 @@ use crate::adapters::{Adapter, ApplyOptions, Env, Feature, Level, Note, Support,
 use crate::model::Profile;
 use crate::plan_fs::FileChange;
 use crate::policy;
-use crate::secrets::Redaction;
+use crate::secrets::{Redaction, env_var_name, reference};
 use crate::txn::{Store, Transaction, WriteOptions};
 
 /// The merged result of capturing one or more targets.
@@ -103,8 +103,47 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
             merged.settings.entry(t).or_insert(s);
         }
     }
+    dedupe_env_vars(&mut out);
     out.profile.sort();
     Ok(out)
+}
+
+/// Redaction names env vars after the key they came from (`API_KEY`), so two
+/// servers with different secrets under the same key would end up sharing one
+/// variable. Give later servers their own, prefixed variable instead.
+fn dedupe_env_vars(out: &mut CaptureResult) {
+    let mut owner: BTreeMap<String, String> = BTreeMap::new();
+    for r in &mut out.redactions {
+        let Some(rest) = r.location.strip_prefix("mcp_servers.") else {
+            continue;
+        };
+        let Some(server) = out
+            .profile
+            .mcp_servers
+            .keys()
+            .filter(|n| rest.starts_with(&format!("{n}.")))
+            .max_by_key(|n| n.len())
+            .cloned()
+        else {
+            continue;
+        };
+        match owner.get(&r.env_var) {
+            None => {
+                owner.insert(r.env_var.clone(), server);
+            }
+            Some(o) if *o == server => {}
+            Some(_) => {
+                let new = env_var_name(&[&server, &r.env_var]);
+                let field = &rest[server.len() + 1..];
+                let (old_ref, new_ref) = (reference(&r.env_var), reference(&new));
+                if let Some(s) = out.profile.mcp_servers.get_mut(&server) {
+                    s.map_string_at(field, |v| v.replace(&old_ref, &new_ref));
+                }
+                owner.insert(new.clone(), server);
+                r.env_var = new;
+            }
+        }
+    }
 }
 
 /// Everything `apply` would do, computed without touching disk.
@@ -186,7 +225,7 @@ pub fn plan(
             })
         })
         .collect();
-    let risky = applied
+    let mut risky: Vec<String> = applied
         .iter()
         .filter_map(|t| profile.settings.get(t).map(|s| (t, s)))
         .flat_map(|(t, s)| {
@@ -194,6 +233,9 @@ pub fn plan(
             policy::risky(t, &allowed)
         })
         .collect();
+    if !applied.is_empty() {
+        risky.extend(policy::risky_content(profile));
+    }
     let mut notes: Vec<Note> = Vec::new();
     for n in work.notes {
         if !notes.contains(&n) {
@@ -222,8 +264,7 @@ pub fn commit(plan: &Plan, description: &str, state_dir: &Path) -> Result<Option
         .iter()
         .filter(|c| {
             c.after.as_ref().is_some_and(|a| {
-                let text = String::from_utf8_lossy(a);
-                plan.sensitive.iter().any(|s| text.contains(s.as_str()))
+                crate::secrets::contains_any(&String::from_utf8_lossy(a), &plan.sensitive)
             })
         })
         .map(|c| c.path.clone())

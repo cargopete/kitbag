@@ -90,6 +90,16 @@ pub fn json_to_table(m: &Map<String, Value>) -> Table {
     t
 }
 
+/// Set `key` to `val`, keeping the comments and whitespace around an existing value.
+pub fn set_keep_decor(table: &mut Table, key: &str, mut val: toml_edit::Value) {
+    if let Some(cur) = table.get_mut(key).and_then(Item::as_value_mut) {
+        *val.decor_mut() = cur.decor().clone();
+        *cur = val;
+        return;
+    }
+    table.insert(key, Item::Value(val));
+}
+
 /// Get or create the table at `path` (creating implicit parent tables).
 pub fn table_mut<'a>(doc: &'a mut DocumentMut, path: &[&str]) -> Result<&'a mut Table> {
     let mut cur = doc.as_table_mut();
@@ -134,6 +144,13 @@ mod tests {
         );
         let back = parse(Some(&out), Path::new("c.toml")).unwrap();
         assert_eq!(item_to_json(&back["mcp_servers"]["b"]), def);
+    }
+
+    #[test]
+    fn set_keeps_comments() {
+        let mut doc = parse(Some("# head\nmodel = \"a\" # why\n"), Path::new("c.toml")).unwrap();
+        set_keep_decor(doc.as_table_mut(), "model", "b".into());
+        assert_eq!(doc.to_string(), "# head\nmodel = \"b\" # why\n");
     }
 
     #[test]

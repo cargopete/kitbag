@@ -353,6 +353,31 @@ pub fn merge_settings(a: &Value, b: &Value) -> Value {
     }
 }
 
+/// Like [`merge_settings`], but existing scalar values win at every depth.
+/// Sets `kept` when a differing value was kept.
+pub fn merge_settings_keep(a: &Value, b: &Value, kept: &mut bool) -> Value {
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) => {
+            let mut out = x.clone();
+            for (k, v) in y {
+                let merged = match x.get(k) {
+                    Some(cur) => merge_settings_keep(cur, v, kept),
+                    None => v.clone(),
+                };
+                out.insert(k.clone(), merged);
+            }
+            Value::Object(out)
+        }
+        (Value::Array(_), Value::Array(_)) => merge_settings(a, b),
+        (a, b) => {
+            if a != b {
+                *kept = true;
+            }
+            a.clone()
+        }
+    }
+}
+
 /// Merge allow-listed settings into the top level of a JSON settings file.
 pub fn merge_json_settings(
     work: &mut Work,
@@ -370,18 +395,22 @@ pub fn merge_json_settings(
     let mut changed = false;
     for (k, v) in settings {
         let cur = current.get(k);
-        let next = cur.map_or_else(|| v.clone(), |c| merge_settings(c, v));
+        let next = match cur {
+            None => v.clone(),
+            Some(c) if opts.overwrite => merge_settings(c, v),
+            Some(c) => {
+                let mut kept = false;
+                let merged = merge_settings_keep(c, v, &mut kept);
+                if kept {
+                    work.warn(
+                        target,
+                        format!("kept existing value(s) of setting '{k}' in {} because --no-overwrite was given", path.display()),
+                    );
+                }
+                merged
+            }
+        };
         if cur == Some(&next) {
-            continue;
-        }
-        if cur.is_some_and(|c| !c.is_object() && !c.is_array()) && !opts.overwrite {
-            work.warn(
-                target,
-                format!(
-                    "kept existing setting '{k}' in {} because --no-overwrite was given",
-                    path.display()
-                ),
-            );
             continue;
         }
         doc.set(&[k], &next);
@@ -668,6 +697,10 @@ pub fn capture_skills_dir(cap: &mut Captured, dir: &Path, target: &str) -> Resul
             let Some(bytes) = read_opt(&join_rel(&skill_dir, &rel))? else {
                 continue;
             };
+            if let Some(why) = crate::secrets::sensitive_file(&rel, &bytes) {
+                cap.warn(target, format!("skipped skill file '{name}/{rel}': {why}; keep it out of the profile and provide it locally"));
+                continue;
+            }
             let content = match String::from_utf8(bytes) {
                 Ok(text) => {
                     let (red, kinds) = redact_text(&text);

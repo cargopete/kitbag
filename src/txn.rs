@@ -118,6 +118,22 @@ fn file_mode(path: &Path) -> Option<u32> {
     }
 }
 
+/// Where a write to `path` should land: the target of a symlink (so a config
+/// file linked from a dotfiles repo stays a link), otherwise `path` itself.
+pub fn resolve_link(path: &Path) -> PathBuf {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => fs::canonicalize(path).unwrap_or_else(|_| {
+            // Dangling link: follow it by hand so the file is created where it points.
+            match fs::read_link(path) {
+                Ok(t) if t.is_absolute() => t,
+                Ok(t) => path.parent().map_or(t.clone(), |p| p.join(&t)),
+                Err(_) => path.to_path_buf(),
+            }
+        }),
+        _ => path.to_path_buf(),
+    }
+}
+
 /// `mkdir -p` that records which directories it created.
 fn mkdirp(dir: &Path, created: &mut Vec<PathBuf>) -> Result<()> {
     let mut missing = Vec::new();
@@ -230,12 +246,13 @@ impl Store {
                         _ => {}
                     },
                     Some(content) => {
-                        let parent = c.path.parent().context("path has no parent")?;
+                        let dest = resolve_link(&c.path);
+                        let parent = dest.parent().context("path has no parent")?;
                         mkdirp(parent, &mut tx.created_dirs)?;
                         let mode = tx.entries[i]
                             .mode
                             .or(opts.private.contains(&c.path).then_some(0o600));
-                        write_atomic(&c.path, content, mode)?;
+                        write_atomic(&dest, content, mode)?;
                     }
                 }
                 done = i + 1;
@@ -295,10 +312,11 @@ impl Store {
                 (Some(b), true) => {
                     let data = fs::read(self.tx_dir(&tx.id).join(b))
                         .with_context(|| format!("reading backup of {}", e.path.display()))?;
-                    if let Some(parent) = e.path.parent() {
+                    let dest = resolve_link(&e.path);
+                    if let Some(parent) = dest.parent() {
                         fs::create_dir_all(parent)?;
                     }
-                    write_atomic(&e.path, &data, e.mode)?;
+                    write_atomic(&dest, &data, e.mode)?;
                 }
                 _ => match fs::remove_file(&e.path) {
                     Err(err) if err.kind() != io::ErrorKind::NotFound => {
@@ -510,6 +528,41 @@ mod tests {
         store.undo(None, false).unwrap();
         store.undo(None, false).unwrap();
         assert!(!f.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writes_through_symlinks_and_undo_keeps_them() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path().join("state"));
+        let real = root.path().join("dotfiles/CLAUDE.md");
+        fs::create_dir_all(real.parent().unwrap()).unwrap();
+        fs::write(&real, "original").unwrap();
+        let link = root.path().join("CLAUDE.md");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        store
+            .commit(
+                &[change(&link, Some("updated"))],
+                "t",
+                &[],
+                &WriteOptions::default(),
+            )
+            .unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&real).unwrap(), "updated");
+        store.undo(None, false).unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&real).unwrap(), "original");
     }
 
     #[cfg(unix)]

@@ -28,7 +28,7 @@ pub fn allowed_keys(target: &str) -> &'static [&'static str] {
             "web_search",
             "file_opener",
         ],
-        "gemini-cli" => &["model", "context", "general", "ui"],
+        "gemini-cli" => &["model", "ui"],
         _ => &[],
     }
 }
@@ -103,6 +103,48 @@ pub fn risky(target: &str, settings: &Map<String, Value>) -> Vec<String> {
             }
         }
         _ => {}
+    }
+    out
+}
+
+/// Commands and skills that pre-approve tools or run shell commands when used.
+pub fn risky_content(profile: &crate::model::Profile) -> Vec<String> {
+    let mut out = Vec::new();
+    let tools = |v: &Value| match v {
+        Value::String(s) => s.clone(),
+        Value::Array(a) => a
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", "),
+        other => other.to_string(),
+    };
+    for c in &profile.commands {
+        if let Some(v) = c.extra.get("allowed-tools") {
+            out.push(format!(
+                "command '{}' pre-approves tools: {}",
+                c.name,
+                tools(v)
+            ));
+        }
+        if c.body.contains("!`") {
+            out.push(format!(
+                "command '{}' runs shell commands when invoked (!`...`)",
+                c.name
+            ));
+        }
+    }
+    for s in &profile.skills {
+        if let Some(main) = s.main_file() {
+            let text = String::from_utf8_lossy(&main.content);
+            if let Some(v) = crate::frontmatter::parse(&text).data.get("allowed-tools") {
+                out.push(format!(
+                    "skill '{}' pre-approves tools: {}",
+                    s.name,
+                    tools(v)
+                ));
+            }
+        }
     }
     out
 }

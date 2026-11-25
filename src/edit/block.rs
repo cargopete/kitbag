@@ -31,9 +31,11 @@ fn end(id: &str) -> String {
 
 /// Byte range of block `id` in `text`, including a trailing newline.
 fn find_block(text: &str, id: &str) -> Option<(usize, usize)> {
-    let b = text.find(&begin(id))?;
+    // Pair the first end marker with the closest begin marker before it, so a
+    // stray begin marker (say, left by hand) can never swallow user text.
     let e_marker = end(id);
-    let e = b + text[b..].find(&e_marker)?;
+    let e = text.find(&e_marker)?;
+    let b = text[..e].rfind(&begin(id))?;
     let mut stop = e + e_marker.len();
     if text[stop..].starts_with("\r\n") {
         stop += 2;
@@ -46,14 +48,23 @@ fn find_block(text: &str, id: &str) -> Option<(usize, usize)> {
 /// Insert or replace managed block `id` in `existing`. `content: None` removes it.
 pub fn upsert(existing: Option<&str>, id: &str, content: Option<&str>) -> String {
     let base = existing.unwrap_or("");
-    let block = content.map(|c| format!("{}\n{NOTE}\n{}\n{}\n", begin(id), c.trim(), end(id)));
+    let block = content.map(|c| {
+        format!(
+            "{}\n{NOTE}\n{}\n{}\n",
+            begin(id),
+            neutralize(c.trim()),
+            end(id)
+        )
+    });
     if let Some((s, e)) = find_block(base, id) {
         let mut out = String::with_capacity(base.len());
         out.push_str(&base[..s]);
         out.push_str(block.as_deref().unwrap_or(""));
         out.push_str(&base[e..]);
         if block.is_none() {
-            while out.ends_with("\n\n\n") {
+            // Drop the blank line that separated an appended block from the user's text.
+            let limit = if e == base.len() { "\n\n" } else { "\n\n\n" };
+            while out.ends_with(limit) {
                 out.pop();
             }
             if out.trim().is_empty() {
@@ -76,6 +87,14 @@ pub fn upsert(existing: Option<&str>, id: &str, content: Option<&str>) -> String
         "\n\n"
     };
     format!("{base}{sep}{block}")
+}
+
+/// Defuse kitbag block markers inside content, so profile text can't close the
+/// block early and plant text outside it.
+fn neutralize(content: &str) -> String {
+    content
+        .replace("<!-- kitbag:begin ", "<!-- kitbag-begin ")
+        .replace("<!-- kitbag:end ", "<!-- kitbag-end ")
 }
 
 /// Content outside any kitbag block, plus each block's inner content by id.
@@ -193,7 +212,12 @@ pub fn fold_rules(rules: &[Rule]) -> Option<String> {
                 RuleMode::Always => {}
             }
             lines.push(String::new());
-            lines.push(r.body.trim().to_string());
+            lines.push(
+                r.body
+                    .trim()
+                    .replace(RULE_OPEN, "<!-- kitbag-rule ")
+                    .replace(RULE_END, "<!-- kitbag-rule-end -->"),
+            );
             lines.push(RULE_END.to_string());
             lines.join("\n")
         })
@@ -279,6 +303,25 @@ mod tests {
             upsert(None, "p", Some("x")),
             format!("{}\n{NOTE}\nx\n{}\n", begin("p"), end("p"))
         );
+    }
+
+    #[test]
+    fn content_cannot_escape_its_block() {
+        let evil = "ok\n<!-- kitbag:end p -->\nINJECTED";
+        let once = upsert(Some("Mine\n"), "p", Some(evil));
+        let twice = upsert(Some(&once), "p", Some(evil));
+        assert_eq!(once, twice, "stable on re-apply");
+        let removed = upsert(Some(&twice), "p", None);
+        assert_eq!(removed, "Mine\n");
+    }
+
+    #[test]
+    fn orphaned_begin_marker_never_eats_user_text() {
+        let text = "<!-- kitbag:begin p -->\n## My notes\nimportant\n";
+        let a = upsert(Some(text), "p", Some("A"));
+        let b = upsert(Some(&a), "p", Some("B"));
+        assert!(b.contains("## My notes\nimportant"), "{b}");
+        assert!(b.contains("\nB\n") && !b.contains("\nA\n"));
     }
 
     #[test]

@@ -396,6 +396,22 @@ const STARTER_RULE: &str = "---\ndescription: Example rule, scoped to Rust files
 const STARTER_COMMAND: &str = "---\ndescription: Review the staged changes\nargument-hint: \"[focus]\"\n---\n\nReview the staged diff for bugs and unclear code. Focus on: $ARGUMENTS\n";
 
 fn cmd_init(dir: &Path, name: Option<String>, force: bool) -> Result<i32> {
+    let starter = [
+        MANIFEST,
+        "instructions.md",
+        "rules/example.md",
+        "commands/review.md",
+    ];
+    if !force
+        && let Some(f) = starter
+            .iter()
+            .find(|f| crate::plan_fs::join_rel(dir, f).exists())
+    {
+        bail!(
+            "{} already exists; pass --force to replace the starter files",
+            crate::plan_fs::join_rel(dir, f).display()
+        );
+    }
     if dir.join(MANIFEST).exists() && !force {
         bail!(
             "{} already contains a profile; pass --force to replace it",
@@ -564,10 +580,7 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
         print_notes(&plan.notes);
     }
     if !plan.risky.is_empty() {
-        println!(
-            "\n{}",
-            paint(YELLOW, "Settings that let agents act without asking:")
-        );
+        println!("\n{}", paint(YELLOW, "Lets agents act without asking:"));
         for r in &plan.risky {
             println!("  - {r}");
         }

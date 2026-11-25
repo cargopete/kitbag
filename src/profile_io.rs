@@ -15,7 +15,7 @@ use crate::frontmatter::{self, glob_list, opt, string};
 use crate::model::{
     Command, FORMAT_VERSION, McpServer, Profile, Rule, Skill, SkillFile, is_valid_name,
 };
-use crate::secrets::{refs_in, strong_secret_kind};
+use crate::secrets::{redact_server, refs_in, sensitive_file, strong_secret_kind};
 
 pub const MANIFEST: &str = "kitbag.toml";
 const MAX_SKILL_FILES: usize = 200;
@@ -130,6 +130,12 @@ fn read_profile_text(path: &Path) -> Result<Option<String>> {
 
 /// Directory entries `(name, is_dir)`, sorted; rejects symlinks. Missing dir -> empty.
 fn list_profile_dir(dir: &Path) -> Result<Vec<(String, bool)>> {
+    if fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
+        anyhow::bail!(
+            "symbolic links are not allowed in a profile: {}",
+            dir.display()
+        );
+    }
     let rd = match fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -399,16 +405,6 @@ pub fn profile_files(p: &Profile) -> BTreeMap<String, Vec<u8>> {
 /// and refuses outright if anything still looks like a credential.
 pub fn save(p: &Profile, dir: &Path, force: bool) -> Result<Vec<PathBuf>> {
     let manifest = dir.join(MANIFEST);
-    if manifest.exists() && !force {
-        return Err(ProfileError::new(
-            format!(
-                "{} already contains a profile; pass --force to replace it",
-                dir.display()
-            ),
-            vec![],
-        )
-        .into());
-    }
     let leaks = scan_for_secrets(p);
     if !leaks.is_empty() {
         return Err(ProfileError::new(
@@ -417,21 +413,50 @@ pub fn save(p: &Profile, dir: &Path, force: bool) -> Result<Vec<PathBuf>> {
         )
         .into());
     }
-    if force {
-        // Drop content from a previous capture so removed items don't linger.
-        for sub in ["rules", "commands", "skills"] {
-            let d = dir.join(sub);
-            if d.is_dir() {
-                fs::remove_dir_all(&d).with_context(|| format!("removing {}", d.display()))?;
+    let new_files = profile_files(p);
+    if manifest.exists() {
+        if !force {
+            return Err(ProfileError::new(
+                format!(
+                    "{} already contains a profile; pass --force to replace it",
+                    dir.display()
+                ),
+                vec![],
+            )
+            .into());
+        }
+        // Remove only files that belonged to the previous profile and are no
+        // longer part of it; anything else in the directory (README, .git) stays.
+        let old = load(dir).with_context(|| {
+            format!("the existing profile in {} can't be read, so it won't be replaced; fix or remove it first", dir.display())
+        })?;
+        for rel in profile_files(&old)
+            .keys()
+            .filter(|k| !new_files.contains_key(*k))
+        {
+            let abs = crate::plan_fs::join_rel(dir, rel);
+            fs::remove_file(&abs).with_context(|| format!("removing {}", abs.display()))?;
+            // Tidy now-empty directories up to the profile root.
+            let mut d = abs.parent().map(Path::to_path_buf);
+            while let Some(cur) = d {
+                if cur == dir || fs::remove_dir(&cur).is_err() {
+                    break;
+                }
+                d = cur.parent().map(Path::to_path_buf);
             }
         }
-        let i = dir.join("instructions.md");
-        if i.exists() {
-            fs::remove_file(&i)?;
-        }
+    } else if fs::read_dir(dir).is_ok_and(|mut rd| rd.next().is_some()) {
+        return Err(ProfileError::new(
+            format!(
+                "{} is not empty and is not a kitbag profile; choose a new or empty directory",
+                dir.display()
+            ),
+            vec![],
+        )
+        .into());
     }
     let mut written = Vec::new();
-    for (rel, content) in profile_files(p) {
+    for (rel, content) in new_files {
         let abs = crate::plan_fs::join_rel(dir, &rel);
         if let Some(parent) = abs.parent() {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
@@ -445,6 +470,7 @@ pub fn save(p: &Profile, dir: &Path, force: bool) -> Result<Vec<PathBuf>> {
 /// Last line of defence: anything in the profile that still looks like a credential.
 pub fn scan_for_secrets(p: &Profile) -> Vec<String> {
     let mut out = Vec::new();
+    let mut out_extra = Vec::new();
     let mut check = |where_: String, v: &str| {
         if let Some(k) = strong_secret_kind(v) {
             out.push(format!("{where_}: looks like a {k}"));
@@ -453,6 +479,10 @@ pub fn scan_for_secrets(p: &Profile) -> Vec<String> {
     for (n, s) in &p.mcp_servers {
         for (loc, v) in s.strings() {
             check(format!("mcp_servers.{n}.{loc}"), v);
+        }
+        // Anything capture-time redaction would still replace is a secret too.
+        for r in redact_server(n, s).1 {
+            out_extra.push(format!("{}: looks like a {}", r.location, r.reason));
         }
     }
     for (t, m) in &p.settings {
@@ -475,8 +505,13 @@ pub fn scan_for_secrets(p: &Profile) -> Vec<String> {
             if let Ok(t) = std::str::from_utf8(&f.content) {
                 check(format!("skills/{}/{}", s.name, f.path), t);
             }
+            if let Some(why) = sensitive_file(&f.path, &f.content) {
+                out_extra.push(format!("skills/{}/{}: {why}", s.name, f.path));
+            }
         }
     }
+    out.extend(out_extra);
+    out.dedup();
     out
 }
 
@@ -564,6 +599,41 @@ mod tests {
         // Refuses to clobber without force.
         assert!(save(&p, dir.path(), false).is_err());
         save(&p, dir.path(), true).unwrap();
+    }
+
+    #[test]
+    fn force_only_replaces_profile_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = sample();
+        save(&p, dir.path(), false).unwrap();
+        fs::write(dir.path().join("README.md"), "mine").unwrap();
+        fs::write(dir.path().join("commands/notes.txt"), "mine too").unwrap();
+        p.commands.clear();
+        p.rules.clear();
+        save(&p, dir.path(), true).unwrap();
+        assert!(!dir.path().join("commands/review.md").exists());
+        assert!(
+            !dir.path().join("rules").exists(),
+            "emptied directories are removed"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("README.md")).unwrap(),
+            "mine"
+        );
+        assert!(dir.path().join("commands/notes.txt").exists());
+        assert_eq!(load(dir.path()).unwrap(), p);
+    }
+
+    #[test]
+    fn refuses_non_empty_non_profile_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("commands")).unwrap();
+        fs::write(dir.path().join("commands/deploy.sh"), "echo").unwrap();
+        for force in [false, true] {
+            let e = save(&sample(), dir.path(), force).unwrap_err();
+            assert!(e.to_string().contains("not a kitbag profile"), "{e}");
+        }
+        assert!(dir.path().join("commands/deploy.sh").exists());
     }
 
     #[test]
