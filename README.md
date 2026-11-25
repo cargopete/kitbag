@@ -290,7 +290,7 @@ already applied to. Use `kitbag undo`, or remove it in the tool.
 | Command | What it does |
 |---|---|
 | `kitbag init [DIR]` | Write a commented starter profile |
-| `kitbag capture [--from IDS] [-o DIR] [--dry-run] [--force]` | Read the current setup into a profile (secrets redacted). Writes only into a new or empty directory. `--force` replaces an existing profile's files and leaves anything else in the directory alone |
+| `kitbag capture [--from IDS] [-o DIR] [--dry-run] [--force]` | Read the current setup into a profile (secrets redacted). Writes only into a new or empty directory. `--force` replaces an existing profile's files and leaves anything else in the directory alone. With several tools, one whose config can't be read is reported and the rest are captured |
 | `kitbag diff <SOURCE> [--to IDS] [--exit-code]` | Show exactly what `apply` would change; never writes |
 | `kitbag apply <SOURCE> [--to IDS] [--yes] [--dry-run]` | Plan, confirm, write with backups |
 | `kitbag undo [ID] [--force]` | Revert the latest (or a specific) apply |

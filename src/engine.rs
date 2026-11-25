@@ -30,11 +30,18 @@ fn note(level: Level, target: &str, message: String) -> Note {
 }
 
 /// Capture from `targets` and merge. Earlier targets win on name conflicts.
+///
+/// With several targets, one whose config can't be read is reported and the
+/// rest are still captured; it is an error only if none could be read. A
+/// single target fails loudly.
 pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<CaptureResult> {
     let mut out = CaptureResult {
         profile: Profile::new(name),
         ..Default::default()
     };
+    let tolerant = targets.len() > 1;
+    let mut failures = Vec::new();
+    let mut read = 0;
     for a in targets {
         if !a.scopes().contains(&env.scope) {
             out.notes.push(note(
@@ -44,7 +51,20 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
             ));
             continue;
         }
-        let c = a.capture(env)?;
+        let c = match a.capture(env) {
+            Ok(c) => c,
+            Err(e) if tolerant => {
+                out.notes.push(note(
+                    Level::Warn,
+                    a.id(),
+                    format!("skipped {}: {e:#}", a.name()),
+                ));
+                failures.push(format!("{}: {e:#}", a.id()));
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        read += 1;
         out.notes.extend(c.notes);
         for s in c.sources {
             if !out.sources.contains(&s) {
@@ -102,6 +122,15 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
         for (t, s) in c.profile.settings {
             merged.settings.entry(t).or_insert(s);
         }
+    }
+    if read == 0 && !failures.is_empty() {
+        anyhow::bail!(
+            "none of the selected tools could be read:{}",
+            failures
+                .iter()
+                .map(|f| format!("\n  - {f}"))
+                .collect::<String>()
+        );
     }
     dedupe_env_vars(&mut out);
     out.profile.sort();

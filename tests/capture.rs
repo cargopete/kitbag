@@ -338,3 +338,35 @@ fn malformed_server_entries_are_reported() {
     assert!(warned(&r, "expected an object of servers, found an array"));
     assert!(warned(&r, "ignored 'mcp_servers' in"));
 }
+
+#[test]
+fn one_broken_tool_does_not_stop_a_multi_tool_capture() {
+    let sb = Sandbox::empty();
+    write(
+        &sb,
+        ".claude.json",
+        r#"{"mcpServers": {"a": {"command": "a-mcp"}}}"#,
+    );
+    write(&sb, ".codex/config.toml", "[mcp_servers.b\ncommand = 1\n");
+    for from in ["all", "detected", "claude-code,codex"] {
+        sb.cli()
+            .args(["capture", "--from", from, "--dry-run"])
+            .assert()
+            .success()
+            .stdout(contains("skipped OpenAI Codex CLI").and(contains("invalid TOML")))
+            .stdout(contains("1 MCP server(s)"));
+    }
+    // Asking for the broken tool alone still fails loudly.
+    sb.cli()
+        .args(["capture", "--from", "codex", "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(contains("invalid TOML"));
+    // So does a capture where nothing could be read.
+    fs::write(sb.home().join(".claude.json"), "{ nope").unwrap();
+    sb.cli()
+        .args(["capture", "--from", "claude-code,codex", "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(contains("none of the selected tools could be read"));
+}

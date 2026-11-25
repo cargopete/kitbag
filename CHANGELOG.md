@@ -28,3 +28,4 @@ All notable changes to this project are documented here. The format follows
 - Capture skips files over the 2 MiB profile limit (and skills beyond 200 files) with a warning, so it no longer writes profiles that `apply` refuses.
 - Capture lists Claude Code subagents, output styles and plugins it found but doesn't carry, and drops an `outputStyle` setting that names a custom style.
 - Malformed server entries (`"mcpServers": []`, a server that isn't an object) are reported instead of silently ignored.
+- `capture` with several tools (`--from all`, `detected` or a list) reports a tool whose config can't be read and captures the rest; it fails only if nothing could be read. A single `--from` still fails loudly.
