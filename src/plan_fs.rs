@@ -147,6 +147,7 @@ fn confined_inner(
 ) -> io::Result<()> {
     let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<io::Result<Vec<_>>>()?;
     entries.sort_by_key(|e| e.file_name());
+    let mut subdirs = Vec::new();
     for e in entries {
         let name = e.file_name().to_string_lossy().into_owned();
         if name.starts_with('.') || name == "node_modules" {
@@ -197,26 +198,33 @@ fn confined_inner(
             }
         };
         if meta.is_dir() {
-            if ancestors.contains(&real) {
-                out.skipped.push(format!("{rel}: symbolic link loop"));
-                continue;
-            }
-            if ancestors.len() > 8 {
-                out.skipped.push(format!("{rel}: nested too deeply"));
-                continue;
-            }
-            ancestors.push(real);
-            let res = confined_inner(root, &e.path(), &rel, ancestors, max, out);
-            ancestors.pop();
-            if let Err(err) = res {
-                out.skipped.push(format!("{rel}: {err}"));
-            }
+            subdirs.push((e.path(), rel, real));
         } else if meta.is_file() {
             if out.files.len() >= max {
                 out.truncated = true;
                 return Ok(());
             }
             out.files.push(rel);
+        }
+    }
+    // Files first, so a skill over the limit still keeps its top-level SKILL.md.
+    for (path, rel, real) in subdirs {
+        if ancestors.contains(&real) {
+            out.skipped.push(format!("{rel}: symbolic link loop"));
+            continue;
+        }
+        if ancestors.len() > 8 {
+            out.skipped.push(format!("{rel}: nested too deeply"));
+            continue;
+        }
+        ancestors.push(real);
+        let res = confined_inner(root, &path, &rel, ancestors, max, out);
+        ancestors.pop();
+        if let Err(err) = res {
+            out.skipped.push(format!("{rel}: {err}"));
+        }
+        if out.truncated {
+            return Ok(());
         }
     }
     Ok(())
@@ -525,6 +533,34 @@ mod tests {
             p.write(&project.join("AGENTS.md"), "x").is_err(),
             "dangling links are refused"
         );
+    }
+
+    #[test]
+    fn confined_walk_keeps_top_level_files_when_truncating() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("A")).unwrap();
+        for i in 0..5 {
+            fs::write(dir.path().join(format!("A/{i}.md")), "").unwrap();
+        }
+        fs::write(dir.path().join("SKILL.md"), "").unwrap();
+        let w = walk_confined(dir.path(), 3).unwrap();
+        assert_eq!(w.files, vec!["A/0.md", "A/1.md", "SKILL.md"]);
+        assert!(w.truncated);
+    }
+
+    #[test]
+    fn decodes_text() {
+        assert_eq!(decode_text(b"\xEF\xBB\xBFhi".to_vec()).unwrap(), "hi");
+        assert_eq!(
+            decode_text(vec![0xFF, 0xFE, b'h', 0, b'i', 0]).unwrap(),
+            "hi"
+        );
+        assert_eq!(
+            decode_text(vec![0xFE, 0xFF, 0, b'h', 0, b'i']).unwrap(),
+            "hi"
+        );
+        assert!(decode_text(vec![0xFF, 0xFE, b'h']).is_err(), "odd length");
+        assert!(decode_text(b"caf\xE9".to_vec()).is_err());
     }
 
     #[test]
