@@ -22,7 +22,12 @@ jobs:
       - name: Check the tag matches Cargo.toml
         run: |
           version="$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)"
-          test "v$version" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != v$version"; exit 1; }
+          # vX.Y.Z must match Cargo.toml exactly; release candidates vX.Y.Z-rc.N are allowed
+          # for a matching X.Y.Z (they publish as draft prereleases for testing).
+          case "${GITHUB_REF_NAME}" in
+            "v$version" | "v$version"-*) ;;
+            *) echo "tag ${GITHUB_REF_NAME} != v$version"; exit 1 ;;
+          esac
       - uses: taiki-e/create-gh-release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
