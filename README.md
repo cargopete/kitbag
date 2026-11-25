@@ -225,7 +225,10 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
    `:${DB_PASSWORD}@`, `:xxx@`) are left alone.
    Credential files inside skills are left out of the profile with a warning. This covers
    key files, `credentials.json`, `.env`, JSON/TOML/YAML files with secret-named values, and
-   binaries containing tokens.
+   binaries containing tokens. Symbolic links inside a skill are followed only when they
+   stay inside that skill, so a link such as `etc -> /etc`, `aws -> ~/.aws` or `up -> ..`
+   is skipped with a warning. A skill directory that is itself a link (say into a git
+   checkout) works as usual.
    Two servers with different secrets under the same key get separate variables
    (`API_KEY`, `MONGO_API_KEY`), and identical secrets share one.
 2. **The profile is checked before it is written.** If anything still looks like a credential
@@ -377,6 +380,12 @@ Good next candidates: Windsurf, Zed, VS Code / GitHub Copilot, OpenCode.
 - At project scope, Cursor and Codex both read `AGENTS.md`. When both are targeted, Cursor also
   sees Codex's folded rules section.
 - Apply is additive and doesn't delete entries that were removed from the profile (see above).
+- **Encodings.** Capture reads UTF-8 (with or without a byte-order mark) and UTF-16 with a
+  byte-order mark. Instructions, rules and commands in any other encoding are skipped with a
+  warning. Skill supporting files are copied byte for byte. A UTF-8 byte-order mark at the
+  start of a JSON or TOML config is kept when kitbag writes the file back.
+- **Size limits.** Profile files are limited to 2 MiB and skills to 200 files. Capture skips
+  anything larger with a warning, so it never writes a profile that can't be applied.
 
 ## Development
 

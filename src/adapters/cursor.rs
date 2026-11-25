@@ -17,8 +17,8 @@ use serde_json::{Map, Value, json};
 
 use super::common::{
     add_command, add_instructions, add_rule, capture_instructions, capture_skills_dir,
-    import_server, merge_json_servers, name_from_rel, render_server, server_from_json, servers_for,
-    write_instructions, write_owned, write_skill,
+    import_server, merge_json_servers, name_from_rel, read_text_item, render_server,
+    server_from_json, servers_for, write_instructions, write_owned, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::block;
@@ -209,7 +209,7 @@ impl Adapter for Cursor {
         if let Some(i) = &p.instructions {
             capture_instructions(&mut cap, i, ID)?;
             let legacy = env.project.join(".cursorrules");
-            if let Some(text) = read_text_opt(&legacy)?
+            if let Some(text) = read_text_item(&mut cap, &legacy, ID)
                 && !text.trim().is_empty()
             {
                 cap.sources.push(legacy.clone());
@@ -226,7 +226,7 @@ impl Adapter for Cursor {
                     continue;
                 }
                 let path = join_rel(dir, &rel);
-                let Some(text) = read_text_opt(&path)? else {
+                let Some(text) = read_text_item(&mut cap, &path, ID) else {
                     continue;
                 };
                 let name = name_from_rel(&rel, ".mdc");
@@ -261,7 +261,7 @@ impl Adapter for Cursor {
                 continue;
             }
             let path = join_rel(&p.commands, &rel);
-            let Some(text) = read_text_opt(&path)? else {
+            let Some(text) = read_text_item(&mut cap, &path, ID) else {
                 continue;
             };
             let name = name_from_rel(&rel, ".md");

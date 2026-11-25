@@ -20,8 +20,16 @@ use crate::secrets::{
 };
 
 pub const MANIFEST: &str = "kitbag.toml";
-const MAX_SKILL_FILES: usize = 200;
-const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+/// Most files a skill may have. Capture and loading use the same limit.
+pub const MAX_SKILL_FILES: usize = 200;
+/// Largest file a profile may contain. Capture skips anything bigger, so it
+/// never writes a profile that can't be loaded.
+pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// `MAX_FILE_BYTES` for messages.
+pub fn max_file_size() -> String {
+    format!("{} MiB", MAX_FILE_BYTES / (1024 * 1024))
+}
 
 /// A profile that failed validation, with every problem found.
 #[derive(Debug, thiserror::Error)]
@@ -112,7 +120,7 @@ fn read_profile_file(path: &Path) -> Result<Option<Vec<u8>>> {
         );
     }
     if meta.len() > MAX_FILE_BYTES {
-        anyhow::bail!("{} is larger than 2 MiB", path.display());
+        anyhow::bail!("{} is larger than {}", path.display(), max_file_size());
     }
     Ok(Some(
         fs::read(path).with_context(|| format!("reading {}", path.display()))?,
@@ -416,6 +424,21 @@ pub fn save(p: &Profile, dir: &Path, force: bool) -> Result<Vec<PathBuf>> {
         .into());
     }
     let new_files = profile_files(p);
+    let oversize: Vec<String> = new_files
+        .iter()
+        .filter(|(_, c)| c.len() as u64 > MAX_FILE_BYTES)
+        .map(|(rel, c)| format!("{rel}: {} KiB", c.len() / 1024))
+        .collect();
+    if !oversize.is_empty() {
+        return Err(ProfileError::new(
+            format!(
+                "refusing to write a profile that couldn't be loaded: files are limited to {}",
+                max_file_size()
+            ),
+            oversize,
+        )
+        .into());
+    }
     if manifest.exists() {
         if !force {
             return Err(ProfileError::new(

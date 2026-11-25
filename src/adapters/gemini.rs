@@ -15,9 +15,9 @@ use serde_json::{Map, Value, json};
 
 use super::common::{
     add_command, capture_instructions, capture_skills_dir, import_server, merge_json_servers,
-    merge_json_settings, name_from_rel, pick_settings, render_server, safe_settings,
-    server_from_json, servers_for, skill_with_required_frontmatter, str_of, write_instructions,
-    write_owned, write_skill,
+    merge_json_settings, name_from_rel, pick_settings, read_text_item, render_server,
+    safe_settings, server_from_json, servers_for, skill_with_required_frontmatter, str_of,
+    write_instructions, write_owned, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
@@ -162,7 +162,9 @@ impl Adapter for GeminiCli {
             let path = join_rel(&p.commands, &rel);
             // Gemini namespaces nested commands with ':'; profile names use '-'.
             let name = name_from_rel(&rel, ".toml");
-            let text = read_text_opt(&path)?.unwrap_or_default();
+            let Some(text) = read_text_item(&mut cap, &path, ID) else {
+                continue;
+            };
             match command_from_toml(&name, &text) {
                 Some(c) if is_valid_name(&name) => {
                     cap.sources.push(path);

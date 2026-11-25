@@ -11,9 +11,12 @@ use crate::edit::block;
 use crate::edit::json::JsonDoc;
 use crate::frontmatter;
 use crate::model::{Command, McpServer, Profile, Rule, Skill, SkillFile, Transport, is_valid_name};
-use crate::plan_fs::{join_rel, read_opt, read_text_opt, subdirs, walk_files};
+use crate::plan_fs::{decode_text, join_rel, read_opt, subdirs, walk_confined, walk_files};
 use crate::policy;
-use crate::profile_io::{command_from_markdown, rule_from_markdown, skill_description};
+use crate::profile_io::{
+    MAX_FILE_BYTES, MAX_SKILL_FILES, command_from_markdown, max_file_size, rule_from_markdown,
+    skill_description,
+};
 use crate::secrets::{
     RefStyle, has_redaction_marker, has_ref, is_redacted_form_of, normalize_refs, redact_server,
     redact_text, render_refs,
@@ -65,9 +68,10 @@ fn same_markdown(a: &[u8], b: &[u8]) -> bool {
 /// `cur` (on disk) and `want` (from the profile) compared with `eq` on the
 /// trimmed text, or on frontmatter data plus trimmed body.
 fn markdown_matches(cur: &[u8], want: &[u8], eq: impl Fn(&str, &str) -> bool) -> bool {
-    let (Ok(a), Ok(b)) = (std::str::from_utf8(cur), std::str::from_utf8(want)) else {
+    let (Ok(a), Ok(b)) = (decode_text(cur.to_vec()), std::str::from_utf8(want)) else {
         return false;
     };
+    let a = a.as_str();
     if eq(b.trim(), a.trim()) {
         return true;
     }
@@ -670,9 +674,43 @@ pub fn add_instructions(cap: &mut Captured, target: &str, text: &str, from: &Pat
     append_instructions(cap, &red);
 }
 
+/// Read one text item (instructions, rule, command) for capture: UTF-8, or
+/// UTF-16 with a byte-order mark. Files that are too large, can't be read or
+/// can't be decoded are skipped with a warning instead of failing the capture.
+pub fn read_text_item(cap: &mut Captured, path: &Path, target: &str) -> Option<String> {
+    let skip = |cap: &mut Captured, why: String| {
+        cap.warn(target, format!("skipped {}: {why}", path.display()));
+        None
+    };
+    match std::fs::metadata(path) {
+        Ok(m) if m.len() > MAX_FILE_BYTES => {
+            return skip(
+                cap,
+                format!(
+                    "{} KiB is over the {} limit for profile files",
+                    m.len() / 1024,
+                    max_file_size()
+                ),
+            );
+        }
+        _ => {}
+    }
+    match read_opt(path) {
+        Ok(None) => None,
+        Ok(Some(bytes)) => match decode_text(bytes) {
+            Ok(text) => Some(text),
+            Err(_) => skip(
+                cap,
+                "not valid UTF-8 (or UTF-16 with a byte-order mark)".into(),
+            ),
+        },
+        Err(e) => skip(cap, format!("{e:#}")),
+    }
+}
+
 /// Read an instructions file: user content plus kitbag-managed blocks, with folded rules recovered.
 pub fn capture_instructions(cap: &mut Captured, path: &Path, target: &str) -> Result<()> {
-    let Some(text) = read_text_opt(path)? else {
+    let Some(text) = read_text_item(cap, path, target) else {
         return Ok(());
     };
     if text.trim().is_empty() {
@@ -760,7 +798,7 @@ pub fn capture_markdown_dir(
             continue;
         }
         let path = join_rel(dir, &rel);
-        let Some(text) = read_text_opt(&path)? else {
+        let Some(text) = read_text_item(cap, &path, target) else {
             continue;
         };
         let name = name_from_rel(&rel, ext);
@@ -787,15 +825,69 @@ pub fn capture_skills_dir(cap: &mut Captured, dir: &Path, target: &str) -> Resul
             continue;
         }
         let skill_dir = dir.join(&name);
-        let rels = walk_files(&skill_dir, 200)?;
-        if !rels.iter().any(|r| r == "SKILL.md") {
+        let walk = match walk_confined(&skill_dir, MAX_SKILL_FILES) {
+            Ok(w) => w,
+            Err(e) => {
+                cap.warn(target, format!("skipped skill '{name}': {e:#}"));
+                continue;
+            }
+        };
+        if !walk.files.iter().any(|r| r == "SKILL.md") {
             continue;
         }
+        for why in &walk.skipped {
+            cap.warn(target, format!("skipped skill file '{name}/{why}'"));
+        }
+        if walk.truncated {
+            cap.warn(
+                target,
+                format!("skill '{name}' has more than {MAX_SKILL_FILES} files; only the first {MAX_SKILL_FILES} were captured"),
+            );
+        }
         let mut files = Vec::new();
-        for rel in rels {
-            let Some(bytes) = read_opt(&join_rel(&skill_dir, &rel))? else {
-                continue;
+        let mut broken = false;
+        for rel in walk.files {
+            let path = join_rel(&skill_dir, &rel);
+            let skip = |cap: &mut Captured, why: String| {
+                cap.warn(target, format!("skipped skill file '{name}/{rel}': {why}"));
             };
+            match std::fs::metadata(&path) {
+                Ok(m) if m.len() > MAX_FILE_BYTES => {
+                    skip(
+                        cap,
+                        format!(
+                            "{} KiB is over the {} limit for profile files",
+                            m.len() / 1024,
+                            max_file_size()
+                        ),
+                    );
+                    broken |= rel == "SKILL.md";
+                    continue;
+                }
+                _ => {}
+            }
+            let mut bytes = match read_opt(&path) {
+                Ok(Some(b)) => b,
+                Ok(None) => continue,
+                Err(e) => {
+                    skip(cap, format!("{e:#}"));
+                    broken |= rel == "SKILL.md";
+                    continue;
+                }
+            };
+            if rel == "SKILL.md" {
+                match decode_text(bytes) {
+                    Ok(text) => bytes = text.into_bytes(),
+                    Err(_) => {
+                        skip(
+                            cap,
+                            "not valid UTF-8 (or UTF-16 with a byte-order mark)".into(),
+                        );
+                        broken = true;
+                        continue;
+                    }
+                }
+            }
             if let Some(why) = crate::secrets::sensitive_file(&rel, &bytes) {
                 cap.warn(target, format!("skipped skill file '{name}/{rel}': {why}; keep it out of the profile and provide it locally"));
                 continue;
@@ -814,6 +906,13 @@ pub fn capture_skills_dir(cap: &mut Captured, dir: &Path, target: &str) -> Resul
                 Err(e) => e.into_bytes(),
             };
             files.push(SkillFile { path: rel, content });
+        }
+        if broken {
+            cap.warn(
+                target,
+                format!("skipped skill '{name}': its SKILL.md couldn't be captured"),
+            );
+            continue;
         }
         cap.sources.push(skill_dir);
         cap.profile.skills.push(Skill {

@@ -59,14 +59,167 @@ pub fn read_opt(path: &Path) -> Result<Option<Vec<u8>>> {
     }
 }
 
-/// Read a UTF-8 text file, mapping "not found" to `None`.
+/// The UTF-8 byte-order mark some Windows editors put at the start of a file.
+pub const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
+
+/// Decode a text file: UTF-8 (a byte-order mark is dropped), or UTF-16 LE/BE
+/// with a byte-order mark. Anything else is returned unchanged as the error.
+pub fn decode_text(bytes: Vec<u8>) -> std::result::Result<String, Vec<u8>> {
+    let utf16 = |be: bool| -> Option<String> {
+        let body = &bytes[2..];
+        if !body.len().is_multiple_of(2) {
+            return None;
+        }
+        let units = body.as_chunks::<2>().0.iter().map(|c| {
+            if be {
+                u16::from_be_bytes([c[0], c[1]])
+            } else {
+                u16::from_le_bytes([c[0], c[1]])
+            }
+        });
+        char::decode_utf16(units)
+            .collect::<Result<String, _>>()
+            .ok()
+    };
+    let decoded = match bytes.get(..2) {
+        Some([0xFF, 0xFE]) => utf16(false),
+        Some([0xFE, 0xFF]) => utf16(true),
+        _ => None,
+    };
+    if let Some(text) = decoded {
+        return Ok(text);
+    }
+    let start = if bytes.starts_with(UTF8_BOM) { 3 } else { 0 };
+    match std::str::from_utf8(&bytes[start..]) {
+        Ok(t) => Ok(t.to_string()),
+        Err(_) => Err(bytes),
+    }
+}
+
+/// Read a text file (see [`decode_text`]), mapping "not found" to `None`.
 pub fn read_text_opt(path: &Path) -> Result<Option<String>> {
     match read_opt(path)? {
         None => Ok(None),
-        Some(b) => String::from_utf8(b)
-            .map(Some)
-            .with_context(|| format!("{} is not valid UTF-8", path.display())),
+        Some(b) => decode_text(b).map(Some).map_err(|_| {
+            anyhow::anyhow!(
+                "{} is not valid UTF-8 (or UTF-16 with a byte-order mark)",
+                path.display()
+            )
+        }),
     }
+}
+
+/// What [`walk_confined`] found.
+#[derive(Debug, Default)]
+pub struct ConfinedWalk {
+    /// `/`-separated relative paths of regular files, sorted.
+    pub files: Vec<String>,
+    /// Entries that were left out, with the reason.
+    pub skipped: Vec<String>,
+    /// More than `max_files` files were found.
+    pub truncated: bool,
+}
+
+/// List the files of a directory the user pointed a tool at (a skill), for capture.
+///
+/// `dir` itself may be a symbolic link (say into a git checkout); its target is
+/// the root. Inside it, a link is followed only if its target stays inside the
+/// root. Links that leave it (`etc -> /etc`, `up -> ..`), loops, dangling links
+/// and unreadable entries are skipped and reported. Hidden entries and
+/// `node_modules` are skipped silently.
+pub fn walk_confined(dir: &Path, max_files: usize) -> Result<ConfinedWalk> {
+    let root = fs::canonicalize(dir).with_context(|| format!("resolving {}", dir.display()))?;
+    let mut out = ConfinedWalk::default();
+    let mut ancestors = vec![root.clone()];
+    confined_inner(&root, dir, "", &mut ancestors, max_files, &mut out)
+        .with_context(|| format!("listing {}", dir.display()))?;
+    out.files.sort();
+    Ok(out)
+}
+
+fn confined_inner(
+    root: &Path,
+    dir: &Path,
+    prefix: &str,
+    ancestors: &mut Vec<PathBuf>,
+    max: usize,
+    out: &mut ConfinedWalk,
+) -> io::Result<()> {
+    let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || name == "node_modules" {
+            continue;
+        }
+        let rel = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let parent = ancestors.last().expect("root is always there").clone();
+        let ft = match e.file_type() {
+            Ok(ft) => ft,
+            Err(err) => {
+                out.skipped.push(format!("{rel}: {err}"));
+                continue;
+            }
+        };
+        let (real, meta) = if ft.is_symlink() {
+            let target = match fs::canonicalize(e.path()) {
+                Ok(t) => t,
+                Err(_) => {
+                    out.skipped.push(format!("{rel}: dangling symbolic link"));
+                    continue;
+                }
+            };
+            if !target.starts_with(root) {
+                out.skipped.push(format!(
+                    "{rel}: symbolic link to {}, outside the skill",
+                    target.display()
+                ));
+                continue;
+            }
+            match fs::metadata(&target) {
+                Ok(m) => (target, m),
+                Err(err) => {
+                    out.skipped.push(format!("{rel}: {err}"));
+                    continue;
+                }
+            }
+        } else {
+            match e.metadata() {
+                Ok(m) => (parent.join(&name), m),
+                Err(err) => {
+                    out.skipped.push(format!("{rel}: {err}"));
+                    continue;
+                }
+            }
+        };
+        if meta.is_dir() {
+            if ancestors.contains(&real) {
+                out.skipped.push(format!("{rel}: symbolic link loop"));
+                continue;
+            }
+            if ancestors.len() > 8 {
+                out.skipped.push(format!("{rel}: nested too deeply"));
+                continue;
+            }
+            ancestors.push(real);
+            let res = confined_inner(root, &e.path(), &rel, ancestors, max, out);
+            ancestors.pop();
+            if let Err(err) = res {
+                out.skipped.push(format!("{rel}: {err}"));
+            }
+        } else if meta.is_file() {
+            if out.files.len() >= max {
+                out.truncated = true;
+                return Ok(());
+            }
+            out.files.push(rel);
+        }
+    }
+    Ok(())
 }
 
 /// Recursively list regular files under `dir` as `/`-separated relative paths, sorted.
@@ -144,6 +297,17 @@ pub fn subdirs(dir: &Path) -> Result<Vec<String>> {
     }
     out.sort();
     Ok(out)
+}
+
+fn keep_bom(before: Option<&[u8]>, content: Vec<u8>) -> Vec<u8> {
+    if before.is_some_and(|b| b.starts_with(UTF8_BOM))
+        && !content.starts_with(UTF8_BOM)
+        && std::str::from_utf8(&content).is_ok()
+    {
+        [UTF8_BOM, &content].concat()
+    } else {
+        content
+    }
 }
 
 /// Join a `/`-separated relative path onto `base` using native separators.
@@ -240,12 +404,19 @@ impl PlanFs {
         }
     }
 
+    /// Current planned content of `path` as text. A UTF-8 byte-order mark is
+    /// dropped here and put back by [`PlanFs::write`].
     pub fn read(&self, path: &Path) -> Result<Option<String>> {
         match self.read_bytes(path)? {
             None => Ok(None),
-            Some(b) => String::from_utf8(b)
-                .map(Some)
-                .with_context(|| format!("{} is not valid UTF-8", path.display())),
+            Some(mut b) => {
+                if b.starts_with(UTF8_BOM) {
+                    b.drain(..UTF8_BOM.len());
+                }
+                String::from_utf8(b)
+                    .map(Some)
+                    .with_context(|| format!("{} is not valid UTF-8", path.display()))
+            }
         }
     }
 
@@ -257,18 +428,20 @@ impl PlanFs {
         }
     }
 
-    /// Plan `content` for `path`. Writing identical content is a no-op.
+    /// Plan `content` for `path`. Writing identical content is a no-op. Text
+    /// replacing a file that starts with a UTF-8 byte-order mark keeps the mark.
     pub fn write(&mut self, path: &Path, content: impl Into<Vec<u8>>) -> Result<()> {
         let content = content.into();
         let real = self.real_path(path)?;
         if let Some(s) = self.staged.get_mut(&real) {
-            s.after = Some(content);
+            s.after = Some(keep_bom(s.before.as_deref(), content));
             return Ok(());
         }
         if real.is_dir() {
             bail!("{} is a directory, expected a file", path.display());
         }
         let before = read_opt(&real)?;
+        let content = keep_bom(before.as_deref(), content);
         self.staged.insert(
             real,
             Staged {
