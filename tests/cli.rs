@@ -45,7 +45,10 @@ fn init_then_apply_then_undo() {
         .args(["apply", "prof", "--to", "claude-code,codex", "--dry-run"])
         .assert()
         .success()
-        .stdout(contains("+++ ~/.claude/CLAUDE.md").and(contains("nothing written")));
+        .stdout(
+            contains(format!("+++ {}", shown("~/.claude/CLAUDE.md")))
+                .and(contains("nothing written")),
+        );
     assert!(!sb.home().join(".claude").exists());
 
     // Without --yes in a non-interactive session, apply refuses.
@@ -179,7 +182,7 @@ fn detected_targets_are_the_default() {
         .assert()
         .success()
         .stderr(contains("Detected: codex"))
-        .stdout(contains("~/.codex/AGENTS.md"));
+        .stdout(contains(shown("~/.codex/AGENTS.md")));
 }
 
 #[test]
@@ -303,6 +306,20 @@ fn undo_refuses_when_files_changed_since() {
     assert!(!sb.home().join(".claude/CLAUDE.md").exists());
 }
 
+/// A `~/...` display path with the platform's separator.
+fn shown(path: &str) -> String {
+    path.replace('/', std::path::MAIN_SEPARATOR_STR)
+}
+
+fn file_url(path: &std::path::Path) -> String {
+    let p = path.display().to_string().replace('\\', "/");
+    if p.starts_with('/') {
+        format!("file://{p}")
+    } else {
+        format!("file:///{p}")
+    }
+}
+
 fn git(dir: &std::path::Path, args: &[&str]) {
     let ok = Command::new("git")
         .args([
@@ -344,10 +361,7 @@ fn applies_from_a_git_repository() {
     git(&repo, &["init", "-q"]);
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "profile"]);
-    let url = format!(
-        "file://{}//agents/work",
-        repo.display().to_string().replace('\\', "/")
-    );
+    let url = format!("{}//agents/work", file_url(&repo));
     sb.cli()
         .args(["apply", &url, "--to", "codex", "--yes"])
         .env(
@@ -359,14 +373,7 @@ fn applies_from_a_git_repository() {
         .stdout(contains("from file://").and(contains("Wrote")));
     assert!(sb.home().join(".codex/AGENTS.md").exists());
     sb.cli()
-        .args([
-            "diff",
-            &format!("file://{}", repo.display()),
-            "--path",
-            "nope",
-            "--to",
-            "codex",
-        ])
+        .args(["diff", &file_url(&repo), "--path", "nope", "--to", "codex"])
         .assert()
         .code(2)
         .stderr(contains("no kitbag.toml"));

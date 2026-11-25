@@ -133,9 +133,10 @@ pub fn resolve(src: &str, subdir: Option<&str>) -> Result<Resolved> {
             Some(s) => dir.join(safe_subdir(s)?),
             None => dir,
         };
-        let dir = dir
-            .canonicalize()
-            .with_context(|| format!("{} does not exist", dir.display()))?;
+        if !dir.is_dir() {
+            bail!("{} does not exist", dir.display());
+        }
+        let dir = std::path::absolute(&dir)?;
         return Ok(Resolved {
             origin: dir.display().to_string(),
             dir,

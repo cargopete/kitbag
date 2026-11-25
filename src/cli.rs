@@ -200,7 +200,6 @@ fn context(home_flag: Option<&Path>, place: Option<&Place>) -> Result<Ctx> {
             project = std::path::absolute(dir)?;
         }
     }
-    let project = project.canonicalize().unwrap_or(project);
     // With --home the real locations must never leak in: that is the sandbox guarantee.
     let locations = if sandboxed {
         HashMap::new()
