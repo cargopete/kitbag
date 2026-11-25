@@ -66,7 +66,11 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
     let m: Manifest = toml::from_str(text).map_err(|e| {
         ProfileError::new(
             format!("{} is not a valid kitbag manifest", file.display()),
-            vec![e.to_string()],
+            vec![crate::edit::safe_parse_error(
+                text,
+                e.span().map(|s| s.start),
+                e.message(),
+            )],
         )
     })?;
     let mut issues = Vec::new();

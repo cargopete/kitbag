@@ -19,6 +19,7 @@ All notable changes to this project are documented here. The format follows
 - Replacing an MCP server whose command or URL changed no longer carries over the old entry's other keys (`trust`, `headersHelper`, `oauth`, `bearer_token_env_var`, `env_http_headers` ...); the entry is replaced as a whole and the plan names the dropped keys. Servers that keep their command or URL still keep your own keys (#4).
 - With `--project`, every write must resolve inside the real (canonical) project root, so a symbolic link can no longer redirect it elsewhere, also when the project path itself goes through a link; the apply stops before writing anything. `capture --project` skips, with a warning, project files and directories (`CLAUDE.md`, rules, MCP config ...) that are links to somewhere outside the project, such as `~/.aws/credentials`.
 - A file that `apply` writes a resolved secret into ends up mode 0600 on Unix, also when it already existed with looser permissions (the plan says so; `undo` puts the old mode back). A secret-looking `${VAR:-fallback}` written because `VAR` is unset now counts as such a secret too (Claude Desktop, Codex, Cursor), is masked in diffs, and the warning says it came from the fallback instead of "resolved from your environment".
+- Errors about a broken TOML, JSON or JSONC file (tool configs, `kitbag.toml`) give the path, line, column and the parser's message only. They no longer quote the offending source line, which could hold a secret, and quoted values or secret-looking text in the message are elided.
 
 ## [0.1.0] - 2026-11-25
 

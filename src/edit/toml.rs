@@ -7,9 +7,14 @@ use serde_json::{Map, Number, Value};
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table};
 
 pub fn parse(text: Option<&str>, path: &Path) -> Result<DocumentMut> {
-    text.unwrap_or("")
-        .parse::<DocumentMut>()
-        .map_err(|e| anyhow!("{}: invalid TOML: {e}", path.display()))
+    let text = text.unwrap_or("");
+    text.parse::<DocumentMut>().map_err(|e| {
+        anyhow!(
+            "{}: invalid TOML at {}",
+            path.display(),
+            super::safe_parse_error(text, e.span().map(|s| s.start), e.message())
+        )
+    })
 }
 
 /// Convert a TOML item into a JSON value (for comparison and capture).

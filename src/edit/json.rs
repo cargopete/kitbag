@@ -35,8 +35,13 @@ impl JsonDoc {
             Some(t) if !t.trim().is_empty() => t,
             _ => "{}\n",
         };
-        let root = CstRootNode::parse(text, &ParseOptions::default())
-            .map_err(|e| anyhow!("{}: invalid JSON: {e}", path.display()))?;
+        let root = CstRootNode::parse(text, &ParseOptions::default()).map_err(|e| {
+            anyhow!(
+                "{}: invalid JSON at {}",
+                path.display(),
+                super::safe_parse_error(text, Some(e.range().start), &e.kind().to_string())
+            )
+        })?;
         match root.value() {
             Some(v) if v.as_object().is_some() => {}
             _ => bail!(

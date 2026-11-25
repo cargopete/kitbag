@@ -701,3 +701,79 @@ fn literal_secrets_next_to_env_references_are_redacted() {
         assert!(text.contains(kept), "{kept} missing:\n{text}");
     }
 }
+
+#[test]
+fn parse_errors_name_the_place_but_never_echo_the_source() {
+    // Built at run time so no provider-shaped literal sits in the source.
+    let key = format!("sk-{}-{}", "proj", "FAKEparseErrorKey0123456789");
+    let leaks = |out: &std::process::Output| {
+        let all = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (all.contains("FAKEparseErrorKey"), all)
+    };
+
+    let sb = Sandbox::empty();
+    fs::create_dir_all(sb.home().join(".codex")).unwrap();
+    fs::write(
+        sb.home().join(".codex/config.toml"),
+        format!("model = \"x\"\n[mcp_servers.a]\nenv = {{ OPENAI_API_KEY = \"{key}\" \n"),
+    )
+    .unwrap();
+    let out = sb
+        .cli()
+        .args(["capture", "--from", "codex", "-o", "o"])
+        .output()
+        .unwrap();
+    let (leaked, text) = leaks(&out);
+    assert!(!out.status.success());
+    assert!(!leaked, "{text}");
+    assert!(
+        text.contains("config.toml") && text.contains("line 3, column"),
+        "{text}"
+    );
+    let out = sb.cli().arg("doctor").output().unwrap();
+    let (leaked, text) = leaks(&out);
+    assert!(!leaked, "{text}");
+    assert!(text.contains("line 3, column"), "{text}");
+
+    // Broken JSON(C).
+    let sb = Sandbox::empty();
+    fs::write(
+        sb.home().join(".claude.json"),
+        format!("{{\"mcpServers\": {{\"a\": {{\"env\": {{\"K\": \"{key}\"}}}}\n  oops {key}\n"),
+    )
+    .unwrap();
+    let out = sb
+        .cli()
+        .args(["capture", "--from", "claude-code", "-o", "o"])
+        .output()
+        .unwrap();
+    let (leaked, text) = leaks(&out);
+    assert!(!out.status.success());
+    assert!(!leaked, "{text}");
+    assert!(
+        text.contains(".claude.json") && text.contains("line 2, column"),
+        "{text}"
+    );
+
+    // A type error in a profile manifest quotes the value in serde's message.
+    let sb = Sandbox::empty();
+    fs::create_dir_all(sb.path("p")).unwrap();
+    fs::write(
+        sb.path("p/kitbag.toml"),
+        format!("kitbag = \"{key}\"\nname = \"p\"\n"),
+    )
+    .unwrap();
+    let out = sb
+        .cli()
+        .args(["apply", "p", "--to", "codex", "--dry-run"])
+        .output()
+        .unwrap();
+    let (leaked, text) = leaks(&out);
+    assert!(!out.status.success());
+    assert!(!leaked, "{text}");
+    assert!(text.contains("line 1, column"), "{text}");
+}
