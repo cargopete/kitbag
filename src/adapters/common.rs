@@ -399,19 +399,51 @@ fn server_identity(def: &Map<String, Value>) -> (Option<&Value>, Option<&Value>)
     )
 }
 
+/// Do two server entries run the same thing? Same command (or URL) and the
+/// same args, so `npx -y good-pkg` and `npx -y evil-pkg` differ. Env
+/// references in args (`${A}`, `${env:A}`, `$A`) don't count: `--key=${A}`
+/// matches `--key=${B}`, and an arg that is only a reference matches anything
+/// (it may have been resolved).
+fn same_server(a: &Map<String, Value>, b: &Map<String, Value>) -> bool {
+    use std::sync::LazyLock;
+    static REF: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*").expect("valid regex")
+    });
+    let args = |d: &Map<String, Value>| -> Vec<Value> {
+        match d.get("args") {
+            Some(Value::Array(a)) => a.clone(),
+            Some(v) => vec![v.clone()],
+            None => Vec::new(),
+        }
+    };
+    let same_arg = |x: &Value, y: &Value| match (x, y) {
+        (Value::String(x), Value::String(y)) => {
+            let norm = |v: &str| REF.replace_all(v, regex::NoExpand("${}")).into_owned();
+            let (x, y) = (norm(x), norm(y));
+            x == y || x == "${}" || y == "${}"
+        }
+        _ => x == y,
+    };
+    let (aa, ba) = (args(a), args(b));
+    server_identity(a) == server_identity(b)
+        && aa.len() == ba.len()
+        && aa.iter().zip(&ba).all(|(x, y)| same_arg(x, y))
+}
+
 /// The result of [`merge_server_def`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct MergedServer {
     pub def: Map<String, Value>,
     /// Keys of the existing entry that were not carried over, because the
-    /// server now runs a different command or connects to a different URL.
+    /// server now runs a different command or args, or connects to a different URL.
     pub dropped: Vec<String>,
 }
 
 /// Combine an existing server definition with the one kitbag wants: keys kitbag
 /// manages come from `want`; anything else the user set (timeouts, trust flags,
 /// tool filters...) is preserved, as long as the entry still runs the same
-/// command or connects to the same URL. If it doesn't, it is a different server,
+/// command with the same args (see `same_server`) or connects to the same
+/// URL. If it doesn't, it is a different server,
 /// and keys such as `trust`, `headersHelper` or `oauth` granted to the old one
 /// must not carry over: the entry is replaced wholesale. Returns `None` when
 /// nothing would change.
@@ -428,7 +460,7 @@ pub fn merge_server_def(
     };
     let extra = cur.iter().filter(|(k, _)| !managed.contains(&k.as_str()));
     let mut dropped = Vec::new();
-    let mut out: Map<String, Value> = if server_identity(cur) == server_identity(want) {
+    let mut out: Map<String, Value> = if same_server(cur, want) {
         extra.map(|(k, v)| (k.clone(), v.clone())).collect()
     } else {
         dropped = extra.map(|(k, _)| k.clone()).collect();
@@ -453,7 +485,7 @@ pub fn note_dropped_server_keys(
         work.warn(
             target,
             format!(
-                "MCP server '{name}' in {} now runs a different command or URL, so settings of the old entry were not kept: {}",
+                "MCP server '{name}' in {} now runs a different command, arguments or URL, so settings of the old entry were not kept: {}",
                 path.display(),
                 dropped.join(", ")
             ),

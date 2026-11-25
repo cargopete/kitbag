@@ -64,7 +64,12 @@ fn json_merge_keeps_unrelated_content() {
 #[test]
 fn toml_merge_keeps_comments_and_tool_specific_keys() {
     let sb = Sandbox::fixtures();
-    apply(&sb, &profile(), &["codex"], &sb.env(Scope::User));
+    // Same command and args as the existing entry, one more env var.
+    let mut p = profile();
+    let c7 = p.mcp_servers.get_mut("context7").unwrap();
+    c7.args = vec!["-y".into(), "@upstash/context7-mcp".into()];
+    c7.env.insert("C7_LOG".into(), "info".into());
+    apply(&sb, &p, &["codex"], &sb.env(Scope::User));
     let cfg = sb.read("home/.codex/config.toml");
     assert!(
         cfg.starts_with("# My Codex config\nmodel = \"gpt-5-codex\""),
@@ -79,7 +84,7 @@ fn toml_merge_keeps_comments_and_tool_specific_keys() {
         "keys kitbag doesn't manage are preserved: {cfg}"
     );
     assert!(
-        cfg.contains("\"@upstash/context7-mcp@latest\""),
+        cfg.contains("C7_LOG = \"info\""),
         "managed keys updated: {cfg}"
     );
     assert!(cfg.contains("[features]\nweb_search_request = true"));
@@ -95,7 +100,7 @@ fn json_merge_keeps_tool_specific_server_keys() {
         "weather".into(),
         McpServer {
             command: Some("node".into()),
-            args: vec!["/opt/weather/v2.js".into()],
+            args: vec!["/opt/weather/index.js".into()],
             ..Default::default()
         },
     );
@@ -105,7 +110,10 @@ fn json_merge_keeps_tool_specific_server_keys() {
         s["mcpServers"]["weather"]["timeout"], 30000,
         "gemini-only key kept"
     );
-    assert_eq!(s["mcpServers"]["weather"]["args"][0], "/opt/weather/v2.js");
+    assert_eq!(
+        s["mcpServers"]["weather"]["args"][0],
+        "/opt/weather/index.js"
+    );
     assert!(
         s["mcpServers"]["weather"].get("env").is_none(),
         "managed key removed when the profile drops it"
@@ -366,23 +374,48 @@ fn a_server_with_a_new_command_or_url_does_not_inherit_trust_or_credentials() {
         "{codex}"
     );
 
-    // Same command: the user's own keys stay.
-    let same = one_server(
+    // Same command, different package: a different server.
+    let evil_pkg = one_server(
         "docs",
         McpServer {
-            command: Some("evil-binary".into()),
-            args: vec!["--v2".into()],
+            command: Some("npx".into()),
+            args: vec!["-y".into(), "evil-pkg".into()],
             ..Default::default()
         },
     );
     fs::write(
         sb.home().join(".gemini/settings.json"),
-        r#"{"mcpServers":{"docs":{"command":"evil-binary","trust":true}}}"#,
+        r#"{"mcpServers":{"docs":{"command":"npx","args":["-y","good-pkg"],"trust":true}}}"#,
+    )
+    .unwrap();
+    apply(&sb, &evil_pkg, &["gemini-cli"], &env);
+    assert_eq!(
+        sb.json("home/.gemini/settings.json")["mcpServers"]["docs"],
+        serde_json::json!({"command": "npx", "args": ["-y", "evil-pkg"]})
+    );
+
+    // Same command and args, up to ${VAR} references: the user's own keys stay.
+    let same = one_server(
+        "docs",
+        McpServer {
+            command: Some("npx".into()),
+            args: vec![
+                "-y".into(),
+                "good-pkg".into(),
+                "--key=${NEW_KEY}".into(),
+                "${TOKEN}".into(),
+            ],
+            env: [("A".to_string(), "1".to_string())].into_iter().collect(),
+            ..Default::default()
+        },
+    );
+    fs::write(
+        sb.home().join(".gemini/settings.json"),
+        r#"{"mcpServers":{"docs":{"command":"npx","args":["-y","good-pkg","--key=${OLD_KEY}","FAKE-resolved-value"],"trust":true}}}"#,
     )
     .unwrap();
     apply(&sb, &same, &["gemini-cli"], &env);
-    assert_eq!(
-        sb.json("home/.gemini/settings.json")["mcpServers"]["docs"]["trust"],
-        true
-    );
+    let docs = &sb.json("home/.gemini/settings.json")["mcpServers"]["docs"];
+    assert_eq!(docs["trust"], true, "{docs}");
+    assert_eq!(docs["env"]["A"], "1", "{docs}");
 }
