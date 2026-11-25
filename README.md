@@ -208,9 +208,10 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
 1. **Capture redacts.** Values that look like credentials become `${ENV_VAR}` references, and
    capture prints each replacement (`mcp_servers.github.env.GITHUB_TOKEN -> ${GITHUB_TOKEN}`).
    A value counts as a credential if any of these hold:
-   - it matches a known token format: GitHub, Anthropic, OpenAI, Stripe, Slack, AWS, Google,
-     GitLab, npm, PyPI, Hugging Face, Linear, Notion, Sentry, SendGrid, Shopify, DigitalOcean,
-     JWTs, private keys, or passwords in URLs;
+   - it matches a known token format: GitHub, Anthropic, OpenAI, OpenRouter, xAI, Groq,
+     Perplexity, Tavily, Firecrawl, Replicate, Supabase, Stripe, Slack, AWS, Google, GitLab,
+     npm, PyPI, Hugging Face, Linear, Notion, Sentry, SendGrid, Shopify, DigitalOcean, JWTs,
+     private keys, or passwords in URLs;
    - it sits under a secret-sounding name (`*_TOKEN`, `*_KEY`, `password`, `Authorization` ...);
    - it is a high-entropy opaque string.
 

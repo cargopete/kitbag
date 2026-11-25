@@ -15,3 +15,7 @@ All notable changes to this project are documented here. The format follows
 - Format-preserving JSON/JSONC and TOML merges, managed blocks in shared markdown files.
 - Transactional apply with backups, rollback on failure and undo.
 - Profiles from git URLs (`github:owner/repo`, `https://…`, `git@…`, `file://…`).
+
+### Fixed
+
+- xAI, Groq, Perplexity, Tavily, Supabase, Replicate, OpenRouter and Firecrawl keys are recognised (free text, env values, headers and args).

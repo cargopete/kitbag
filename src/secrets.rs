@@ -255,8 +255,18 @@ static STRONG: LazyLock<Vec<Pattern>> =
             "private-key",
             r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?s:.*?)(?:-----END [A-Z ]*PRIVATE KEY-----|\z)",
         ),
+        // Also covers admin keys (`sk-ant-admin01-...`).
         ("anthropic-key", r"\bsk-ant-[A-Za-z0-9_-]{20,}"),
+        // Before openai-key, which would also match it.
+        ("openrouter-key", r"\bsk-or-v1-[a-f0-9]{64}"),
         ("openai-key", r"\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}"),
+        ("xai-key", r"\bxai-[A-Za-z0-9]{40,}"),
+        ("groq-key", r"\bgsk_[A-Za-z0-9]{40,}"),
+        ("perplexity-key", r"\bpplx-[A-Za-z0-9]{40,}"),
+        ("tavily-key", r"\btvly-[A-Za-z0-9_-]{20,}"),
+        ("supabase-token", r"\bsbp_[a-f0-9]{40}\b"),
+        ("replicate-token", r"\br8_[A-Za-z0-9]{30,}"),
+        ("firecrawl-key", r"\bfc-[a-f0-9]{32}\b"),
         ("stripe-key", r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}"),
         (
             "github-token",
@@ -1042,6 +1052,38 @@ mod tests {
         );
         assert_eq!(strong_secret_kind("postgresql://admin:${PW}@db/app"), None);
         assert_eq!(strong_secret_kind("just some words"), None);
+    }
+
+    #[test]
+    fn provider_key_formats() {
+        let alnum = "Zk3jQ9vLm2Xp8RtY4wNb7HcF1sDg6KaE";
+        let hex64 = "0123456789abcdef".repeat(4);
+        let cases = [
+            (format!("xai-{alnum}{alnum}{alnum}"), "xai-key"),
+            (format!("gsk_{alnum}{alnum}"), "groq-key"),
+            (format!("pplx-{alnum}{alnum}"), "perplexity-key"),
+            (format!("tvly-dev-{alnum}"), "tavily-key"),
+            (format!("sbp_{}", &hex64[..40]), "supabase-token"),
+            (format!("r8_{alnum}"), "replicate-token"),
+            (format!("sk-or-v1-{hex64}"), "openrouter-key"),
+            (format!("fc-{}", &hex64[..32]), "firecrawl-key"),
+            (format!("sk-ant-admin01-{alnum}"), "anthropic-key"),
+        ];
+        for (token, kind) in &cases {
+            assert_eq!(strong_secret_kind(token), Some(*kind), "{token}");
+            let (t, kinds) = redact_text(&format!("Use key {token} when calling it."));
+            assert_eq!(t, format!("Use key [REDACTED:{kind}] when calling it."));
+            assert_eq!(kinds, vec![*kind]);
+            // Values in MCP env blocks use the same table.
+            assert_eq!(classify(Some("MODE"), token), Some(*kind));
+        }
+        for prose in [
+            "xai-sdk and gsk_ prefixes, pplx-api docs, tvly-dev keys",
+            "the fc-barcelona fan club, r8_ratio, sbp_short",
+            "xai-grok-2-latest is the model; sk-or-v1-abc is not a key",
+        ] {
+            assert_eq!(strong_secret_kind(prose), None, "{prose}");
+        }
     }
 
     #[test]
