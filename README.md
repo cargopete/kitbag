@@ -159,9 +159,16 @@ with a bounded effect are applied. Anything else is dropped with a warning:
 
 Hooks, `env` blocks, `apiKeyHelper`, provider endpoints and similar keys are never carried.
 Anything that lets agents act without asking gets an explicit warning in the plan. That
-covers `permissions.defaultMode = bypassPermissions`, allow rules, `approval_policy = never`
-and `sandbox_mode = danger-full-access`. It also covers commands and skills whose frontmatter
-pre-approves tools (`allowed-tools`) and commands that run shell snippets (``!`cmd` ``).
+covers `permissions.defaultMode = bypassPermissions` (and `acceptEdits`, `dontAsk`, `auto`),
+`permissions.additionalDirectories`, allow rules (broad ones such as `Bash(*)` or
+`Bash(rm -rf *)` are named), `approval_policy = never` and `sandbox_mode = danger-full-access`.
+It also covers commands and skills whose frontmatter pre-approves tools (`allowed-tools`) and
+commands that run shell snippets (``!`cmd` ``).
+
+**From a git source, the riskiest settings are dropped** unless you pass
+`--allow-risky-settings`: permissive `defaultMode`s, `additionalDirectories`, broad allow
+rules, `approval_policy = never` and `sandbox_mode = danger-full-access`. The plan lists each
+one it left out. Profiles in a local directory apply them as written, with the warning above.
 
 ### Rules: `rules/<name>.md`
 
@@ -302,7 +309,7 @@ Common options:
 
 - `--to` / `--from` take target ids (comma-separated), `all`, or `detected` (the default).
 - `--scope user|project` and `--project DIR` choose between global and per-project config.
-- `--secrets resolve|never` and `--no-overwrite` apply to `apply` and `diff`.
+- `--secrets resolve|never`, `--no-overwrite` and `--allow-risky-settings` apply to `apply` and `diff`.
 - `--path SUBDIR` selects a profile inside a repository.
 - `--home DIR` (or `KITBAG_HOME`) treats `DIR` as the home directory for sandboxes and tests.
   It also ignores `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME` and `APPDATA`.

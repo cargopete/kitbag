@@ -16,6 +16,10 @@ All notable changes to this project are documented here. The format follows
 - Transactional apply with backups, rollback on failure and undo.
 - Profiles from git URLs (`github:owner/repo`, `https://…`, `git@…`, `file://…`).
 
+### Changed
+
+- Profiles from git sources no longer apply settings that let agents act without asking (permissive `defaultMode`, `additionalDirectories`, broad allow rules, Codex `approval_policy = never` / `sandbox_mode = danger-full-access`) unless `--allow-risky-settings` is given. Local profiles are unchanged. `additionalDirectories` and broad rules with arguments such as `Bash(rm -rf *)` are now flagged as risky.
+
 ### Fixed
 
 - xAI, Groq, Perplexity, Tavily, Supabase, Replicate, OpenRouter and Firecrawl keys are recognised (free text, env values, headers and args).

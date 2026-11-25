@@ -505,3 +505,95 @@ fn applying_a_redacted_capture_back_keeps_the_originals() {
         .code(1)
         .stdout(contains("contains [REDACTED] markers"));
 }
+
+#[test]
+fn risky_settings_from_remote_profiles_need_an_explicit_flag() {
+    if Command::new("git").arg("--version").output().is_err() {
+        eprintln!("git not installed; skipping");
+        return;
+    }
+    let sb = Sandbox::empty();
+    let repo = sb.path("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(
+        repo.join("kitbag.toml"),
+        r#"kitbag = 1
+name = "team"
+
+[settings.claude-code]
+model = "opus"
+permissions = { defaultMode = "bypassPermissions", additionalDirectories = ["/"], allow = ["Bash(*)", "Bash(rm -rf *)", "Bash(cargo test:*)"] }
+
+[settings.codex]
+model = "o3"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+"#,
+    )
+    .unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "profile"]);
+    let url = file_url(&repo);
+    let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+
+    sb.cli()
+        .args(["apply", &url, "--to", "claude-code,codex", "--yes"])
+        .env("GIT_CONFIG_GLOBAL", null)
+        .assert()
+        .success()
+        .stdout(
+            contains("comes from a remote repository: permissions.defaultMode = bypassPermissions")
+                .and(contains("--allow-risky-settings"))
+                .and(contains("approval_policy = never"))
+                .and(contains(r#"permissions.allow "Bash(rm -rf *)""#)),
+        );
+    assert_eq!(
+        sb.json("home/.claude/settings.json"),
+        serde_json::json!({"model": "opus", "permissions": {"allow": ["Bash(cargo test:*)"]}})
+    );
+    let codex = sb.read("home/.codex/config.toml");
+    assert!(
+        codex.contains("model = \"o3\"") && !codex.contains("never") && !codex.contains("danger")
+    );
+
+    // With the flag, they are applied (and still flagged).
+    sb.cli().arg("undo").assert().success();
+    sb.cli()
+        .args([
+            "apply",
+            &url,
+            "--to",
+            "claude-code,codex",
+            "--yes",
+            "--allow-risky-settings",
+        ])
+        .env("GIT_CONFIG_GLOBAL", null)
+        .assert()
+        .success()
+        .stdout(contains("Lets agents act without asking"));
+    assert_eq!(
+        sb.json("home/.claude/settings.json")["permissions"]["defaultMode"],
+        "bypassPermissions"
+    );
+    assert!(
+        sb.read("home/.codex/config.toml")
+            .contains("danger-full-access")
+    );
+
+    // A local profile directory behaves as before: applied, with a warning.
+    sb.cli().arg("undo").assert().success();
+    sb.cli()
+        .args(["apply", "repo", "--to", "claude-code", "--yes"])
+        .assert()
+        .success()
+        .stdout(
+            contains("Lets agents act without asking")
+                .and(contains("permissions.additionalDirectories = /"))
+                .and(contains("remote repository").not()),
+        );
+    assert_eq!(
+        sb.json("home/.claude/settings.json")["permissions"]["additionalDirectories"],
+        serde_json::json!(["/"])
+    );
+}

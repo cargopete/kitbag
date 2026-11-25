@@ -51,14 +51,45 @@ pub fn filter(
     (allowed, dropped)
 }
 
+/// Commands that can do anything once their arguments are open: delete, escalate,
+/// download and run, or run arbitrary code.
+const DANGEROUS_COMMANDS: &[&str] = &[
+    "rm", "sudo", "su", "doas", "sh", "bash", "zsh", "fish", "eval", "exec", "xargs", "env",
+    "curl", "wget", "dd", "mkfs", "chmod", "chown", "ssh", "scp", "nc", "python", "python3",
+    "node", "perl", "ruby",
+];
+
 fn broad_claude_rule(rule: &str) -> bool {
     let bare = ["Bash", "Write", "Edit", "WebFetch"];
-    bare.iter()
+    if bare
+        .iter()
         .any(|t| rule == *t || rule == format!("{t}(*)") || rule == format!("{t}(**)"))
-        || (rule.starts_with("Bash(")
-            && rule.ends_with("*)")
-            && !rule.ends_with(":*)")
-            && !rule.contains(' '))
+    {
+        return true;
+    }
+    let Some(spec) = rule.strip_prefix("Bash(").and_then(|r| r.strip_suffix(')')) else {
+        return false;
+    };
+    // `Bash(npm*)`: any command starting with those letters.
+    if spec.ends_with('*') && !spec.ends_with(":*") && !spec.contains(' ') {
+        return true;
+    }
+    // `Bash(rm -rf *)`, `Bash(curl:*)`, `Bash(sudo *)`: a dangerous command with open arguments.
+    let command = spec
+        .split([' ', ':'])
+        .next()
+        .unwrap_or("")
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    spec.contains('*') && DANGEROUS_COMMANDS.contains(&command)
+}
+
+fn risky_default_mode(mode: &str) -> bool {
+    matches!(
+        mode,
+        "bypassPermissions" | "acceptEdits" | "dontAsk" | "auto"
+    )
 }
 
 /// Human-readable warnings for settings that widen what an agent may do unattended.
@@ -68,12 +99,20 @@ pub fn risky(target: &str, settings: &Map<String, Value>) -> Vec<String> {
         "claude-code" => {
             if let Some(Value::Object(perms)) = settings.get("permissions") {
                 if let Some(Value::String(mode)) = perms.get("defaultMode")
-                    && matches!(
-                        mode.as_str(),
-                        "bypassPermissions" | "acceptEdits" | "dontAsk" | "auto"
-                    )
+                    && risky_default_mode(mode)
                 {
                     out.push(format!("claude-code: permissions.defaultMode = {mode}"));
+                }
+                if let Some(Value::Array(dirs)) = perms.get("additionalDirectories")
+                    && !dirs.is_empty()
+                {
+                    out.push(format!(
+                        "claude-code: permissions.additionalDirectories = {}",
+                        dirs.iter()
+                            .map(|d| d.as_str().map_or_else(|| d.to_string(), str::to_string))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
                 }
                 if let Some(Value::Array(allow)) = perms.get("allow")
                     && !allow.is_empty()
@@ -100,6 +139,59 @@ pub fn risky(target: &str, settings: &Map<String, Value>) -> Vec<String> {
             }
             if settings.get("sandbox_mode").and_then(Value::as_str) == Some("danger-full-access") {
                 out.push("codex: sandbox_mode = danger-full-access".into());
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Remove the riskiest settings, the ones that let agents act without asking
+/// or reach outside the project: permissive `defaultMode`s,
+/// `additionalDirectories`, broad allow rules, Codex's `approval_policy = never`
+/// and `sandbox_mode = danger-full-access`. Used for profiles from remote
+/// sources. Returns a description of each removed setting.
+pub fn drop_risky(target: &str, settings: &mut Map<String, Value>) -> Vec<String> {
+    let mut out = Vec::new();
+    match target {
+        "claude-code" => {
+            let Some(Value::Object(perms)) = settings.get_mut("permissions") else {
+                return out;
+            };
+            if let Some(Value::String(mode)) = perms.get("defaultMode")
+                && risky_default_mode(mode)
+            {
+                out.push(format!("permissions.defaultMode = {mode}"));
+                perms.remove("defaultMode");
+            }
+            if let Some(dirs) = perms.remove("additionalDirectories") {
+                out.push(format!("permissions.additionalDirectories = {dirs}"));
+            }
+            if let Some(Value::Array(allow)) = perms.get_mut("allow") {
+                allow.retain(|r| {
+                    let broad = r.as_str().is_some_and(broad_claude_rule);
+                    if broad {
+                        out.push(format!("permissions.allow {r}"));
+                    }
+                    !broad
+                });
+                if allow.is_empty() {
+                    perms.remove("allow");
+                }
+            }
+            if perms.is_empty() {
+                settings.remove("permissions");
+            }
+        }
+        "codex" => {
+            for (key, bad) in [
+                ("approval_policy", "never"),
+                ("sandbox_mode", "danger-full-access"),
+            ] {
+                if settings.get(key).and_then(Value::as_str) == Some(bad) {
+                    settings.remove(key);
+                    out.push(format!("{key} = {bad}"));
+                }
             }
         }
         _ => {}
@@ -177,5 +269,75 @@ mod tests {
         );
         let s = json!({"approval_policy": "never", "sandbox_mode": "danger-full-access"});
         assert_eq!(risky("codex", s.as_object().unwrap()).len(), 2);
+        let s = json!({"permissions": {"additionalDirectories": ["/"], "allow": ["Bash(rm -rf *)", "Bash(curl:*)", "Bash(cargo test:*)"]}});
+        assert_eq!(
+            risky("claude-code", s.as_object().unwrap()),
+            vec![
+                "claude-code: permissions.additionalDirectories = /",
+                "claude-code: allows 3 tool permission rule(s) without prompting, including broad ones: Bash(rm -rf *), Bash(curl:*)",
+            ]
+        );
+    }
+
+    #[test]
+    fn broad_rules() {
+        for r in [
+            "Bash",
+            "Bash(*)",
+            "Bash(npm*)",
+            "Bash(rm -rf *)",
+            "Bash(sudo *)",
+            "Bash(/usr/bin/curl *)",
+            "Bash(python3:*)",
+            "Write(**)",
+        ] {
+            assert!(broad_claude_rule(r), "{r}");
+        }
+        for r in [
+            "Bash(npm test:*)",
+            "Bash(cargo build *)",
+            "Bash(rm target/tmp.txt)",
+            "Read(./src/**)",
+            "WebFetch(domain:docs.rs)",
+        ] {
+            assert!(!broad_claude_rule(r), "{r}");
+        }
+    }
+
+    #[test]
+    fn drops_risky_settings() {
+        let mut s = json!({"model": "opus", "permissions": {
+            "defaultMode": "bypassPermissions",
+            "additionalDirectories": ["/"],
+            "allow": ["Bash(*)", "Bash(cargo test:*)"],
+            "deny": ["Read(./.env)"],
+        }})
+        .as_object()
+        .cloned()
+        .unwrap();
+        assert_eq!(
+            drop_risky("claude-code", &mut s),
+            vec![
+                "permissions.defaultMode = bypassPermissions",
+                r#"permissions.additionalDirectories = ["/"]"#,
+                r#"permissions.allow "Bash(*)""#,
+            ]
+        );
+        assert_eq!(
+            Value::Object(s),
+            json!({"model": "opus", "permissions": {"allow": ["Bash(cargo test:*)"], "deny": ["Read(./.env)"]}})
+        );
+        let mut s = json!({"permissions": {"allow": ["Bash"]}})
+            .as_object()
+            .cloned()
+            .unwrap();
+        drop_risky("claude-code", &mut s);
+        assert!(s.is_empty());
+        let mut s = json!({"approval_policy": "never", "sandbox_mode": "danger-full-access", "model": "o3"})
+            .as_object()
+            .cloned()
+            .unwrap();
+        assert_eq!(drop_risky("codex", &mut s).len(), 2);
+        assert_eq!(Value::Object(s), json!({"model": "o3"}));
     }
 }

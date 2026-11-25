@@ -170,6 +170,11 @@ struct ApplyArgs {
     /// For tools that can't read env vars: resolve ${VAR} now, or never write secret values
     #[arg(long, value_enum, default_value = "resolve")]
     secrets: SecretsMode,
+    /// Also apply settings that let agents act without asking (bypassPermissions,
+    /// broad allow rules, approval_policy = never ...) from a git source. Local
+    /// profiles always apply them, with a warning
+    #[arg(long)]
+    allow_risky_settings: bool,
 }
 
 struct Ctx {
@@ -615,14 +620,35 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
 
 fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) -> Result<i32> {
     let env = &ctx.env;
-    let (resolved, profile) = load_source(src, t.path.as_deref())?;
+    let (resolved, mut profile) = load_source(src, t.path.as_deref())?;
     let targets = select_targets(&t.to, env, "to")?;
+    // A profile from someone else's repository doesn't get to turn off the
+    // tools' safety prompts unless the user says so.
+    let mut dropped = Vec::new();
+    if resolved.remote && !a.allow_risky_settings {
+        for (target, settings) in &mut profile.settings {
+            for d in policy::drop_risky(target, settings) {
+                dropped.push((target.clone(), d));
+            }
+        }
+    }
     let opts = ApplyOptions {
         overwrite: !a.no_overwrite,
         secrets: a.secrets,
         block_id: slugify(&profile.name),
     };
-    let plan = engine::plan(&profile, &targets, env, &opts)?;
+    let mut plan = engine::plan(&profile, &targets, env, &opts)?;
+    for (target, d) in dropped {
+        if plan.targets.contains(&target) {
+            plan.notes.push(adapters::Note {
+                level: adapters::Level::Warn,
+                target,
+                message: format!(
+                    "not applied, because the profile comes from a remote repository: {d} (pass --allow-risky-settings to apply it)"
+                ),
+            });
+        }
+    }
     let where_ = match env.scope {
         Scope::User => "user scope".to_string(),
         Scope::Project => format!("project {}", tildify(&env.project, &env.home)),
