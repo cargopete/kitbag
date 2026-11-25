@@ -6,9 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-### Fixed (release dry run v0.1.0-rc.1)
-
-- `install.sh` and `install.ps1` asked for `kitbag-<target>.<ext>.sha256`, but the release uploads `kitbag-<target>.sha256`, so every scripted install failed. Both now use the uploaded name; `tests/install_script.rs` runs `install.sh` against release-shaped assets.
+## [0.1.0] - 2026-11-25
 
 ### Added
 
@@ -37,3 +35,7 @@ All notable changes to this project are documented here. The format follows
 - Capture lists Claude Code subagents, output styles and plugins it found but doesn't carry, and drops an `outputStyle` setting that names a custom style.
 - Malformed server entries (`"mcpServers": []`, a server that isn't an object) are reported instead of silently ignored.
 - `capture` with several tools (`--from all`, `detected` or a list) reports a tool whose config can't be read and captures the rest; it fails only if nothing could be read. A single `--from` still fails loudly.
+- `install.sh` and `install.ps1` download `kitbag-<target>.sha256`, the checksum name the release workflow uploads (found in the v0.1.0-rc.1 dry run).
+
+[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/cargopete/kitbag/releases/tag/v0.1.0
