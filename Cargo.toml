@@ -1,0 +1,56 @@
+[package]
+name = "kitbag"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Pack your AI agent setup once, unpack it into any coding tool: MCP servers, rules, commands and skills for Claude Code, Cursor, Codex and more."
+license = "MIT"
+authors = ["Petko Pavlovski <https://github.com/cargopete>"]
+repository = "https://github.com/cargopete/kitbag"
+readme = "README.md"
+keywords = ["mcp", "ai", "agents", "claude-code", "cursor"]
+categories = ["command-line-utilities", "development-tools", "config"]
+exclude = ["/.github", "/tests/fixtures"]
+
+[dependencies]
+anstream = "1.0.0"
+anstyle = "1.0.14"
+anyhow = "1.0.105"
+clap = { version = "4.6.10", features = ["derive", "wrap_help", "env"] }
+hex = "0.4.3"
+jsonc-parser = { version = "0.34.0", features = ["cst", "serde", "serde_json"] }
+regex = "1.13.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+serde_norway = "0.9.42"
+sha2 = "0.11.1"
+similar = "3.2.1"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+time = { version = "0.3.55", features = ["formatting", "macros"] }
+toml = { version = "1.2.3", features = ["preserve_order"] }
+toml_edit = { version = "0.25.21", features = ["serde"] }
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+tempfile = "3.27.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "allow"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "allow"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = 3
+
+# Build used for GitHub Release binaries (see .github/workflows/release.yml).
+[profile.dist]
+inherits = "release"

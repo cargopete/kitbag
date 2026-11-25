@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
+      - run: cargo test --locked
+
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo doc --locked --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  msrv:
+    name: minimum supported Rust (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --all-targets
+
+  smoke:
+    name: install script + end-to-end smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install --locked --path . --root /tmp/kb
+      - name: Use it like a user would (sandboxed home)
+        run: |
+          set -eux
+          export PATH=/tmp/kb/bin:$PATH KITBAG_HOME=/tmp/smoke/home
+          mkdir -p "$KITBAG_HOME"
+          kitbag --version
+          kitbag apply examples/profile --to claude-code,cursor,codex --dry-run
+          kitbag apply examples/profile --to claude-code,cursor,codex --yes
+          kitbag diff examples/profile --to claude-code,cursor,codex --exit-code
+          kitbag capture --from codex -o /tmp/smoke/captured
+          kitbag doctor /tmp/smoke/captured
+          kitbag undo
+          test ! -e "$KITBAG_HOME/.claude.json"
+      - run: sh -n install.sh

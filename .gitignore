@@ -1,0 +1,4 @@
+/target
+/node_modules
+*.kitbag-*.tmp
+/kitbag-profile

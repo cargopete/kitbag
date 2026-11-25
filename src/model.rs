@@ -1,0 +1,353 @@
+//! The in-memory profile model.
+//!
+//! On disk a profile is a directory (see [`crate::profile_io`]):
+//!
+//! ```text
+//! kitbag.toml              manifest: MCP servers + per-tool settings
+//! instructions.md          always-on instructions (-> CLAUDE.md / AGENTS.md / GEMINI.md ...)
+//! rules/<name>.md          scoped rules with optional `globs` frontmatter
+//! commands/<name>.md       reusable prompts / slash commands
+//! skills/<name>/SKILL.md   agent skills, plus any supporting files
+//! ```
+//!
+//! Everything in a [`Profile`] is secret-free by construction: values that are
+//! secrets are stored as `${ENV_VAR}` references and only resolved (if at all)
+//! when applying to a tool that cannot expand references itself.
+
+use std::collections::BTreeMap;
+use std::sync::LazyLock;
+
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+/// Version of the on-disk profile format. Bumped only for breaking changes.
+pub const FORMAT_VERSION: u32 = 1;
+
+/// How an MCP server is reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    /// A local process speaking MCP over stdin/stdout.
+    Stdio,
+    /// Streamable HTTP.
+    Http,
+    /// Legacy HTTP + server-sent events.
+    Sse,
+}
+
+impl Transport {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Transport::Stdio => "stdio",
+            Transport::Http => "http",
+            Transport::Sse => "sse",
+        }
+    }
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// A portable MCP server definition.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServer {
+    /// `stdio`, `http` or `sse`. Inferred from `command` / `url` when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<Transport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Environment for the server process. Values may contain `${VAR}` references.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// HTTP headers for remote servers. Values may contain `${VAR}` references.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    /// Only apply this server to these target ids.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub only: Vec<String>,
+    /// Never apply this server to these target ids.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub except: Vec<String>,
+    /// Keep the definition but mark it disabled where the target supports that.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub disabled: bool,
+}
+
+impl McpServer {
+    pub fn transport(&self) -> Transport {
+        match self.transport {
+            Some(t) => t,
+            None if self.url.is_some() && self.command.is_none() => Transport::Http,
+            None => Transport::Stdio,
+        }
+    }
+
+    pub fn applies_to(&self, target: &str) -> bool {
+        if !self.only.is_empty() && !self.only.iter().any(|t| t == target) {
+            return false;
+        }
+        !self.except.iter().any(|t| t == target)
+    }
+
+    /// Every string value in the definition, with a human-readable location.
+    pub fn strings(&self) -> Vec<(String, &str)> {
+        let mut out = Vec::new();
+        if let Some(c) = &self.command {
+            out.push(("command".to_string(), c.as_str()));
+        }
+        for (i, a) in self.args.iter().enumerate() {
+            out.push((format!("args[{i}]"), a.as_str()));
+        }
+        for (k, v) in &self.env {
+            out.push((format!("env.{k}"), v.as_str()));
+        }
+        if let Some(c) = &self.cwd {
+            out.push(("cwd".to_string(), c.as_str()));
+        }
+        if let Some(u) = &self.url {
+            out.push(("url".to_string(), u.as_str()));
+        }
+        for (k, v) in &self.headers {
+            out.push((format!("headers.{k}"), v.as_str()));
+        }
+        out
+    }
+
+    /// Apply `f` to every string value (used for reference normalisation and rendering).
+    pub fn map_strings(&self, mut f: impl FnMut(&str) -> String) -> McpServer {
+        let mut s = self.clone();
+        s.command = s.command.as_deref().map(&mut f);
+        s.args = s.args.iter().map(|a| f(a)).collect();
+        s.env = s.env.iter().map(|(k, v)| (k.clone(), f(v))).collect();
+        s.cwd = s.cwd.as_deref().map(&mut f);
+        s.url = s.url.as_deref().map(&mut f);
+        s.headers = s.headers.iter().map(|(k, v)| (k.clone(), f(v))).collect();
+        s
+    }
+
+    /// Problems that make this definition unusable.
+    pub fn validate(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+        let t = self.transport();
+        if t == Transport::Stdio && self.command.as_deref().is_none_or(str::is_empty) {
+            issues.push("stdio servers need 'command' (or set 'url' for a remote server)".into());
+        }
+        if t != Transport::Stdio {
+            if self.url.as_deref().is_none_or(str::is_empty) {
+                issues.push(format!("{} servers need 'url'", t.as_str()));
+            }
+            if self.command.is_some() || !self.args.is_empty() {
+                issues.push("remote servers can't have 'command' or 'args'".into());
+            }
+        }
+        if t == Transport::Stdio && !self.headers.is_empty() {
+            issues.push("'headers' only apply to remote servers".into());
+        }
+        issues
+    }
+}
+
+/// A rule: instructions that apply always, to matching files, or on demand.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Rule {
+    /// File stem, e.g. `typescript` for `rules/typescript.md`.
+    pub name: String,
+    pub description: Option<String>,
+    /// Glob patterns this rule applies to. Empty = not file-scoped.
+    pub globs: Vec<String>,
+    /// `Some(true)` forces always-on even with globs; `Some(false)` without globs
+    /// means "on demand" (the agent decides based on the description).
+    pub always_apply: Option<bool>,
+    pub body: String,
+}
+
+/// When a rule is loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleMode {
+    Always,
+    Globs,
+    OnDemand,
+}
+
+impl Rule {
+    pub fn mode(&self) -> RuleMode {
+        match (self.globs.is_empty(), self.always_apply) {
+            (_, Some(true)) => RuleMode::Always,
+            (false, _) => RuleMode::Globs,
+            (true, Some(false)) => RuleMode::OnDemand,
+            (true, None) => RuleMode::Always,
+        }
+    }
+}
+
+/// A reusable prompt / slash command.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Command {
+    pub name: String,
+    pub description: Option<String>,
+    pub argument_hint: Option<String>,
+    /// Other frontmatter keys (e.g. Claude Code's `allowed-tools`), kept verbatim
+    /// and passed on to targets that understand command frontmatter.
+    pub extra: Map<String, Value>,
+    /// Markdown prompt. `$ARGUMENTS` is the full argument string, `$1`..`$9` positionals.
+    pub body: String,
+}
+
+/// One file inside a skill directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillFile {
+    /// Path relative to the skill directory, `/`-separated.
+    pub path: String,
+    pub content: Vec<u8>,
+}
+
+/// An agent skill: a directory with `SKILL.md` and optional supporting files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skill {
+    pub name: String,
+    pub description: Option<String>,
+    pub files: Vec<SkillFile>,
+}
+
+impl Skill {
+    pub fn main_file(&self) -> Option<&SkillFile> {
+        self.files.iter().find(|f| f.path == "SKILL.md")
+    }
+}
+
+/// Tool-specific settings, keyed by target id, passed through after allow-listing.
+pub type Settings = BTreeMap<String, Map<String, Value>>;
+
+/// A complete, secret-free agent setup.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Profile {
+    pub name: String,
+    pub description: Option<String>,
+    pub mcp_servers: BTreeMap<String, McpServer>,
+    pub settings: Settings,
+    pub instructions: Option<String>,
+    pub rules: Vec<Rule>,
+    pub commands: Vec<Command>,
+    pub skills: Vec<Skill>,
+}
+
+impl Profile {
+    pub fn new(name: impl Into<String>) -> Self {
+        Profile {
+            name: name.into(),
+            ..Profile::default()
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.mcp_servers.is_empty()
+            && self.settings.is_empty()
+            && self.instructions.is_none()
+            && self.rules.is_empty()
+            && self.commands.is_empty()
+            && self.skills.is_empty()
+    }
+
+    pub fn sort(&mut self) {
+        self.rules.sort_by(|a, b| a.name.cmp(&b.name));
+        self.commands.sort_by(|a, b| a.name.cmp(&b.name));
+        self.skills.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+}
+
+static NAME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$").expect("valid regex"));
+
+/// Valid names for rules, commands, skills and servers: portable across file systems and tools.
+pub fn is_valid_name(name: &str) -> bool {
+    NAME_RE.is_match(name) && name != "." && name != ".." && !name.ends_with('.')
+}
+
+/// Turn arbitrary text into a valid name (`My Setup!` -> `my-setup`).
+pub fn slugify(input: &str) -> String {
+    let mut out = String::new();
+    for ch in input.trim().chars() {
+        if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let trimmed: String = out
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+        .chars()
+        .take(64)
+        .collect();
+    if trimmed.is_empty() {
+        "profile".to_string()
+    } else {
+        trimmed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_inference() {
+        let s = McpServer {
+            url: Some("https://x".into()),
+            ..Default::default()
+        };
+        assert_eq!(s.transport(), Transport::Http);
+        let s = McpServer {
+            command: Some("npx".into()),
+            ..Default::default()
+        };
+        assert_eq!(s.transport(), Transport::Stdio);
+    }
+
+    #[test]
+    fn only_and_except() {
+        let s = McpServer {
+            only: vec!["codex".into()],
+            ..Default::default()
+        };
+        assert!(s.applies_to("codex"));
+        assert!(!s.applies_to("cursor"));
+        let s = McpServer {
+            except: vec!["codex".into()],
+            ..Default::default()
+        };
+        assert!(!s.applies_to("codex"));
+        assert!(s.applies_to("cursor"));
+    }
+
+    #[test]
+    fn names_and_slugs() {
+        assert!(is_valid_name("pdf-tools"));
+        assert!(is_valid_name("a.b_c"));
+        assert!(!is_valid_name("../etc"));
+        assert!(!is_valid_name(".hidden"));
+        assert!(!is_valid_name("a/b"));
+        assert_eq!(slugify("My Setup!"), "my-setup");
+        assert_eq!(slugify("  "), "profile");
+    }
+
+    #[test]
+    fn rule_modes() {
+        let mut r = Rule::default();
+        assert_eq!(r.mode(), RuleMode::Always);
+        r.always_apply = Some(false);
+        assert_eq!(r.mode(), RuleMode::OnDemand);
+        r.globs = vec!["*.rs".into()];
+        assert_eq!(r.mode(), RuleMode::Globs);
+        r.always_apply = Some(true);
+        assert_eq!(r.mode(), RuleMode::Always);
+    }
+}
