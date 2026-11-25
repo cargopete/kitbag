@@ -311,40 +311,6 @@ fn shown(path: &str) -> String {
     path.replace('/', std::path::MAIN_SEPARATOR_STR)
 }
 
-fn file_url(path: &std::path::Path) -> String {
-    let p = path.display().to_string().replace('\\', "/");
-    if p.starts_with('/') {
-        format!("file://{p}")
-    } else {
-        format!("file:///{p}")
-    }
-}
-
-fn git(dir: &std::path::Path, args: &[&str]) {
-    let ok = Command::new("git")
-        .args([
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@example.com",
-            "-c",
-            "init.defaultBranch=main",
-            "-c",
-            "commit.gpgsign=false",
-        ])
-        .args(args)
-        .current_dir(dir)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env(
-            "GIT_CONFIG_GLOBAL",
-            if cfg!(windows) { "NUL" } else { "/dev/null" },
-        )
-        .status()
-        .unwrap()
-        .success();
-    assert!(ok, "git {args:?}");
-}
-
 #[test]
 fn applies_from_a_git_repository() {
     if Command::new("git").arg("--version").output().is_err() {
@@ -546,11 +512,13 @@ sandbox_mode = "danger-full-access"
             contains("comes from a remote repository: permissions.defaultMode = bypassPermissions")
                 .and(contains("--allow-risky-settings"))
                 .and(contains("approval_policy = never"))
-                .and(contains(r#"permissions.allow "Bash(rm -rf *)""#)),
+                .and(contains(
+                    r#"permissions.allow "Bash(*)", "Bash(rm -rf *)", "Bash(cargo test:*)""#,
+                )),
         );
     assert_eq!(
         sb.json("home/.claude/settings.json"),
-        serde_json::json!({"model": "opus", "permissions": {"allow": ["Bash(cargo test:*)"]}})
+        serde_json::json!({"model": "opus"})
     );
     let codex = sb.read("home/.codex/config.toml");
     assert!(

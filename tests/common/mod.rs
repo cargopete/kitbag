@@ -95,6 +95,8 @@ impl Sandbox {
             .env("KITBAG_HOME", self.home())
             .env("KITBAG_STATE_DIR", self.state())
             .env("NO_COLOR", "1")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", null_device())
             .current_dir(self.tmp.path());
         if cfg!(windows) {
             for k in ["SYSTEMROOT", "TEMP", "TMP", "USERPROFILE"] {
@@ -105,6 +107,69 @@ impl Sandbox {
         }
         c
     }
+}
+
+impl Sandbox {
+    /// Write `files` (relative path, content) into a new git repository at
+    /// `rel` and return its `file://` URL: a remote profile for tests.
+    pub fn git_profile(&self, rel: &str, files: &[(&str, &str)]) -> String {
+        let repo = self.path(rel);
+        for (name, content) in files {
+            let p = repo.join(name);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, content).unwrap();
+        }
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "profile"]);
+        file_url(&repo)
+    }
+}
+
+pub fn null_device() -> &'static str {
+    if cfg!(windows) { "NUL" } else { "/dev/null" }
+}
+
+pub fn has_git() -> bool {
+    let found = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok();
+    if !found {
+        eprintln!("git not installed; skipping");
+    }
+    found
+}
+
+pub fn file_url(path: &Path) -> String {
+    let p = path.display().to_string().replace('\\', "/");
+    if p.starts_with('/') {
+        format!("file://{p}")
+    } else {
+        format!("file:///{p}")
+    }
+}
+
+pub fn git(dir: &Path, args: &[&str]) {
+    let ok = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "init.defaultBranch=main",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", null_device())
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "git {args:?}");
 }
 
 pub fn targets(ids: &[&str]) -> Vec<&'static dyn Adapter> {

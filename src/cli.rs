@@ -170,10 +170,10 @@ struct ApplyArgs {
     /// For tools that can't read env vars: resolve ${VAR} now, or never write secret values
     #[arg(long, value_enum, default_value = "resolve")]
     secrets: SecretsMode,
-    /// Also apply settings that let agents act without asking (bypassPermissions,
-    /// broad allow rules, approval_policy = never ...) from a git source. Local
-    /// profiles always apply them, with a warning
-    #[arg(long)]
+    /// Trust a git source like a local profile: also apply settings that let
+    /// agents act without asking (bypassPermissions, permissions.allow rules,
+    /// approval_policy = never ...). Local profiles always apply them, with a warning
+    #[arg(long, visible_alias = "trust-source")]
     allow_risky_settings: bool,
 }
 

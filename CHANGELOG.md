@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- Profiles from git sources no longer add any `permissions.allow` rule unless `--allow-risky-settings` (new alias: `--trust-source`) is given; the plan lists the rules it left out. `ask` and `deny` rules still apply. The broad-rule warning for local profiles now ignores case and extra whitespace, and also names `Bash(*:*)`, whole-file-system `Read`/`Edit`/`Write` rules, interpreters, package runners, containers and piping into a shell (#1).
+
 ## [0.1.0] - 2026-11-25
 
 ### Added

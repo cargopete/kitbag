@@ -180,9 +180,14 @@ It also covers commands and skills whose frontmatter pre-approves tools (`allowe
 commands that run shell snippets (``!`cmd` ``).
 
 **From a git source, the riskiest settings are dropped** unless you pass
-`--allow-risky-settings`: permissive `defaultMode`s, `additionalDirectories`, broad allow
-rules, `approval_policy = never` and `sandbox_mode = danger-full-access`. The plan lists each
-one it left out. Profiles in a local directory apply them as written, with the warning above.
+`--allow-risky-settings` (or its alias `--trust-source`): permissive `defaultMode`s,
+`additionalDirectories`, every `permissions.allow` rule, `approval_policy = never` and
+`sandbox_mode = danger-full-access`. `ask` and `deny` rules still apply, since they restrict.
+The plan lists everything it left out. Profiles in a local directory apply them as written,
+with the warning above. That warning names broad rules, judged case-insensitively and ignoring
+extra whitespace: bare tools (`Bash`, `Write`), any command (`Bash(*:*)`), the whole file system
+(`Read(//**)`, `Edit(~/**)`), shells, interpreters, package runners and containers with open
+arguments (`Bash(npx:*)`, `Bash(docker run:*)`), and piping into a shell (`… | sh`).
 
 ### Rules: `rules/<name>.md`
 
