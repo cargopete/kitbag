@@ -444,8 +444,9 @@ static FLAG: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^--?([A-Za-z0-9][A-Za-z0-9_-]*)$").expect("valid regex"));
 static ASSIGN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^([A-Za-z_][A-Za-z0-9_]*)=(.+)$").expect("valid regex"));
-static HEADER_ARG: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^([A-Za-z][A-Za-z0-9-]*):\s*([^\s/].*)$").expect("valid regex"));
+static HEADER_ARG: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^([A-Za-z][A-Za-z0-9-]*)(:\s*)([^\s/].*)$").expect("valid regex")
+});
 static URL_USERINFO: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^([a-z][a-z0-9+.-]*://)([^\s:/@]+):([^\s@/]+)@").expect("valid regex")
 });
@@ -631,7 +632,15 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
 /// `Name: value` with a secret value -> (`Name: ${VAR}`, VAR, reason).
 fn redact_header_arg(server_name: &str, arg: &str) -> Option<(String, String, &'static str)> {
     let c = HEADER_ARG.captures(arg)?;
-    let (name, value) = (c[1].to_string(), c[2].trim().to_string());
+    let (name, sep, value) = (c[1].to_string(), c[2].to_string(), c[3].trim().to_string());
+    // Only HTTP-header-shaped names (X-Api-Key, Authorization, Cookie) or secret
+    // names; `user:secret` and similar pairs are left to the flag-based checks.
+    let header_like = name.contains('-')
+        || ["authorization", "cookie"].contains(&name.to_ascii_lowercase().as_str())
+        || is_secret_name(&name);
+    if !header_like {
+        return None;
+    }
     let (scheme, raw) = match BEARER.captures(&value) {
         Some(b) => (Some(b[1].to_string()), b[2].to_string()),
         None => (None, value.clone()),
@@ -650,7 +659,8 @@ fn redact_header_arg(server_name: &str, arg: &str) -> Option<(String, String, &'
         Some(sc) => format!("{sc} {}", reference(&env_var)),
         None => reference(&env_var),
     };
-    Some((format!("{name}: {v}"), env_var, reason))
+    // Keep the original separator: mcp-remote documents `Name:value` without a space.
+    Some((format!("{name}{sep}{v}"), env_var, reason))
 }
 
 fn percent_decode(s: &str) -> String {
@@ -816,13 +826,45 @@ static TOML_PAIR: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid regex")
 });
 
+static URL_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)\b([a-z][a-z0-9+.-]*://[^\s:/@"]+:)([^\s@/"]{3,})@"#).expect("valid regex")
+});
+static FLAG_PAIR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#""(--?[A-Za-z0-9][A-Za-z0-9_-]*)"(\s*,\s*)"((?:[^"\\]|\\.)*)""#)
+        .expect("valid regex")
+});
+static FLAG_ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#""(--?[A-Za-z0-9][A-Za-z0-9_-]*)=((?:[^"\\]|\\.)*)""#).expect("valid regex")
+});
+
+/// For display: names and known formats only (no entropy guessing, which would
+/// hide ordinary ids and make diffs unreviewable).
+fn shown_secret(key: &str, value: &str) -> bool {
+    if value.contains("••••••••") {
+        return false; // already masked
+    }
+    let unescaped = value.replace("\\\"", "\"").replace("\\\\", "\\");
+    named_secret(Some(key), &unescaped)
+        || BEARER
+            .captures(&unescaped)
+            .is_some_and(|c| !has_ref(&c[2]) && c[2].len() >= 6)
+}
+
 /// Mask anything in one line of config text that looks like a credential:
 /// known token formats anywhere, and secret-looking values of JSON / TOML keys.
 /// Used for every line kitbag displays, so existing secrets in your files never
 /// show up in a diff.
 pub fn mask_line(line: &str) -> String {
-    let mut out = line.to_string();
-    for p in STRONG.iter() {
+    let mut out = URL_PASSWORD
+        .replace_all(line, |c: &Captures| {
+            if has_ref(&c[2]) {
+                c[0].to_string()
+            } else {
+                format!("{}••••••••@", &c[1])
+            }
+        })
+        .into_owned();
+    for p in STRONG.iter().filter(|p| p.kind != "url-credentials") {
         out =
             p.re.replace_all(&out, |c: &Captures| {
                 if has_ref(&c[0]) {
@@ -834,16 +876,39 @@ pub fn mask_line(line: &str) -> String {
             .into_owned();
     }
     out = JSON_PAIR
-        .replace_all(&out, |c: &Captures| match classify(Some(&c[1]), &c[3]) {
-            Some(_) => format!("\"{}\"{}\"••••••••\"", &c[1], &c[2]),
-            None => c[0].to_string(),
+        .replace_all(&out, |c: &Captures| {
+            if shown_secret(&c[1], &c[3]) {
+                format!("\"{}\"{}\"••••••••\"", &c[1], &c[2])
+            } else {
+                c[0].to_string()
+            }
+        })
+        .into_owned();
+    // `"--password", "value"` in args arrays, and `"--token=value"`.
+    out = FLAG_PAIR
+        .replace_all(&out, |c: &Captures| {
+            if shown_secret(c[1].trim_start_matches('-'), &c[3]) {
+                format!("\"{}\"{}\"••••••••\"", &c[1], &c[2])
+            } else {
+                c[0].to_string()
+            }
+        })
+        .into_owned();
+    out = FLAG_ASSIGN
+        .replace_all(&out, |c: &Captures| {
+            if shown_secret(c[1].trim_start_matches('-'), &c[2]) {
+                format!("\"{}=••••••••\"", &c[1])
+            } else {
+                c[0].to_string()
+            }
         })
         .into_owned();
     TOML_PAIR
         .replace_all(&out, |c: &Captures| {
-            match classify(Some(c[2].trim_matches('"')), &c[4]) {
-                Some(_) => format!("{}{}{}\"••••••••\"", &c[1], &c[2], &c[3]),
-                None => c[0].to_string(),
+            if shown_secret(c[2].trim_matches('"'), &c[4]) {
+                format!("{}{}{}\"••••••••\"", &c[1], &c[2], &c[3])
+            } else {
+                c[0].to_string()
             }
         })
         .into_owned()
@@ -1108,7 +1173,7 @@ mod tests {
         assert_eq!(r.args[1], "https://x.dev/sse?api_key=${REMOTE_API_KEY}");
         assert_eq!(r.args[3], "Authorization: Bearer ${REMOTE_TOKEN}");
         assert_eq!(r.args[5], "DB_PASSWORD=${DB_PASSWORD}");
-        assert_eq!(r.args[7], "X-Api-Key: ${REMOTE_X_API_KEY}");
+        assert_eq!(r.args[7], "X-Api-Key:${REMOTE_X_API_KEY}");
         assert_eq!(r.args[8], "--header=Authorization: Bearer ${REMOTE_TOKEN}");
         assert_eq!(r.args[9], "postgresql://admin:${REMOTE_PASSWORD}@db/app");
         assert_eq!(red.len(), 6);
@@ -1116,6 +1181,17 @@ mod tests {
         for leak in ["a8f3kd93", "hunter2", "s3cr3t", "abcabc", "lowentropy"] {
             assert!(!flat.contains(leak), "{leak} in {flat}");
         }
+    }
+
+    #[test]
+    fn colon_pairs_that_are_not_headers_keep_their_format() {
+        let s = McpServer {
+            command: Some("x".into()),
+            args: vec!["--api-key".into(), "abc:XyZ123SecretValue987Qw".into()],
+            ..Default::default()
+        };
+        let (r, _) = redact_server("svc", &s);
+        assert_eq!(r.args[1], "${SVC_API_KEY}");
     }
 
     #[test]
@@ -1148,7 +1224,20 @@ mod tests {
             mask_line(r#"env = { API_KEY = "abcdef123456" }"#),
             r#"env = { API_KEY = "••••••••" }"#
         );
+        assert_eq!(
+            mask_line(r#""args": ["--password", "OldSecretValue1", "--x=1"]"#),
+            r#""args": ["--password", "••••••••", "--x=1"]"#
+        );
+        assert_eq!(
+            mask_line(r#""args": ["--token=abcdef123"]"#),
+            r#""args": ["--token=••••••••"]"#
+        );
+        assert_eq!(
+            mask_line(r#""url": "postgres://u:hunter22@db/app", "x": 1"#),
+            r#""url": "postgres://u:••••••••@db/app", "x": 1"#
+        );
         for keep in [
+            r#""PUBLIC_ID": "q8Zr2LkP0vXa7MnB4cTy9WdE""#,
             r#""command": "npx","#,
             r#"env = { API_KEY = "${API_KEY}" }"#,
             r#""LOG_LEVEL": "debug""#,
