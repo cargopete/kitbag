@@ -305,6 +305,7 @@ impl<'a> Resolver<'a> {
         }
         if self.mode == SecretsMode::Never {
             self.kept.push(location.to_string());
+            work.render.kept.extend(crate::secrets::refs_in(v));
             return v.to_string();
         }
         let mut probe = crate::secrets::RenderState::default();
@@ -342,7 +343,7 @@ impl<'a> Resolver<'a> {
             work.warn(
                 target,
                 format!(
-                    "MCP server '{server}': {} left as ${{VAR}} placeholders (--secrets never); {tool} won't expand them",
+                    "MCP server '{server}': {} left as ${{VAR}} placeholders (secrets not resolved); {tool} won't expand them",
                     self.kept.join(", ")
                 ),
             );
@@ -410,6 +411,8 @@ pub fn merge_json_servers(
         let mut full: Vec<&str> = key_path.to_vec();
         full.push(name);
         doc.set(&full, &Value::Object(merged));
+        work.changed_servers
+            .push((target.to_string(), name.clone()));
         changed = true;
     }
     if changed {

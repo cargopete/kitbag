@@ -167,9 +167,10 @@ struct ApplyArgs {
     /// Keep existing same-named entries instead of replacing them
     #[arg(long)]
     no_overwrite: bool,
-    /// For tools that can't read env vars: resolve ${VAR} now, or never write secret values
-    #[arg(long, value_enum, default_value = "resolve")]
-    secrets: SecretsMode,
+    /// For tools that can't read env vars: resolve ${VAR} now, or never write secret
+    /// values [default: resolve; never for git sources]
+    #[arg(long, value_enum)]
+    secrets: Option<SecretsMode>,
     /// Trust a git source like a local profile: also apply settings that let
     /// agents act without asking (bypassPermissions, permissions.allow rules,
     /// approval_policy = never ...). Local profiles always apply them, with a warning
@@ -596,16 +597,45 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
             println!("  - {r}");
         }
     }
-    if remote && !plan.commands.is_empty() {
+    if !plan.servers.is_empty() {
         println!(
             "\n{}",
             paint(
                 YELLOW,
-                "This profile comes from a remote repository. Your tools will run these commands:"
+                if remote {
+                    "This profile comes from a remote repository. Review the MCP servers it adds or changes:"
+                } else {
+                    "MCP servers added or changed:"
+                }
             )
         );
-        for (name, cmd) in &plan.commands {
-            println!("  {name}: {}", paint(BOLD, cmd));
+        // Shown as in the profile; anything that still looks like a secret is masked,
+        // and control characters can't rewrite the terminal.
+        let shown = |s: &str| {
+            let masked = crate::secrets::mask(&crate::secrets::mask_line(s), &plan.sensitive);
+            masked
+                .chars()
+                .flat_map(|c| {
+                    if c.is_control() {
+                        c.escape_default().collect::<Vec<_>>()
+                    } else {
+                        vec![c]
+                    }
+                })
+                .collect::<String>()
+        };
+        for s in &plan.servers {
+            println!(
+                "  {}: {}  {}",
+                shown(&s.name),
+                paint(BOLD, shown(&s.endpoint)),
+                paint(DIM, format!("({})", s.targets.join(", ")))
+            );
+            for (label, keys) in [("env", &s.env), ("headers", &s.headers)] {
+                if !keys.is_empty() {
+                    println!("      {label}: {}", shown(&keys.join(", ")));
+                }
+            }
         }
     }
     if !plan.missing_env.is_empty() {
@@ -641,12 +671,29 @@ fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) ->
             dropped.push((PROFILE_NOTE.to_string(), d));
         }
     }
+    // Don't hand local secrets to servers someone else defined.
+    let untrusted = resolved.remote && !a.allow_risky_settings;
+    let secrets = a.secrets.unwrap_or(if untrusted {
+        SecretsMode::Never
+    } else {
+        SecretsMode::Resolve
+    });
     let opts = ApplyOptions {
         overwrite: !a.no_overwrite,
-        secrets: a.secrets,
+        secrets,
         block_id: slugify(&profile.name),
     };
     let mut plan = engine::plan(&profile, &targets, env, &opts)?;
+    if untrusted && a.secrets.is_none() && !plan.kept_env.is_empty() {
+        plan.notes.push(adapters::Note {
+            level: adapters::Level::Info,
+            target: PROFILE_NOTE.to_string(),
+            message: format!(
+                "{} not resolved from your environment, because the profile comes from a remote repository (pass --secrets resolve to resolve them)",
+                plan.kept_env.iter().map(|v| format!("${{{v}}}")).collect::<Vec<_>>().join(", ")
+            ),
+        });
+    }
     for (target, d) in dropped {
         if plan.targets.contains(&target) || (target == PROFILE_NOTE && !plan.targets.is_empty()) {
             plan.notes.push(adapters::Note {

@@ -376,6 +376,7 @@ impl Adapter for Codex {
                         servers.insert(&name, Item::Table(json_to_table(&merged)));
                     }
                 }
+                work.changed_servers.push((ID.to_string(), name));
                 changed = true;
             }
         }

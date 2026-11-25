@@ -108,6 +108,8 @@ pub struct RenderState {
     pub missing: BTreeSet<String>,
     /// Secret values that were written to disk literally; masked in any displayed output.
     pub resolved: BTreeSet<String>,
+    /// Var names left as `${VAR}` placeholders because resolving was off (`--secrets never`).
+    pub kept: BTreeSet<String>,
 }
 
 /// Render `value` in `style`, recording missing / resolved values into `state`.
@@ -410,6 +412,19 @@ pub fn classify(name: Option<&str>, value: &str) -> Option<&'static str> {
         return Some("high-entropy-value");
     }
     None
+}
+
+/// `${VAR:-fallback}` references in `value` whose literal fallback looks like
+/// a secret, as (VAR, reason). A fallback is written to disk wherever the
+/// variable is unset, so it must not be a credential.
+pub fn secret_fallbacks(value: &str) -> Vec<(String, &'static str)> {
+    REF_RE
+        .captures_iter(value)
+        .filter_map(|c| {
+            let fallback = c.get(2)?.as_str();
+            classify(Some(&c[1]), fallback).map(|reason| (c[1].to_string(), reason))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

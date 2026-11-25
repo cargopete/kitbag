@@ -159,7 +159,8 @@ versioned (`kitbag = 1`). Future incompatible changes will bump the number, and 
 releases will refuse newer profiles instead of misreading them.
 
 **Env references.** `${NAME}` takes its value from the environment. `${NAME:-fallback}`
-falls back to a non-secret default. References work in `command`, `args`, `env`, `cwd`, `url`
+falls back to a non-secret default (it is written to disk wherever the variable is unset, so
+`doctor` and `apply` flag a fallback that looks like a secret). References work in `command`, `args`, `env`, `cwd`, `url`
 and `headers`.
 
 **Settings allow-list.** A profile may come from someone else's repository, so only settings
@@ -271,14 +272,17 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
    kitbag resolves those from your environment at apply time and warns per field. The value is
    masked as `••••••••` in every diff. Diffs also mask anything that already looks like a
    credential in your existing files. New files containing resolved values are created `0600`.
-   `--secrets never` keeps the `${VAR}` placeholder instead. Unset variables are reported and
+   `--secrets never` keeps the `${VAR}` placeholder instead. It is the default for profiles
+   from git sources, so your environment is never resolved into servers someone else defined
+   unless you pass `--secrets resolve` (or `--trust-source`). Unset variables are reported and
    left as placeholders.
 5. **Profiles from git are untrusted input.** kitbag rejects symlinks inside a profile, both
    files and directories, including a `--path` sub-directory. A symlink could otherwise copy
    files such as `~/.ssh/id_rsa` into a tool's config. Profile text can't break out of its
    managed block, because kitbag markers inside content are neutralised. It rejects path
    tricks in names and sub-directories, applies only allow-listed settings, and lists every
-   command the configured MCP servers will run before you confirm.
+   MCP server it adds or changes before you confirm: the command and arguments it runs, or
+   the URL it connects to, and the names of the env vars and headers it sets.
 
 ## Safe apply
 

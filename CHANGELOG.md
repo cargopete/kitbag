@@ -10,6 +10,7 @@ All notable changes to this project are documented here. The format follows
 
 - Profiles from git sources no longer add any `permissions.allow` rule unless `--allow-risky-settings` (new alias: `--trust-source`) is given; the plan lists the rules it left out. `ask` and `deny` rules still apply. The broad-rule warning for local profiles now ignores case and extra whitespace, and also names `Bash(*:*)`, whole-file-system `Read`/`Edit`/`Write` rules, interpreters, package runners, containers and piping into a shell (#1).
 - Profiles from git sources no longer install commands or skills that run shell snippets (``!`cmd` ``, Gemini CLI's `!{cmd}`), and `hooks` and `allowed-tools` are removed from the frontmatter of the rest, unless `--allow-risky-settings` is given. Local profiles get a warning listing hooks, tool grants and shell snippets (#2).
+- `--secrets` defaults to `never` for profiles from git sources, so local env vars are no longer resolved into servers a remote profile defines (Claude Desktop, parts of Codex); pass `--secrets resolve` to opt in. Every plan lists each MCP server it adds or changes, with its command and arguments or URL and the names of its env vars and headers. `doctor` and `apply` flag a `${VAR:-fallback}` whose literal fallback looks like a secret (#3).
 
 ## [0.1.0] - 2026-11-25
 

@@ -188,6 +188,20 @@ fn dedupe_env_vars(out: &mut CaptureResult) {
     }
 }
 
+/// An MCP server the plan adds or changes, summarised for review: what it runs
+/// or where it connects, and which env vars and headers it sets (names only).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerReview {
+    pub name: String,
+    /// Targets whose config gets this server.
+    pub targets: Vec<String>,
+    /// `command arg1 arg2 ...` for local servers, the URL for remote ones,
+    /// as written in the profile (`${VAR}` references, not their values).
+    pub endpoint: String,
+    pub env: Vec<String>,
+    pub headers: Vec<String>,
+}
+
 /// Everything `apply` would do, computed without touching disk.
 #[derive(Debug, Default)]
 pub struct Plan {
@@ -198,8 +212,10 @@ pub struct Plan {
     pub missing_env: BTreeSet<String>,
     /// Secret values that will be written to disk; masked in any displayed diff.
     pub sensitive: BTreeSet<String>,
-    /// stdio commands the configured tools will run.
-    pub commands: Vec<(String, String)>,
+    /// MCP servers added or changed, for review before writing.
+    pub servers: Vec<ServerReview>,
+    /// Env vars left as placeholders because secrets were not resolved.
+    pub kept_env: BTreeSet<String>,
     /// Settings that widen what agents may do without asking.
     pub risky: Vec<String>,
 }
@@ -260,21 +276,52 @@ pub fn plan(
         a.apply(profile, env, opts, &mut work)?;
         applied.push(a.id().to_string());
     }
-    let commands = profile
-        .mcp_servers
-        .iter()
-        .filter(|(_, s)| !s.disabled && targets.iter().any(|a| s.applies_to(a.id())))
-        .filter_map(|(n, s)| {
-            s.command.as_ref().map(|c| {
-                let mut line = c.clone();
-                for a in &s.args {
-                    line.push(' ');
-                    line.push_str(a);
-                }
-                (n.clone(), line)
-            })
-        })
-        .collect();
+    let mut servers: Vec<ServerReview> = Vec::new();
+    for (target, name) in &work.changed_servers {
+        if let Some(r) = servers.iter_mut().find(|r| r.name == *name) {
+            if !r.targets.contains(target) {
+                r.targets.push(target.clone());
+            }
+            continue;
+        }
+        let Some(s) = profile.mcp_servers.get(name) else {
+            continue;
+        };
+        let endpoint = match &s.command {
+            Some(c) if s.url.is_none() || s.transport() == crate::model::Transport::Stdio => {
+                std::iter::once(c)
+                    .chain(&s.args)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }
+            _ => s.url.clone().unwrap_or_default(),
+        };
+        servers.push(ServerReview {
+            name: name.clone(),
+            targets: vec![target.clone()],
+            endpoint,
+            env: s.env.keys().cloned().collect(),
+            headers: s.headers.keys().cloned().collect(),
+        });
+    }
+    // A fallback is written to disk wherever its variable is unset.
+    for (n, s) in &profile.mcp_servers {
+        if !applied.iter().any(|t| s.applies_to(t)) {
+            continue;
+        }
+        for (loc, v) in s.strings() {
+            for (var, _) in crate::secrets::secret_fallbacks(v) {
+                work.notes.push(note(
+                    Level::Warn,
+                    "profile",
+                    format!(
+                        "mcp_servers.{n}.{loc}: the ${{{var}:-…}} fallback looks like a secret; it is written to disk wherever {var} is unset. Use ${{{var}}} and set {var} instead"
+                    ),
+                ));
+            }
+        }
+    }
     let mut risky: Vec<String> = applied
         .iter()
         .filter_map(|t| profile.settings.get(t).map(|s| (t, s)))
@@ -298,7 +345,8 @@ pub fn plan(
         targets: applied,
         missing_env: work.render.missing,
         sensitive: work.render.resolved,
-        commands,
+        kept_env: work.render.kept,
+        servers,
         risky,
     })
 }

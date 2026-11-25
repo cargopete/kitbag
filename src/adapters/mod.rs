@@ -183,6 +183,8 @@ pub struct Work {
     pub fs: PlanFs,
     pub render: RenderState,
     pub notes: Vec<Note>,
+    /// (target, server name) of every MCP server entry the plan adds or changes.
+    pub changed_servers: Vec<(String, String)>,
 }
 
 impl Work {

@@ -516,6 +516,13 @@ pub fn scan_for_secrets(p: &Profile) -> Vec<String> {
         for (loc, v) in s.strings() {
             check(format!("mcp_servers.{n}.{loc}"), v, false);
         }
+        for (loc, v) in s.strings() {
+            for (var, _) in crate::secrets::secret_fallbacks(v) {
+                out_extra.push(format!(
+                    "mcp_servers.{n}.{loc}: the ${{{var}:-…}} fallback looks like a secret"
+                ));
+            }
+        }
         // Anything capture-time redaction would still replace is a secret too.
         for r in redact_server(n, s).1 {
             out_extra.push(format!("{}: looks like a {}", r.location, r.reason));
