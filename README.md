@@ -262,6 +262,11 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
   Re-applying replaces the block in place. Paragraphs already in your own text are not
   duplicated into the block.
 - **Idempotent.** Applying the same profile twice changes nothing.
+- **Redacted text never replaces your originals.** A captured profile holds `[REDACTED…]`
+  where capture removed a secret from free text. When applying it back to a file that is
+  the original of that redacted copy, kitbag keeps your file and says so. If the file
+  differs in other ways too, it is replaced, with a warning that the new content contains
+  redaction markers.
 - **Symlinks are respected, and confined.** At user scope, a config file that is a symlink
   (say into a dotfiles repo) is written through: the plan names the real file, and the link
   stays a link, including after undo. At project scope, where the files may come from someone

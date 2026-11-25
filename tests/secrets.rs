@@ -394,8 +394,14 @@ fn header_args_without_a_space_are_redacted_and_captured() {
         .success();
     let p = profile_io::load(&sb.path("prof")).unwrap();
     assert_eq!(p.mcp_servers["a"].args[3], "X-Api-Key:${A_X_API_KEY}");
-    assert_eq!(p.mcp_servers["b"].args[3], "Authorization:Bearer ${B_TOKEN}");
-    assert_eq!(p.mcp_servers["c"].args[2], "--header=X-Api-Key:${C_X_API_KEY}");
+    assert_eq!(
+        p.mcp_servers["b"].args[3],
+        "Authorization:Bearer ${B_TOKEN}"
+    );
+    assert_eq!(
+        p.mcp_servers["c"].args[2],
+        "--header=X-Api-Key:${C_X_API_KEY}"
+    );
     assert!(profile_io::scan_for_secrets(&p).is_empty());
     assert!(!all_text_under(&sb.path("prof")).contains("Zk3jQ9"));
 }

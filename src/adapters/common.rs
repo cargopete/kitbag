@@ -14,7 +14,10 @@ use crate::model::{Command, McpServer, Profile, Rule, Skill, SkillFile, Transpor
 use crate::plan_fs::{join_rel, read_opt, read_text_opt, subdirs, walk_files};
 use crate::policy;
 use crate::profile_io::{command_from_markdown, rule_from_markdown, skill_description};
-use crate::secrets::{RefStyle, has_ref, normalize_refs, redact_server, redact_text, render_refs};
+use crate::secrets::{
+    RefStyle, has_redaction_marker, has_ref, is_redacted_form_of, normalize_refs, redact_server,
+    redact_text, render_refs,
+};
 
 /// Suffix of the managed block holding folded rules.
 pub const RULES_BLOCK_SUFFIX: &str = ":rules";
@@ -46,6 +49,9 @@ pub fn write_owned(
         );
         return Ok(());
     }
+    if !check_redacted(work, path, cur.as_deref(), content, target) {
+        return Ok(());
+    }
     work.fs.write(path, content.to_vec())
 }
 
@@ -53,11 +59,20 @@ pub fn write_owned(
 /// order) or surrounding whitespace are left alone, so re-applying a profile
 /// to the tool it was captured from doesn't churn files.
 fn same_markdown(a: &[u8], b: &[u8]) -> bool {
-    let (Ok(a), Ok(b)) = (std::str::from_utf8(a), std::str::from_utf8(b)) else {
+    markdown_matches(a, b, |x, y| x == y)
+}
+
+/// `cur` (on disk) and `want` (from the profile) compared with `eq` on the
+/// trimmed text, or on frontmatter data plus trimmed body.
+fn markdown_matches(cur: &[u8], want: &[u8], eq: impl Fn(&str, &str) -> bool) -> bool {
+    let (Ok(a), Ok(b)) = (std::str::from_utf8(cur), std::str::from_utf8(want)) else {
         return false;
     };
+    if eq(b.trim(), a.trim()) {
+        return true;
+    }
     if !a.starts_with("---") && !b.starts_with("---") {
-        return a.trim() == b.trim();
+        return false;
     }
     let (da, db) = (frontmatter::parse(a), frontmatter::parse(b));
     let clean = |m: &Map<String, Value>| -> Map<String, Value> {
@@ -66,7 +81,56 @@ fn same_markdown(a: &[u8], b: &[u8]) -> bool {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     };
-    clean(&da.data) == clean(&db.data) && da.body.trim() == db.body.trim()
+    clean(&da.data) == clean(&db.data) && eq(db.body.trim(), da.body.trim())
+}
+
+/// Before writing profile content that holds redaction markers over `cur`:
+/// if the profile copy is just the redacted form of what is on disk (a profile
+/// applied back to the tool it was captured from), keep the file and say so;
+/// otherwise warn that the markers will be written literally. Returns whether
+/// to go ahead with the write.
+fn check_redacted(
+    work: &mut Work,
+    path: &Path,
+    cur: Option<&[u8]>,
+    want: &[u8],
+    target: &str,
+) -> bool {
+    if !std::str::from_utf8(want).is_ok_and(has_redaction_marker) {
+        return true;
+    }
+    match cur {
+        Some(c) if markdown_matches(c, want, is_redacted_form_of) => {
+            work.info(
+                target,
+                format!(
+                    "kept {}: the profile holds a redacted copy of it ([REDACTED] where this file has the real values)",
+                    path.display()
+                ),
+            );
+            false
+        }
+        Some(_) => {
+            work.warn(
+                target,
+                format!(
+                    "{} will be replaced with profile content that contains [REDACTED] markers where capture removed secrets; restore the real values after applying (or keep your file with --no-overwrite)",
+                    path.display()
+                ),
+            );
+            true
+        }
+        None => {
+            work.warn(
+                target,
+                format!(
+                    "{} will contain [REDACTED] markers where capture removed secrets; fill in the real values after applying",
+                    path.display()
+                ),
+            );
+            true
+        }
+    }
 }
 
 /// SKILL.md with the `name` / `description` frontmatter some tools require.
@@ -117,7 +181,11 @@ pub fn write_skill(
     let main = dir.join("SKILL.md");
     let want = skill.main_file().map(|f| f.content.as_slice());
     let cur = work.fs.read_bytes(&main)?;
-    if cur.is_some() && cur.as_deref() != want && !opts.overwrite {
+    let differs = match (cur.as_deref(), want) {
+        (Some(c), Some(w)) => c != w && !markdown_matches(c, w, is_redacted_form_of),
+        (c, w) => c != w,
+    };
+    if cur.is_some() && differs && !opts.overwrite {
         work.warn(
             target,
             format!(
@@ -130,7 +198,10 @@ pub fn write_skill(
     }
     for f in &skill.files {
         let path = join_rel(dir, &f.path);
-        if work.fs.read_bytes(&path)?.as_deref() != Some(f.content.as_slice()) {
+        let cur = work.fs.read_bytes(&path)?;
+        if cur.as_deref() != Some(f.content.as_slice())
+            && check_redacted(work, &path, cur.as_deref(), &f.content, target)
+        {
             work.fs.write(&path, f.content.clone())?;
         }
     }
@@ -143,13 +214,29 @@ pub fn upsert_block_file(
     path: &Path,
     id: &str,
     content: Option<&str>,
+    target: &str,
 ) -> Result<()> {
     let cur = work.fs.read(path)?;
     if content.is_none() && cur.is_none() {
         return Ok(());
     }
+    if let (Some(text), Some(c)) = (cur.as_deref(), content)
+        && block::holds_original_of(text, id, c)
+    {
+        work.info(
+            target,
+            format!(
+                "kept kitbag block '{id}' in {}: the profile holds a redacted copy of it",
+                path.display()
+            ),
+        );
+        return Ok(());
+    }
     let next = block::upsert(cur.as_deref(), id, content);
     if Some(next.as_str()) != cur.as_deref() {
+        if let Some(c) = content.filter(|c| has_redaction_marker(c)) {
+            let _ = check_redacted(work, path, None, c.as_bytes(), target);
+        }
         work.fs.write(path, next)?;
     }
     Ok(())
@@ -162,6 +249,7 @@ pub fn write_instructions(
     profile: &Profile,
     opts: &ApplyOptions,
     fold_rules: bool,
+    target: &str,
 ) -> Result<()> {
     let outside = work
         .fs
@@ -173,11 +261,11 @@ pub fn write_instructions(
         .as_deref()
         .map(|i| block::without_paragraphs_in(i, &outside))
         .filter(|c| !c.trim().is_empty());
-    upsert_block_file(work, path, &opts.block_id, content.as_deref())?;
+    upsert_block_file(work, path, &opts.block_id, content.as_deref(), target)?;
     if fold_rules {
         let folded = block::fold_rules(&profile.rules);
         let id = format!("{}{RULES_BLOCK_SUFFIX}", opts.block_id);
-        upsert_block_file(work, path, &id, folded.as_deref())?;
+        upsert_block_file(work, path, &id, folded.as_deref(), target)?;
     }
     Ok(())
 }

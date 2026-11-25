@@ -416,7 +416,7 @@ impl Adapter for Codex {
             );
         }
 
-        write_instructions(work, &p.instructions, profile, opts, true)?;
+        write_instructions(work, &p.instructions, profile, opts, true, ID)?;
         if profile.rules.iter().any(|r| !r.globs.is_empty()) {
             work.info(ID, "Codex has no file-scoped rules; rules were folded into AGENTS.md as labelled sections");
         }

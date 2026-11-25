@@ -425,3 +425,83 @@ fn project_symlinks_cannot_redirect_writes() {
     );
     assert!(!victim.join("newdir").exists());
 }
+
+/// A home whose skill, rule, command and CLAUDE.md hold secret-looking lines.
+fn home_with_secrets(sb: &Sandbox) -> Vec<(std::path::PathBuf, String)> {
+    let xai = format!("xai-{}", "Zk3jQ9vLm2Xp8RtY4wNb7HcF".repeat(3));
+    let files = [
+        (
+            ".claude/skills/deploy/SKILL.md",
+            format!(
+                "---\nname: deploy\ndescription: Deploys\n---\n\nUse key {xai} when calling grok.\n\nPoint it at `postgres://admin:Xk93jdLq0@db.internal/app`. Then run it.\n"
+            ),
+        ),
+        (
+            ".claude/skills/deploy/cli-reference.md",
+            "e.g. `postgres://user:pass@host/db`. Or `redis://u:Q8Zr2LkP0vXa@cache:6379`.\n"
+                .to_string(),
+        ),
+        (
+            ".claude/rules/db.md",
+            "---\npaths:\n  - \"db/**\"\n---\n\nThe staging DB is postgres://app:Q8Zr2LkP0vXa@staging/app\n"
+                .to_string(),
+        ),
+        (
+            ".claude/commands/ship.md",
+            format!("---\ndescription: Ship\n---\n\nexport XAI_API_KEY={xai}\n"),
+        ),
+        (
+            ".claude/CLAUDE.md",
+            format!("# Me\n\nBe brief.\n\nMy grok key is {xai}.\n"),
+        ),
+    ];
+    files
+        .into_iter()
+        .map(|(rel, text)| {
+            let p = sb.home().join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, &text).unwrap();
+            (p, text)
+        })
+        .collect()
+}
+
+#[test]
+fn applying_a_redacted_capture_back_keeps_the_originals() {
+    let sb = Sandbox::empty();
+    let files = home_with_secrets(&sb);
+    sb.cli()
+        .args(["capture", "--from", "claude-code", "-o", "prof"])
+        .assert()
+        .success();
+    let profile = all_text_under(&sb.path("prof"));
+    assert!(profile.contains("[REDACTED"), "{profile}");
+    assert!(!profile.contains("Xk93jdLq0") && !profile.contains("Zk3jQ9"));
+
+    sb.cli()
+        .args(["diff", "prof", "--to", "claude-code", "--exit-code"])
+        .assert()
+        .success()
+        .stdout(contains("Up to date").and(contains("redacted copy")));
+    sb.cli()
+        .args(["apply", "prof", "--to", "claude-code", "--yes"])
+        .assert()
+        .success();
+    for (path, text) in &files {
+        assert_eq!(
+            &fs::read_to_string(path).unwrap(),
+            text,
+            "{}",
+            path.display()
+        );
+    }
+
+    // A file that differs in other ways too is replaced, with a loud warning.
+    let (reference, _) = &files[1];
+    fs::write(reference, "something else\n").unwrap();
+    sb.cli()
+        .args(["diff", "prof", "--to", "claude-code", "--exit-code"])
+        .assert()
+        .code(1)
+        .stdout(contains("contains [REDACTED] markers"));
+}

@@ -229,7 +229,7 @@ impl Adapter for GeminiCli {
         let settings = safe_settings(profile, ID, work);
         merge_json_settings(work, &p.settings, &settings, opts, ID)?;
 
-        write_instructions(work, &p.instructions, profile, opts, true)?;
+        write_instructions(work, &p.instructions, profile, opts, true, ID)?;
         if profile.rules.iter().any(|r| !r.globs.is_empty()) {
             work.info(
                 ID,

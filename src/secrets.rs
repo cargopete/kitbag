@@ -861,6 +861,38 @@ pub fn redact_text(text: &str) -> (String, Vec<&'static str>) {
     (out, kinds)
 }
 
+static MARKER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[REDACTED(?::[a-z0-9-]+)?\]").expect("valid regex"));
+
+/// Does `text` contain a marker left by [`redact_text`]?
+pub fn has_redaction_marker(text: &str) -> bool {
+    MARKER.is_match(text)
+}
+
+/// Is `redacted` what [`redact_text`] makes of `original`, i.e. equal to it
+/// except that each marker stands for one or more characters? Used so that
+/// applying a profile to the tool it was captured from keeps the real values.
+pub fn is_redacted_form_of(redacted: &str, original: &str) -> bool {
+    if !has_redaction_marker(redacted) {
+        return redacted == original;
+    }
+    let parts: Vec<&str> = MARKER.split(redacted).collect();
+    let (first, last) = (parts[0], parts[parts.len() - 1]);
+    let Some(rest) = original.strip_prefix(first) else {
+        return false;
+    };
+    // Leftmost matching of each literal piece leaves the most room for the rest.
+    let mut pos = 0;
+    for piece in &parts[1..parts.len() - 1] {
+        let from = pos + rest[pos..].chars().next().map_or(1, char::len_utf8);
+        let Some(found) = rest.get(from..).and_then(|r| r.find(piece)) else {
+            return false;
+        };
+        pos = from + found + piece.len();
+    }
+    rest.len() > pos + last.len() && rest.ends_with(last)
+}
+
 const SENSITIVE_FILE_NAMES: &[&str] = &[
     "credentials.json",
     "credential.json",
@@ -1383,6 +1415,22 @@ mod tests {
             redact_text("https://x:ghp_FAKE0123456789abcdefghijklmnopqrstuv@github.com/o/r");
         assert_eq!(t, "https://x:[REDACTED:github-token]@github.com/o/r");
         assert_eq!(kinds, vec!["github-token"]);
+    }
+
+    #[test]
+    fn recognises_the_redacted_form_of_a_text() {
+        let original = "a ghp_FAKE0123456789abcdefghijklmnopqrstuv b https://u:Xk93jdLq0@h c";
+        let (red, _) = redact_text(original);
+        assert!(has_redaction_marker(&red));
+        assert!(is_redacted_form_of(&red, original));
+        assert!(!is_redacted_form_of(&red, "a b https://u:@h c"));
+        assert!(!is_redacted_form_of(&red, &format!("{original} and more")));
+        assert!(!is_redacted_form_of(&red, &original.replace(" b ", " B ")));
+        assert!(is_redacted_form_of("same", "same"));
+        assert!(!is_redacted_form_of("[REDACTED]", ""));
+        assert!(is_redacted_form_of("[REDACTED:x][REDACTED]", "ab"));
+        assert!(!is_redacted_form_of("[REDACTED:x][REDACTED]", "a"));
+        assert!(is_redacted_form_of("é[REDACTED]ü", "éßü"));
     }
 
     #[test]

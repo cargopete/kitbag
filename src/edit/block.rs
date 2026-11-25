@@ -16,6 +16,7 @@
 use serde_json::{Map, Value, json};
 
 use crate::model::{Rule, RuleMode, is_valid_name};
+use crate::secrets::{has_redaction_marker, is_redacted_form_of};
 
 const NOTE: &str =
     "<!-- Managed by kitbag. Edit the profile and re-apply instead of editing here. -->";
@@ -98,6 +99,16 @@ pub fn upsert(existing: Option<&str>, id: &str, content: Option<&str>) -> String
     format!("{base}{sep}{block}")
 }
 
+/// Is block `id` in `text` the original of `content`, which capture redacted?
+pub fn holds_original_of(text: &str, id: &str, content: &str) -> bool {
+    let want = neutralize(content.trim());
+    has_redaction_marker(&want)
+        && split(text)
+            .blocks
+            .iter()
+            .any(|(b, inner)| b == id && is_redacted_form_of(&want, inner))
+}
+
 /// Defuse kitbag block markers inside content, so profile text can't close the
 /// block early and plant text outside it.
 fn neutralize(content: &str) -> String {
@@ -158,14 +169,18 @@ fn collapse_blank_lines(s: &str) -> String {
 
 /// Paragraphs (blank-line separated) of `content` that do not already appear
 /// verbatim in `existing`. Used so instructions captured from a file's own
-/// text are not duplicated into that file's managed block.
+/// text are not duplicated into that file's managed block. A paragraph that
+/// capture redacted counts as present when `existing` has the original.
 pub fn without_paragraphs_in(content: &str, existing: &str) -> String {
     if existing.trim().is_empty() {
         return content.to_string();
     }
     let have: Vec<String> = paragraphs(existing).collect();
     paragraphs(content)
-        .filter(|p| !have.contains(p))
+        .filter(|p| {
+            !have.contains(p)
+                && !(has_redaction_marker(p) && have.iter().any(|h| is_redacted_form_of(p, h)))
+        })
         .collect::<Vec<_>>()
         .join("\n\n")
 }
@@ -295,6 +310,27 @@ pub fn unfold_rules(text: &str) -> (String, Vec<Rule>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognises_a_block_holding_the_original_of_redacted_content() {
+        let original = "Deploy with ghp_FAKE0123456789abcdefghijklmnopqrstuv.";
+        let (redacted, _) = crate::secrets::redact_text(original);
+        let text = upsert(Some("# Mine\n"), "p", Some(original));
+        assert!(holds_original_of(&text, "p", &redacted));
+        assert!(!holds_original_of(&text, "other", &redacted));
+        assert!(!holds_original_of(
+            &text,
+            "p",
+            "Deploy with [REDACTED:x] now."
+        ));
+        assert_eq!(
+            without_paragraphs_in(
+                &format!("{redacted}\n\nNew."),
+                &format!("Old.\n\n{original}")
+            ),
+            "New."
+        );
+    }
 
     #[test]
     fn upsert_appends_replaces_and_removes() {

@@ -287,7 +287,7 @@ impl Adapter for ClaudeCode {
             ID,
         )?;
 
-        write_instructions(work, &p.instructions, profile, opts, false)?;
+        write_instructions(work, &p.instructions, profile, opts, false, ID)?;
 
         for r in &profile.rules {
             if r.mode() == RuleMode::OnDemand {

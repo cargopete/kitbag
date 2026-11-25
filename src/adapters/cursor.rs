@@ -331,7 +331,7 @@ impl Adapter for Cursor {
 
         match (&p.instructions, &p.rules) {
             (Some(instr), Some(rules_dir)) => {
-                write_instructions(work, instr, profile, opts, false)?;
+                write_instructions(work, instr, profile, opts, false, ID)?;
                 for r in &profile.rules {
                     let path = rules_dir.join(format!("{}.mdc", r.name));
                     write_owned(
