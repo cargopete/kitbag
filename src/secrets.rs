@@ -517,15 +517,19 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
         let a = s.args[i].clone();
         if let Some(c) = FLAG_EQ.captures(&a) {
             // `--header=Authorization: Bearer ...`
-            if let Some((new, env_var, reason)) = redact_header_arg(server_name, &c[2]) {
-                s.args[i] = format!("{}={new}", &c[1]);
-                out.push(Redaction {
-                    location: format!("{loc}.args[{i}]"),
-                    env_var,
-                    reason,
-                    fingerprint: None,
-                });
-                continue;
+            match redact_header_arg(server_name, &c[2]) {
+                HeaderArg::Redacted(new, env_var, reason) => {
+                    s.args[i] = format!("{}={new}", &c[1]);
+                    out.push(Redaction {
+                        location: format!("{loc}.args[{i}]"),
+                        env_var,
+                        reason,
+                        fingerprint: None,
+                    });
+                    continue;
+                }
+                HeaderArg::Referenced => continue,
+                HeaderArg::NotHeader => {}
             }
             let flag = c[1].trim_start_matches('-').to_string();
             if let Some(reason) = classify(Some(&flag), &c[2]) {
@@ -558,17 +562,23 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
             continue;
         }
         // `Header-Name: value` (mcp-remote --header, curl-style wrappers).
-        if !URL_LIKE.is_match(&a)
-            && let Some((new, env_var, reason)) = redact_header_arg(server_name, &a)
-        {
-            s.args[i] = new;
-            out.push(Redaction {
-                location: format!("{loc}.args[{i}]"),
-                env_var,
-                reason,
-                fingerprint: None,
-            });
-            continue;
+        if !URL_LIKE.is_match(&a) {
+            match redact_header_arg(server_name, &a) {
+                HeaderArg::Redacted(new, env_var, reason) => {
+                    s.args[i] = new;
+                    out.push(Redaction {
+                        location: format!("{loc}.args[{i}]"),
+                        env_var,
+                        reason,
+                        fingerprint: None,
+                    });
+                    continue;
+                }
+                // `X-Api-Key:${KEY}` is already safe; the entropy check below
+                // would misread the name and reference as one opaque token.
+                HeaderArg::Referenced => continue,
+                HeaderArg::NotHeader => {}
+            }
         }
         // URLs: credentials in userinfo or query parameters.
         if URL_LIKE.is_match(&a) {
@@ -639,9 +649,21 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
     (s, out)
 }
 
-/// `Name: value` with a secret value -> (`Name: ${VAR}`, VAR, reason).
-fn redact_header_arg(server_name: &str, arg: &str) -> Option<(String, String, &'static str)> {
-    let c = HEADER_ARG.captures(arg)?;
+/// What [`redact_header_arg`] made of an argument.
+enum HeaderArg {
+    /// Not `Header-Name: value`, or a header whose value isn't a secret.
+    NotHeader,
+    /// A header whose value already uses an env reference.
+    Referenced,
+    /// (`Name: ${VAR}`, VAR, reason).
+    Redacted(String, String, &'static str),
+}
+
+/// `Name: value` with a secret value -> `Name: ${VAR}`.
+fn redact_header_arg(server_name: &str, arg: &str) -> HeaderArg {
+    let Some(c) = HEADER_ARG.captures(arg) else {
+        return HeaderArg::NotHeader;
+    };
     let (name, sep, value) = (c[1].to_string(), c[2].to_string(), c[3].trim().to_string());
     // Only HTTP-header-shaped names (X-Api-Key, Authorization, Cookie) or secret
     // names; `user:secret` and similar pairs are left to the flag-based checks.
@@ -649,16 +671,20 @@ fn redact_header_arg(server_name: &str, arg: &str) -> Option<(String, String, &'
         || ["authorization", "cookie"].contains(&name.to_ascii_lowercase().as_str())
         || is_secret_name(&name);
     if !header_like {
-        return None;
+        return HeaderArg::NotHeader;
     }
     let (scheme, raw) = match BEARER.captures(&value) {
         Some(b) => (Some(b[1].to_string()), b[2].to_string()),
         None => (None, value.clone()),
     };
     if has_ref(&raw) {
-        return None;
+        return HeaderArg::Referenced;
     }
-    let reason = classify(Some(&name), &raw).or(scheme.as_ref().map(|_| "authorization-header"))?;
+    let Some(reason) =
+        classify(Some(&name), &raw).or(scheme.as_ref().map(|_| "authorization-header"))
+    else {
+        return HeaderArg::NotHeader;
+    };
     let part = if name.eq_ignore_ascii_case("authorization") {
         "token"
     } else {
@@ -670,7 +696,7 @@ fn redact_header_arg(server_name: &str, arg: &str) -> Option<(String, String, &'
         None => reference(&env_var),
     };
     // Keep the original separator: mcp-remote documents `Name:value` without a space.
-    Some((format!("{name}{sep}{v}"), env_var, reason))
+    HeaderArg::Redacted(format!("{name}{sep}{v}"), env_var, reason)
 }
 
 fn percent_decode(s: &str) -> String {

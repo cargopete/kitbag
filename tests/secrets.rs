@@ -375,3 +375,27 @@ fn identical_secrets_share_a_variable_and_native_refs_are_respected() {
     assert_eq!(p.mcp_servers["c"].env["API_KEY"], "${API_KEY}");
     assert_eq!(p.mcp_servers["d"].env["API_KEY"], "${D_API_KEY}");
 }
+
+#[test]
+fn header_args_without_a_space_are_redacted_and_captured() {
+    let sb = Sandbox::empty();
+    fs::write(
+        sb.home().join(".claude.json"),
+        r#"{"mcpServers": {
+            "a": {"command": "npx", "args": ["mcp-remote", "https://x.dev/mcp", "--header", "X-Api-Key:Zk3jQ9vLm2Xp8RtY4wNb7HcF1sDg6KaE"]},
+            "b": {"command": "npx", "args": ["mcp-remote", "https://y.dev/mcp", "--header", "Authorization:Bearer Zk3jQ9vLm2Xp8RtY4wNb7HcF1sDg6KaE"]},
+            "c": {"command": "npx", "args": ["mcp-remote", "https://z.dev/mcp", "--header=X-Api-Key:Zk3jQ9vLm2Xp8RtY4wNb7HcF1sDg6KaE"]}
+        }}"#,
+    )
+    .unwrap();
+    sb.cli()
+        .args(["capture", "--from", "claude-code", "-o", "prof"])
+        .assert()
+        .success();
+    let p = profile_io::load(&sb.path("prof")).unwrap();
+    assert_eq!(p.mcp_servers["a"].args[3], "X-Api-Key:${A_X_API_KEY}");
+    assert_eq!(p.mcp_servers["b"].args[3], "Authorization:Bearer ${B_TOKEN}");
+    assert_eq!(p.mcp_servers["c"].args[2], "--header=X-Api-Key:${C_X_API_KEY}");
+    assert!(profile_io::scan_for_secrets(&p).is_empty());
+    assert!(!all_text_under(&sb.path("prof")).contains("Zk3jQ9"));
+}
