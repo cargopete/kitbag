@@ -171,7 +171,13 @@ const SECRET_WORDS: &[&str] = &[
     "privatekey",
     "signature",
     "dsn",
+    "passphrase",
+    "auth",
 ];
+
+/// Words that are secret-sounding even as the end of a longer word
+/// (`PGPASSWORD`, `APITOKEN`, `CLIENTSECRET`).
+const SECRET_SUFFIXES: &[&str] = &["password", "passwd", "passphrase", "token", "secret"];
 
 const QUALIFIERS: &[&str] = &[
     "ttl",
@@ -203,6 +209,27 @@ const QUALIFIERS: &[&str] = &[
     "header",
     "prefix",
     "id",
+    "mode",
+    "method",
+    "provider",
+    "scheme",
+    "strategy",
+    "enabled",
+    "required",
+    "version",
+    "domain",
+    "region",
+    "scope",
+    "scopes",
+    "user",
+    "username",
+    "issuer",
+    "audience",
+    "realm",
+    "algorithm",
+    "level",
+    "env",
+    "var",
 ];
 
 static CAMEL_RE: LazyLock<Regex> =
@@ -234,14 +261,39 @@ pub fn is_secret_name(name: &str) -> bool {
     // `KEY` counts as the last word (API_KEY, STRIPE_KEY) but not as a prefix
     // (KEY_PREFIX, KEY_ID) or after PUBLIC.
     let last = w.len() - 1;
+    // VAULT_SECRET_ID, CLIENT_SECRET_ID: the id half of a credential pair.
+    if last > 0 && w[last] == "id" && w[last - 1] == "secret" {
+        return true;
+    }
     // TOKEN_TTL, PASSWORD_MIN_LENGTH, AUTH_PORT: settings *about* a secret.
     if QUALIFIERS.contains(&w[last].as_str()) {
         return false;
     }
     w.iter().enumerate().any(|(i, word)| {
         SECRET_WORDS.contains(&word.as_str())
+            || SECRET_SUFFIXES.iter().any(|s| word.ends_with(s))
             || (word == "key" && i == last && (i == 0 || w[i - 1] != "public"))
     })
+}
+
+/// Does this HTTP header name suggest a credential? Custom headers are named
+/// freely (`X-Auth`, `X-Session`, `X-Goog-Api-Key`), so any mention counts.
+pub fn is_secret_header_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    is_secret_name(name)
+        || ["auth", "key", "token", "secret", "session", "cookie"]
+            .iter()
+            .any(|w| n.contains(w))
+}
+
+/// The name to classify a header value under: any secret-sounding header
+/// counts as a secret name.
+fn header_key(name: &str) -> &str {
+    if is_secret_header_name(name) {
+        "secret"
+    } else {
+        name
+    }
 }
 
 struct Pattern {
@@ -295,7 +347,7 @@ static STRONG: LazyLock<Vec<Pattern>> =
         ),
         (
             "url-credentials",
-            r"(?i)\b[a-z][a-z0-9+.-]*://[^\s:/@]+:[^\s@/]{3,}@\S+",
+            r"(?i)\b[a-z][a-z0-9+.-]*://[^\s:/@]*:[^\s@/]{3,}@\S+",
         ),
     ]
     .into_iter()
@@ -379,11 +431,33 @@ pub fn looks_random_token(value: &str) -> bool {
 /// (`SESSION_TIMEOUT=3600`, `AUTH_URL=https://...`) are configuration, not secrets.
 fn obviously_not_secret(value: &str) -> bool {
     let v = value.trim();
-    matches!(
-        v.to_ascii_lowercase().as_str(),
-        "true" | "false" | "yes" | "no" | "on" | "off"
-    ) || (URL_LIKE.is_match(v) && strong_secret_kind(v).is_none() && !URL_QUERY.is_match(v))
-        || (PATH_LIKE.is_match(v) && !v.contains(char::is_whitespace))
+    v.is_empty()
+        || matches!(
+            v.to_ascii_lowercase().as_str(),
+            "true" | "false" | "yes" | "no" | "on" | "off" | "none" | "null"
+        )
+        // Ports, counts, durations.
+        || (v.len() <= 5 && v.chars().all(|c| c.is_ascii_digit()))
+        || (URL_LIKE.is_match(v) && strong_secret_kind(v).is_none() && !URL_QUERY.is_match(v))
+        || clearly_a_path(v)
+}
+
+/// `/run/secrets/db`, `~/.ssh/id_rsa`, `C:\keys\a.pem`: more than one segment or
+/// a file extension. A lone `/q8Zr2LkP0...` is a slash-prefixed token, not a path.
+fn clearly_a_path(v: &str) -> bool {
+    if !PATH_LIKE.is_match(v) || v.contains(char::is_whitespace) {
+        return false;
+    }
+    let rest = v.trim_start_matches(['~', '.', '/', '\\']);
+    let rest = rest
+        .strip_prefix(|c: char| c.is_ascii_alphabetic())
+        .and_then(|r| r.strip_prefix(':'))
+        .map_or(rest, |r| r.trim_start_matches(['/', '\\']));
+    rest.contains(['/', '\\'])
+        || rest
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| (1..=5).contains(&ext.len()))
+        || !looks_random_token(rest)
 }
 
 /// Why `value` (stored under `name`) should be treated as a secret, if it should.
@@ -401,11 +475,8 @@ pub fn classify(name: Option<&str>, value: &str) -> Option<&'static str> {
     {
         return Some("authorization-header");
     }
-    if name.is_some_and(is_secret_name)
-        && value.chars().count() >= 6
-        && !has_ref(value)
-        && !obviously_not_secret(value)
-    {
+    // Under a secret-sounding name any value counts, however short (`rootE`).
+    if name.is_some_and(is_secret_name) && !has_ref(value) && !obviously_not_secret(value) {
         return Some("secret-named-field");
     }
     if looks_random_token(value) {
@@ -473,7 +544,7 @@ static HEADER_ARG: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^([A-Za-z][A-Za-z0-9-]*)(:\s*)([^\s/].*)$").expect("valid regex")
 });
 static URL_USERINFO: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^([a-z][a-z0-9+.-]*://)([^\s:/@]+):([^\s@/]+)@").expect("valid regex")
+    Regex::new(r"(?i)^([a-z][a-z0-9+.-]*://)([^\s:/@]*):([^\s@/]+)@").expect("valid regex")
 });
 static URL_QUERY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"([?&])([^=&#\s]+)=([^&#\s]*)").expect("valid regex"));
@@ -483,6 +554,27 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
     let mut s = input.clone();
     let mut out = Vec::new();
     let loc = format!("mcp_servers.{server_name}");
+
+    // `${API_KEY:-literal}`: the literal is written wherever API_KEY is unset.
+    let locations: Vec<String> = s.strings().into_iter().map(|(l, _)| l).collect();
+    for l in locations {
+        s.map_string_at(&l, |v| {
+            REF_RE
+                .replace_all(v, |c: &Captures| match c.get(2) {
+                    Some(fb) if classify(Some(&c[1]), fb.as_str()).is_some() => {
+                        out.push(Redaction {
+                            location: format!("{loc}.{l}"),
+                            env_var: c[1].to_string(),
+                            reason: "secret-fallback",
+                            fingerprint: None,
+                        });
+                        reference(&c[1])
+                    }
+                    _ => c[0].to_string(),
+                })
+                .into_owned()
+        });
+    }
 
     for (k, v) in s.env.iter_mut() {
         if let Some(reason) = classify(Some(k), v) {
@@ -505,7 +597,7 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
         if sole_ref(&raw).is_some() {
             continue;
         }
-        let reason = classify(Some(k), &raw)
+        let reason = classify(Some(header_key(k)), &raw)
             .or_else(|| (scheme.is_some() && !has_ref(&raw)).then_some("authorization-header"));
         if let Some(reason) = reason {
             let part = if k.eq_ignore_ascii_case("authorization") {
@@ -684,7 +776,7 @@ fn redact_header_arg(server_name: &str, arg: &str) -> HeaderArg {
     // names; `user:secret` and similar pairs are left to the flag-based checks.
     let header_like = name.contains('-')
         || ["authorization", "cookie"].contains(&name.to_ascii_lowercase().as_str())
-        || is_secret_name(&name);
+        || is_secret_header_name(&name);
     if !header_like {
         return HeaderArg::NotHeader;
     }
@@ -696,7 +788,7 @@ fn redact_header_arg(server_name: &str, arg: &str) -> HeaderArg {
         return HeaderArg::Referenced;
     }
     let Some(reason) =
-        classify(Some(&name), &raw).or(scheme.as_ref().map(|_| "authorization-header"))
+        classify(Some(header_key(&name)), &raw).or(scheme.as_ref().map(|_| "authorization-header"))
     else {
         return HeaderArg::NotHeader;
     };
@@ -1098,7 +1190,7 @@ static TOML_PAIR: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static URL_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\b([a-z][a-z0-9+.-]*://[^\s:/@"]+:)([^\s@/"]{3,})@"#).expect("valid regex")
+    Regex::new(r#"(?i)\b([a-z][a-z0-9+.-]*://[^\s:/@"]*:)([^\s@/"]{3,})@"#).expect("valid regex")
 });
 static FLAG_PAIR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#""(--?[A-Za-z0-9][A-Za-z0-9_-]*)"(\s*,\s*)"((?:[^"\\]|\\.)*)""#)
@@ -1283,8 +1375,39 @@ mod tests {
             "X-Api-Key",
             "password",
             "clientSecret",
+            "PGPASSWORD",
+            "SSH_PASSPHRASE",
+            "VAULT_SECRET_ID",
+            "APITOKEN",
+            "BASIC_AUTH",
+            "PRIVATE_KEY",
+            "DB_CREDENTIAL",
         ] {
             assert!(is_secret_name(n), "{n}");
+        }
+        for h in ["X-Auth", "X-Session", "X-Goog-Api-Key", "Cookie", "X-Token"] {
+            assert!(is_secret_header_name(h), "{h}");
+        }
+        for h in ["Accept", "Content-Type", "X-Request-Id"] {
+            assert!(!is_secret_header_name(h), "{h}");
+        }
+        for (n, v) in [
+            ("DB_PASSWORD", "rootE"),
+            ("API_KEY", "x1"),
+            ("AWS_SECRET_ACCESS_KEY", "/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEYG"),
+        ] {
+            assert_eq!(classify(Some(n), v), Some("secret-named-field"), "{n}={v}");
+        }
+        for (n, v) in [
+            ("DB_PASSWORD", ""),
+            ("API_KEY", "${API_KEY}"),
+            ("SECRET_DAYS", "30"),
+            ("ENABLE_AUTH", "true"),
+            ("TOKEN_PATH", "/run/secrets/token"),
+            ("PASSWORD", "/run/secrets/db_password"),
+            ("PASSWORD", "C:\\keys\\db.txt"),
+        ] {
+            assert_eq!(classify(Some(n), v), None, "{n}={v}");
         }
         for n in [
             "LOG_LEVEL",
@@ -1296,6 +1419,10 @@ mod tests {
             "PATH",
             "AUTH_SERVER_URL",
             "SESSION_TIMEOUT",
+            "MAX_TOKENS",
+            "AUTH_MODE",
+            "TOKENIZER",
+            "PASSWORD_MIN_LENGTH",
         ] {
             assert!(!is_secret_name(n), "{n}");
         }
@@ -1546,9 +1673,18 @@ mod tests {
                 "Bash(curl -H 'X-Api-Key: abcd1234efgh5678Q' https://api.x.example/*)",
                 "Bash(curl -H 'X-Api-Key: [REDACTED]' https://api.x.example/*)",
             ),
-            ("run with --token abc123def456", "run with --token [REDACTED]"),
-            ("Authorization: Bearer lowentropy42tok", "Authorization: Bearer [REDACTED]"),
-            ("DB_PASSWORD=\"s3cr3t-pw\" psql", "DB_PASSWORD=\"[REDACTED]\" psql"),
+            (
+                "run with --token abc123def456",
+                "run with --token [REDACTED]",
+            ),
+            (
+                "Authorization: Bearer lowentropy42tok",
+                "Authorization: Bearer [REDACTED]",
+            ),
+            (
+                "DB_PASSWORD=\"s3cr3t-pw\" psql",
+                "DB_PASSWORD=\"[REDACTED]\" psql",
+            ),
         ] {
             let (t, kinds) = redact_text(text);
             assert_eq!(t, want, "{text}");

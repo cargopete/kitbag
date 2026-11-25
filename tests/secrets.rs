@@ -507,3 +507,56 @@ fn doctor_flags_secrets_left_in_frontmatter_and_permission_rules() {
             .and(contains("settings.claude-code")),
     );
 }
+
+#[test]
+fn secret_names_short_values_fallbacks_and_password_only_urls_are_redacted() {
+    let sb = Sandbox::empty();
+    fs::write(
+        sb.home().join(".claude.json"),
+        r#"{"mcpServers":{
+  "s":{"command":"x","env":{"PGPASSWORD":"hunter2hunterA","SSH_PASSPHRASE":"correct horse batteryC","VAULT_SECRET_ID":"hunter2hunterD","DB_PASSWORD":"rootE","APITOKEN":"abcd1234efghF","AWS_SECRET_ACCESS_KEY":"/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEYG"}},
+  "h":{"type":"http","url":"https://x.example/mcp","headers":{"X-Auth":"mysecretvalueI","X-Session":"shortsess123J"}},
+  "f":{"command":"x","env":{"API_KEY":"${API_KEY:-opaqueFallbackCredential9876}","LEVEL":"${LEVEL:-debug}"}},
+  "r":{"command":"redis-mcp","args":["redis://:s3cretRedisPw0rd@cache:6379/0"],"env":{"REDIS_URL":"redis://:s3cretRedisPw0rd@cache:6379/0"}},
+  "ok":{"command":"y","env":{"LOG_LEVEL":"debug","AUTH_MODE":"oauth","DB_PASSWORD_FILE":"/run/secrets/db_password","ENABLE_AUTH":"true","PASSWORD":"","SECRET_DAYS":"30","GITHUB_TOKEN":"${GITHUB_TOKEN}"},"headers":{"Accept":"application/json"}}
+}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(sb.home().join(".claude")).unwrap();
+    fs::write(
+        sb.home().join(".claude/settings.json"),
+        r#"{"permissions":{"allow":["Bash(PGPASSWORD=hunter2hunterR psql:*)"]}}"#,
+    )
+    .unwrap();
+    sb.cli()
+        .args(["capture", "--from", "claude-code", "-o", "prof"])
+        .assert()
+        .success();
+    let text = sb.read("prof/kitbag.toml");
+    for leak in [
+        "hunter2",
+        "correct horse",
+        "rootE",
+        "abcd1234",
+        "wJalr",
+        "mysecretvalue",
+        "shortsess",
+        "opaqueFallback",
+        "s3cret",
+    ] {
+        assert!(!text.contains(leak), "{leak} leaked:\n{text}");
+    }
+    for kept in [
+        r#"API_KEY = "${API_KEY}""#,
+        r#"LEVEL = "${LEVEL:-debug}""#,
+        r#"LOG_LEVEL = "debug""#,
+        r#"AUTH_MODE = "oauth""#,
+        r#"DB_PASSWORD_FILE = "/run/secrets/db_password""#,
+        r#"ENABLE_AUTH = "true""#,
+        r#"SECRET_DAYS = "30""#,
+        r#"Accept = "application/json""#,
+        "redis://:${R_PASSWORD}@cache:6379/0",
+    ] {
+        assert!(text.contains(kept), "{kept} missing:\n{text}");
+    }
+}

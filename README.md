@@ -242,10 +242,14 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
      Perplexity, Tavily, Firecrawl, Replicate, Supabase, Stripe, Slack, AWS, Google, GitLab,
      npm, PyPI, Hugging Face, Linear, Notion, Sentry, SendGrid, Shopify, DigitalOcean, JWTs,
      private keys, or passwords in URLs;
-   - it sits under a secret-sounding name (`*_TOKEN`, `*_KEY`, `password`, `Authorization` ...);
+   - it sits under a secret-sounding name (`*_TOKEN`, `*_KEY`, `*PASSWORD`, `*_PASSPHRASE`,
+     `*_SECRET_ID`, `*AUTH`, `Authorization`, or a header mentioning auth, key, token, secret,
+     session or cookie), however short. Empty values, booleans, small numbers, file paths and
+     `${VAR}` references don't count;
    - it is a high-entropy opaque string.
 
-   Redaction covers env values, headers, URL credentials and query parameters. It also covers
+   Redaction covers env values, headers, URL credentials (`user:pass@` and `:pass@`), query
+   parameters and the literal fallback of `${VAR:-fallback}` (it becomes `${VAR}`). It also covers
    secrets passed through `args`, as in `--api-key=…`, `--token …`, `NAME=value` (e.g.
    `docker -e`), `Authorization: Bearer …` (e.g. `mcp-remote --header`) and URLs.
    Known token formats are also redacted from instructions, rules, commands and skill files,
