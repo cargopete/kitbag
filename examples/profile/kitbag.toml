@@ -1,0 +1,35 @@
+# kitbag profile: https://github.com/cargopete/kitbag
+# Secrets are never stored here. Use ${ENV_VAR} references; they are
+# resolved from your environment (or by the tool itself) when you apply.
+kitbag = 1
+name = "example"
+description = "A realistic starter setup: GitHub, docs lookup, browser automation and Linear"
+
+# A local (stdio) server. The token is a reference: Claude Code, Cursor and
+# Gemini CLI expand it themselves; Codex forwards it via env_vars.
+[mcp_servers.github]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_PERSONAL_ACCESS_TOKEN}" }
+
+[mcp_servers.context7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp"]
+
+# Only for tools where you do browser work.
+[mcp_servers.playwright]
+command = "npx"
+args = ["@playwright/mcp@latest"]
+only = ["claude-code", "cursor"]
+
+# A remote (streamable HTTP) server with a bearer token.
+[mcp_servers.linear]
+url = "https://mcp.linear.app/mcp"
+headers = { Authorization = "Bearer ${LINEAR_API_KEY}" }
+
+# Per-tool settings. Only allow-listed keys are applied (see README).
+[settings.claude-code]
+permissions = { allow = ["Bash(cargo test:*)", "Bash(cargo clippy:*)"], deny = ["Read(./.env)"] }
+
+[settings.codex]
+model_reasoning_effort = "high"

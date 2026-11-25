@@ -215,7 +215,6 @@ impl<'a> Resolver<'a> {
             self.kept.push(location.to_string());
             return v.to_string();
         }
-        let before = work.render.missing.len();
         let mut probe = crate::secrets::RenderState::default();
         let out = render_refs(v, RefStyle::Resolve, &self.env.vars, &mut probe);
         work.render.resolved.extend(probe.resolved);
@@ -223,7 +222,6 @@ impl<'a> Resolver<'a> {
         if probe.missing.is_empty() {
             self.resolved.push(location.to_string());
         } else {
-            let _ = before;
             self.missing.push(location.to_string());
         }
         out

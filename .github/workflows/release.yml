@@ -1,0 +1,66 @@
+# Builds static binaries for every platform and attaches them, with SHA-256
+# checksums, to a GitHub Release when a version tag (v*) is pushed.
+# Asset names match what install.sh / install.ps1 download:
+#   kitbag-<target>.tar.gz (.zip on Windows) and kitbag-<target>.<ext>.sha256
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag matches Cargo.toml
+        run: |
+          version="$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)"
+          test "v$version" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != v$version"; exit 1; }
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          draft: true
+
+  binaries:
+    needs: create-release
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { target: aarch64-pc-windows-msvc, os: windows-latest }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+        if: contains(matrix.target, 'linux')
+      - name: Static CRT on Windows
+        if: contains(matrix.target, 'windows')
+        shell: bash
+        run: echo "RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: kitbag
+          target: ${{ matrix.target }}
+          archive: kitbag-$target
+          tar: unix
+          zip: windows
+          checksum: sha256
+          include: README.md,LICENSE
+          profile: dist
+          token: ${{ secrets.GITHUB_TOKEN }}
