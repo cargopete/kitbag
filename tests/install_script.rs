@@ -6,6 +6,7 @@
 use std::fs;
 use std::path::Path;
 
+#[cfg(unix)]
 const UNIX_TARGETS: &[&str] = &[
     "x86_64-unknown-linux-musl",
     "aarch64-unknown-linux-musl",
