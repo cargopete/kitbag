@@ -7,15 +7,16 @@ credentials and controls what an agent may run. Please treat it accordingly.
 
 - **Secret redaction on `capture` is best-effort.** kitbag replaces values it recognises as
   secrets with `${ENV_VAR}` references: well-known token formats, values of secret-named
-  fields, auth headers, secret-looking arguments and URL passwords. Some formats are known
-  to slip through today (for example unusual variable names, short values, `${VAR:-default}`
-  fallbacks, tokens inside URL paths or query strings, and frontmatter of rules and
-  commands). **Review a captured profile before you share or commit it.**
+  fields, auth headers, secret-looking arguments, URL passwords and URL tokens, in MCP
+  config, frontmatter, permission rules and free text. It is still a heuristic and can miss
+  a format it doesn't know. **Review a captured profile before you share or commit it.**
 - **Apply profiles only from sources you trust.** A profile can add MCP servers (which run
-  commands or connect to remote endpoints), permission rules, and skills or commands whose
-  frontmatter can carry hooks. kitbag drops the most permissive settings from git sources
-  unless you pass `--allow-risky-settings`, but that filter is not complete yet. Use
-  `kitbag diff <source>` and read the plan before applying.
+  commands or connect to remote endpoints). From git sources, kitbag drops permission allow
+  rules and other permissive settings, skips commands and skills that run shell snippets,
+  strips `hooks` and `allowed-tools` frontmatter, and doesn't resolve your env vars into the
+  profile's servers, unless you pass `--allow-risky-settings` (`--trust-source`). Every plan
+  lists the MCP servers it adds or changes. Use `kitbag diff <source>` and read the plan
+  before applying.
 - `apply` backs up every file it changes and `kitbag undo` restores them.
 
 Known issues are tracked with the

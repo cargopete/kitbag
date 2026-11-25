@@ -18,9 +18,10 @@ OpenAI Codex CLI, Gemini CLI and Claude Desktop are supported, at user and proje
 >   fields, auth headers and URL passwords, but it is known to miss some formats (see the
 >   [open security issues](https://github.com/cargopete/kitbag/issues?q=is%3Aissue+is%3Aopen+label%3Asecurity)).
 >   Review a captured profile before you share or commit it.
-> - **Only apply profiles from git sources you trust.** A remote profile can currently carry
->   permission rules, hooks in skill or command frontmatter, and MCP servers that run
->   commands on your machine. `kitbag diff` shows what would change before you apply.
+> - **Only apply profiles from git sources you trust.** A remote profile can add MCP servers
+>   that run commands on your machine. kitbag drops its permission rules, hooks and shell
+>   snippets unless you pass `--trust-source`, and lists every server it adds or changes.
+>   `kitbag diff` shows what would change before you apply.
 >
 > Details and how to report a problem: [SECURITY.md](SECURITY.md).
 
