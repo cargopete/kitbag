@@ -939,6 +939,25 @@ fn secret_path_segments(host: &str, segs: &[&str], entropy: bool) -> Vec<usize> 
     out
 }
 
+/// Replace the secret path segments `hits` of `segs` with `with(n)`. A Slack
+/// webhook's `T…/B…/<secret>` tail is one credential, so it becomes one value.
+fn replace_segments(
+    host: &str,
+    segs: &mut Vec<String>,
+    hits: &[usize],
+    mut with: impl FnMut(usize) -> String,
+) {
+    let slack = host.eq_ignore_ascii_case("hooks.slack.com") && hits.len() > 1;
+    if slack && hits.iter().enumerate().all(|(n, i)| *i == n + 1) {
+        segs.truncate(1);
+        segs.push(with(0));
+        return;
+    }
+    for (n, i) in hits.iter().enumerate() {
+        segs[*i] = with(n);
+    }
+}
+
 /// Split a URL into `scheme://authority`, the path segments after it, and the
 /// rest (`?query#fragment`).
 fn split_url(url: &str) -> Option<(&str, &str, &str)> {
@@ -986,16 +1005,17 @@ fn redact_url(server_name: &str, url: &str) -> (String, Vec<(String, &'static st
             let mut segs: Vec<String> = path.split('/').skip(1).map(str::to_string).collect();
             let view: Vec<&str> = segs.iter().map(String::as_str).collect();
             let hits = secret_path_segments(host, &view, true);
-            for (n, i) in hits.iter().enumerate() {
+            replace_segments(host, &mut segs, &hits, |n| {
                 let suffix = if n == 0 {
                     String::new()
                 } else {
                     format!("_{}", n + 1)
                 };
                 let env_var = env_var_name(&[server_name, &format!("url_token{suffix}")]);
-                segs[*i] = reference(&env_var);
+                let r = reference(&env_var);
                 found.push((env_var, "url-path-token"));
-            }
+                r
+            });
             if hits.is_empty() {
                 value.clone()
             } else {
@@ -1039,17 +1059,18 @@ fn redact_text_urls(text: &str) -> (String, bool) {
     let mut hit = false;
     let out = TEXT_URL
         .replace_all(text, |c: &Captures| {
-            let url = &c[0];
+            // Sentence punctuation after a URL isn't part of it.
+            let url = c[0].trim_end_matches(['.', ',', ';', ':', '!', '?']);
+            let tail = &c[0][url.len()..];
             let Some((head, path, rest)) = split_url(url) else {
-                return url.to_string();
+                return c[0].to_string();
             };
             let host = head.split("://").nth(1).unwrap_or("");
             let mut segs: Vec<String> = path.split('/').skip(1).map(str::to_string).collect();
             let view: Vec<&str> = segs.iter().map(String::as_str).collect();
-            for i in secret_path_segments(host, &view, false) {
-                segs[i] = REDACTED_PASSWORD.to_string();
-                hit = true;
-            }
+            let hits = secret_path_segments(host, &view, false);
+            hit |= !hits.is_empty();
+            replace_segments(host, &mut segs, &hits, |_| REDACTED_PASSWORD.to_string());
             let path: String = segs.iter().map(|s| format!("/{s}")).collect();
             let rest = URL_QUERY.replace_all(rest, |q: &Captures| {
                 let v = percent_decode(&q[3]);
@@ -1065,7 +1086,7 @@ fn redact_text_urls(text: &str) -> (String, bool) {
                     q[0].to_string()
                 }
             });
-            format!("{head}{path}{rest}")
+            format!("{head}{path}{rest}{tail}")
         })
         .into_owned();
     (out, hit)
@@ -1954,6 +1975,14 @@ mod tests {
             "https://discord.com/api/webhooks/123456789012345678/${S_URL_TOKEN}"
         );
         assert_eq!(found.len(), 1);
+        let (v, found) = redact_url(
+            "s",
+            "https://hooks.slack.com/services/T0000FAKE/B0000FAKE/FAKE-FAKE-FAKE-FAKEFAKEFAKP",
+        );
+        assert_eq!(v, "https://hooks.slack.com/services/${S_URL_TOKEN}");
+        assert_eq!(found.len(), 1);
+        let (t, _) = redact_text("see https://hooks.slack.com/services/T0/B0/FAKEFAKE.");
+        assert_eq!(t, "see https://hooks.slack.com/services/[REDACTED].");
     }
 
     #[test]
