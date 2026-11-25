@@ -54,9 +54,10 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 
 say "downloading $archive ($VERSION)"
 fetch "$base/$archive" "$tmp/$archive" || die "download failed: $base/$archive"
-fetch "$base/$archive.sha256" "$tmp/$archive.sha256" || die "checksum download failed"
+checksum="$BIN-$target.sha256"
+fetch "$base/$checksum" "$tmp/$checksum" || die "checksum download failed: $base/$checksum"
 
-expected="$(cut -d ' ' -f 1 < "$tmp/$archive.sha256")"
+expected="$(cut -d ' ' -f 1 < "$tmp/$checksum")"
 if command -v sha256sum >/dev/null 2>&1; then
   actual="$(sha256sum "$tmp/$archive" | cut -d ' ' -f 1)"
 elif command -v shasum >/dev/null 2>&1; then

@@ -7,13 +7,14 @@ $version = if ($env:KITBAG_VERSION) { $env:KITBAG_VERSION } else { 'latest' }
 $dir = if ($env:KITBAG_INSTALL_DIR) { $env:KITBAG_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'kitbag\bin' }
 $arch = if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'aarch64' } else { 'x86_64' }
 $archive = "kitbag-$arch-pc-windows-msvc.zip"
+$checksum = "kitbag-$arch-pc-windows-msvc.sha256"
 $base = if ($version -eq 'latest') { "https://github.com/$repo/releases/latest/download" } else { "https://github.com/$repo/releases/download/$version" }
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid())
 New-Item -ItemType Directory -Path $tmp | Out-Null
 try {
   Invoke-WebRequest "$base/$archive" -OutFile (Join-Path $tmp $archive)
-  Invoke-WebRequest "$base/$archive.sha256" -OutFile (Join-Path $tmp "$archive.sha256")
-  $expected = (Get-Content (Join-Path $tmp "$archive.sha256")).Split(' ')[0].ToLower()
+  Invoke-WebRequest "$base/$checksum" -OutFile (Join-Path $tmp $checksum)
+  $expected = (Get-Content (Join-Path $tmp $checksum) -Raw).Trim().Split(' ')[0].ToLower()
   $actual = (Get-FileHash (Join-Path $tmp $archive) -Algorithm SHA256).Hash.ToLower()
   if ($expected -ne $actual) { throw "checksum mismatch for $archive" }
   Expand-Archive (Join-Path $tmp $archive) -DestinationPath $tmp -Force

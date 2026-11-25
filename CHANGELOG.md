@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed (release dry run v0.1.0-rc.1)
+
+- `install.sh` and `install.ps1` asked for `kitbag-<target>.<ext>.sha256`, but the release uploads `kitbag-<target>.sha256`, so every scripted install failed. Both now use the uploaded name; `tests/install_script.rs` runs `install.sh` against release-shaped assets.
+
 ### Added
 
 - Portable profile format (`kitbag.toml`, `instructions.md`, `rules/`, `commands/`, `skills/`), format version 1.
