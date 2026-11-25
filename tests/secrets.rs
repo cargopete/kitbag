@@ -560,3 +560,53 @@ fn secret_names_short_values_fallbacks_and_password_only_urls_are_redacted() {
         assert!(text.contains(kept), "{kept} missing:\n{text}");
     }
 }
+
+#[test]
+fn tokens_in_url_paths_queries_and_usernames_are_redacted() {
+    let sb = Sandbox::empty();
+    fs::write(
+        sb.home().join(".claude.json"),
+        r#"{"mcpServers":{
+  "z":{"type":"http","url":"https://mcp.zapier.example/api/mcp/s/NjY4OTdhZjQtMmQ1Yi00ZWQ2LWFiYzEtFAKEH/mcp"},
+  "z2":{"type":"http","url":"https://mcp.zapier.example/api/mcp/s/sk-proj-FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE/mcp"},
+  "e":{"command":"x","args":["--endpoint=https://host.example/sse?api_key=abcdef123456789K&region=eu","CALLBACK=https://cb.example/x?token=q8ZrT5mW2pL9xK4vN7bQ9WdEZ"],
+       "env":{"API_BASE":"https://api.x.example/v1?token=q8ZrT5mW2pL9xK4vN7bQ9WdEO",
+              "SLACK_WEBHOOK_URL":"https://hooks.slack.com/services/T0000FAKE/B0000FAKE/FAKE-FAKE-FAKE-FAKEFAKEFAKP",
+              "DISCORD":"https://discord.com/api/webhooks/123456789012345678/FAKEdiscordFAKEdiscordFAKEdiscordW"}},
+  "u":{"command":"x","args":["https://tokenonlyuser@api.example/x","ssh://git@github.com/o/r.git","https://bob@example.com/repo.git"]}
+}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(sb.home().join(".claude/rules")).unwrap();
+    fs::write(
+        sb.home().join(".claude/rules/hooks.md"),
+        "Post to https://hooks.slack.com/services/T0000FAKE/B0000FAKE/FAKE-FAKE-FAKE-FAKEFAKEFAKT or https://api.example/v1?api_key=abcdef123456789T&page=2, not https://api.example/v1?api_key=YOUR_KEY.\n",
+    )
+    .unwrap();
+    sb.cli()
+        .args(["capture", "--from", "claude-code", "-o", "prof"])
+        .assert()
+        .success();
+    let text = all_text_under(&sb.path("prof"));
+    for leak in [
+        "NjY4",
+        "FAKEFAKE",
+        "abcdef1234",
+        "q8Zr",
+        "FAKEdiscord",
+        "tokenonlyuser",
+    ] {
+        assert!(!text.contains(leak), "{leak} leaked:\n{text}");
+    }
+    for kept in [
+        "https://mcp.zapier.example/api/mcp/s/${",
+        "&region=eu",
+        "https://hooks.slack.com/services/",
+        "ssh://git@github.com/o/r.git",
+        "https://bob@example.com/repo.git",
+        "&page=2",
+        "api_key=YOUR_KEY",
+    ] {
+        assert!(text.contains(kept), "{kept} missing:\n{text}");
+    }
+}

@@ -249,13 +249,17 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
    - it is a high-entropy opaque string.
 
    Redaction covers env values, headers, URL credentials (`user:pass@` and `:pass@`), query
-   parameters and the literal fallback of `${VAR:-fallback}` (it becomes `${VAR}`). It also covers
+   parameters and the literal fallback of `${VAR:-fallback}` (it becomes `${VAR}`). URLs are
+   checked wherever they appear (`url`, args, `--flag=URL`, env values): tokens in the path
+   (Slack and Discord webhooks, Zapier-style `/mcp/s/<token>/`, random-looking segments) and a
+   token used as the username (`https://<token>@host`) are replaced; `git@` or `bob@` stay. It also covers
    secrets passed through `args`, as in `--api-key=…`, `--token …`, `NAME=value` (e.g.
    `docker -e`), `Authorization: Bearer …` (e.g. `mcp-remote --header`) and URLs.
    Known token formats are also redacted from instructions, rules, commands and skill files,
    frontmatter included, and so are values given to secret-sounding names there
    (`DB_PASSWORD=…`, `X-Api-Key: …`, `--token …`, `Bearer …`). Claude Code permission rules
    in `settings.json` get the same treatment; a rule with a redacted part is not applied back.
+   In free text, secret-named query values and webhook path tokens are replaced too.
    There, a token becomes `[REDACTED:<kind>]`, and in a URL only the password is replaced
    (`postgres://admin:[REDACTED]@db/app`), so the Markdown around it survives. Placeholder
    passwords in documentation examples (`user:pass@`, `:password@`, `:<password>@`,

@@ -586,6 +586,18 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
                 reason,
                 fingerprint: None,
             });
+        } else if URL_LIKE.is_match(v) {
+            // `API_BASE = "https://x/v1?token=..."`: keep the URL, lose the token.
+            let (value, found) = redact_url(server_name, v);
+            *v = value;
+            for (env_var, reason) in found {
+                out.push(Redaction {
+                    location: format!("{loc}.env.{k}"),
+                    env_var,
+                    reason,
+                    fingerprint: None,
+                });
+            }
         }
     }
 
@@ -639,6 +651,20 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
                 HeaderArg::NotHeader => {}
             }
             let flag = c[1].trim_start_matches('-').to_string();
+            if URL_LIKE.is_match(&c[2]) && !is_secret_name(&flag) {
+                // `--endpoint=https://host/sse?api_key=...`
+                let (value, found) = redact_url(server_name, &c[2]);
+                s.args[i] = format!("{}={value}", &c[1]);
+                for (env_var, reason) in found {
+                    out.push(Redaction {
+                        location: format!("{loc}.args[{i}]"),
+                        env_var,
+                        reason,
+                        fingerprint: None,
+                    });
+                }
+                continue;
+            }
             if let Some(reason) = classify(Some(&flag), &c[2]) {
                 let env_var = env_var_name(&[server_name, &flag]);
                 s.args[i] = format!("{}={}", &c[1], reference(&env_var));
@@ -665,6 +691,17 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
                     reason,
                     fingerprint: None,
                 });
+            } else if URL_LIKE.is_match(&c[2]) {
+                let (value, found) = redact_url(server_name, &c[2]);
+                s.args[i] = format!("{}={value}", &c[1]);
+                for (env_var, reason) in found {
+                    out.push(Redaction {
+                        location: format!("{loc}.args[{i}]"),
+                        env_var,
+                        reason,
+                        fingerprint: None,
+                    });
+                }
             }
             continue;
         }
@@ -825,6 +862,68 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// `https://<token>@host`: a username that is itself the credential. Only for
+/// HTTP(S) and WebSocket URLs, and only when it looks like a token, so
+/// `ssh://git@host` and `https://bob@host` stay.
+static URL_TOKEN_USER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^((?:https?|wss?)://)([^\s:/@]+)@").expect("valid regex"));
+
+fn token_username(user: &str) -> bool {
+    !has_ref(user)
+        && !user.contains('.')
+        && (strong_secret_kind(user).is_some()
+            || looks_random_token(user)
+            || user.chars().count() >= 12)
+}
+
+/// Indexes of the path segments of `url` (split on `/`, after the authority)
+/// that carry a credential: known secret-path shapes (Slack and Discord
+/// webhooks, Zapier-style `/mcp/s/<token>/`), known token formats and, if
+/// `entropy`, random-looking segments.
+fn secret_path_segments(host: &str, segs: &[&str], entropy: bool) -> Vec<usize> {
+    let host = host.rsplit('@').next().unwrap_or(host).to_ascii_lowercase();
+    let mut out = Vec::new();
+    for (i, seg) in segs.iter().enumerate() {
+        if seg.is_empty() || has_ref(seg) || has_redaction_marker(seg) {
+            continue;
+        }
+        let prev = |n: usize| i.checked_sub(n).map(|j| segs[j]);
+        let known = (host == "hooks.slack.com" && segs.first() == Some(&"services") && i > 0)
+            || ((host.ends_with("discord.com") || host.ends_with("discordapp.com"))
+                && prev(3) == Some("api")
+                && prev(2) == Some("webhooks"))
+            || (prev(1) == Some("s") && prev(2) == Some("mcp"));
+        // Paths hold many ids and slugs (`gpt-4o-mini-2024-07-18`), so a
+        // segment must also mix upper case, lower case and digits.
+        let random = entropy
+            && looks_random_token(seg)
+            && seg.chars().any(|c| c.is_ascii_uppercase())
+            && seg.chars().any(|c| c.is_ascii_lowercase())
+            && seg.chars().any(|c| c.is_ascii_digit());
+        if known || strong_secret_kind(seg).is_some() || random {
+            out.push(i);
+        }
+    }
+    out
+}
+
+/// Split a URL into `scheme://authority`, the path segments after it, and the
+/// rest (`?query#fragment`).
+fn split_url(url: &str) -> Option<(&str, &str, &str)> {
+    let scheme_end = url.find("://")? + 3;
+    let after = &url[scheme_end..];
+    let auth_len = after.find(['/', '?', '#']).unwrap_or(after.len());
+    let path_start = scheme_end + auth_len;
+    let path_len = url[path_start..]
+        .find(['?', '#'])
+        .unwrap_or(url.len() - path_start);
+    Some((
+        &url[..path_start],
+        &url[path_start..path_start + path_len],
+        &url[path_start + path_len..],
+    ))
+}
+
 fn redact_url(server_name: &str, url: &str) -> (String, Vec<(String, &'static str)>) {
     let mut found = Vec::new();
     let value = URL_USERINFO
@@ -838,6 +937,42 @@ fn redact_url(server_name: &str, url: &str) -> (String, Vec<(String, &'static st
             r
         })
         .into_owned();
+    let value = URL_TOKEN_USER
+        .replace(&value, |c: &Captures| {
+            if !token_username(&c[2]) {
+                return c[0].to_string();
+            }
+            let env_var = env_var_name(&[server_name, "url_user_token"]);
+            let r = format!("{}{}@", &c[1], reference(&env_var));
+            found.push((env_var, "url-username-token"));
+            r
+        })
+        .into_owned();
+    let value = match split_url(&value) {
+        Some((head, path, rest)) => {
+            let host = head.split("://").nth(1).unwrap_or("");
+            let mut segs: Vec<String> = path.split('/').skip(1).map(str::to_string).collect();
+            let view: Vec<&str> = segs.iter().map(String::as_str).collect();
+            let hits = secret_path_segments(host, &view, true);
+            for (n, i) in hits.iter().enumerate() {
+                let suffix = if n == 0 {
+                    String::new()
+                } else {
+                    format!("_{}", n + 1)
+                };
+                let env_var = env_var_name(&[server_name, &format!("url_token{suffix}")]);
+                segs[*i] = reference(&env_var);
+                found.push((env_var, "url-path-token"));
+            }
+            if hits.is_empty() {
+                value.clone()
+            } else {
+                let path: String = segs.iter().map(|s| format!("/{s}")).collect();
+                format!("{head}{path}{rest}")
+            }
+        }
+        None => value,
+    };
     let value = URL_QUERY
         .replace_all(&value, |c: &Captures| {
             let decoded = percent_decode(&c[3]);
@@ -856,6 +991,55 @@ fn redact_url(server_name: &str, url: &str) -> (String, Vec<(String, &'static st
         })
         .into_owned();
     (value, found)
+}
+
+static TEXT_URL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)\b(?:https?|wss?)://[^\s"'`<>()\[\]{}]+"#).expect("valid regex")
+});
+
+/// `YOUR_KEY`, `<token>`, `xxx`: documentation placeholders, not secrets.
+fn placeholder_value(v: &str) -> bool {
+    placeholder_password(v)
+        || v.to_ascii_lowercase().contains("your")
+        || v.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+}
+
+/// In free text, URLs lose secret-named query values and secret path segments
+/// (known shapes only: prose has too many ids for an entropy guess).
+fn redact_text_urls(text: &str) -> (String, bool) {
+    let mut hit = false;
+    let out = TEXT_URL
+        .replace_all(text, |c: &Captures| {
+            let url = &c[0];
+            let Some((head, path, rest)) = split_url(url) else {
+                return url.to_string();
+            };
+            let host = head.split("://").nth(1).unwrap_or("");
+            let mut segs: Vec<String> = path.split('/').skip(1).map(str::to_string).collect();
+            let view: Vec<&str> = segs.iter().map(String::as_str).collect();
+            for i in secret_path_segments(host, &view, false) {
+                segs[i] = REDACTED_PASSWORD.to_string();
+                hit = true;
+            }
+            let path: String = segs.iter().map(|s| format!("/{s}")).collect();
+            let rest = URL_QUERY.replace_all(rest, |q: &Captures| {
+                let v = percent_decode(&q[3]);
+                if is_secret_name(&q[2])
+                    && !has_ref(&v)
+                    && !placeholder_value(&v)
+                    && !has_redaction_marker(&v)
+                    && classify(Some(&q[2]), &v).is_some()
+                {
+                    hit = true;
+                    format!("{}{}={REDACTED_PASSWORD}", &q[1], &q[2])
+                } else {
+                    q[0].to_string()
+                }
+            });
+            format!("{head}{path}{rest}")
+        })
+        .into_owned();
+    (out, hit)
 }
 
 /// What a URL password is replaced with in free text.
@@ -958,7 +1142,7 @@ fn assignment_spans(text: &str) -> Vec<(usize, usize)> {
         let value = if quoted { &value_from[1..] } else { value_from };
         let start = text.len() - value.len();
         let len = value
-            .find(|c: char| c.is_whitespace() || "\"'`<>,;()[]{}".contains(c))
+            .find(|c: char| c.is_whitespace() || "\"'`<>,;()[]{}&".contains(c))
             .unwrap_or(value.len());
         let raw = &value[..len];
         let trimmed = raw.trim_end_matches(['.', ':', '!']);
@@ -1008,6 +1192,12 @@ pub fn redact_text(text: &str) -> (String, Vec<&'static str>) {
         .into_owned();
     if hit {
         kinds.push("url-credentials");
+        out = replaced;
+    }
+    // Tokens in URL queries and webhook paths.
+    let (replaced, hit) = redact_text_urls(&out);
+    if hit {
+        kinds.push("url-token");
         out = replaced;
     }
     // `Authorization: Bearer <token>` (curl -H, docs).
@@ -1394,7 +1584,10 @@ mod tests {
         for (n, v) in [
             ("DB_PASSWORD", "rootE"),
             ("API_KEY", "x1"),
-            ("AWS_SECRET_ACCESS_KEY", "/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEYG"),
+            (
+                "AWS_SECRET_ACCESS_KEY",
+                "/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEYG",
+            ),
         ] {
             assert_eq!(classify(Some(n), v), Some("secret-named-field"), "{n}={v}");
         }
@@ -1704,6 +1897,30 @@ mod tests {
         ] {
             assert_eq!(redact_text(keep), (keep.to_string(), vec![]), "{keep}");
         }
+    }
+
+    #[test]
+    fn ordinary_url_paths_and_usernames_are_kept() {
+        for url in [
+            "https://api.example/v1/models/gpt-4o-mini-2024-07-18",
+            "https://x.example/items/123e4567-e89b-12d3-a456-426614174000",
+            "https://github.com/o/r/commit/0123456789abcdef0123456789abcdef01234567",
+            "https://bob@example.com/repo.git",
+            "wss://user@stream.example/feed",
+            "https://hooks.slack.com/",
+            "https://x.example/mcp?region=eu&page=2",
+        ] {
+            assert_eq!(redact_url("s", url), (url.to_string(), vec![]), "{url}");
+        }
+        let (v, found) = redact_url(
+            "s",
+            "https://discord.com/api/webhooks/123456789012345678/FAKEdiscordFAKEdiscordFAKEdiscordW",
+        );
+        assert_eq!(
+            v,
+            "https://discord.com/api/webhooks/123456789012345678/${S_URL_TOKEN}"
+        );
+        assert_eq!(found.len(), 1);
     }
 
     #[test]
