@@ -539,10 +539,21 @@ pub fn import_server(
     {
         s.transport = None;
     }
-    let (s, redactions) = redact_server(name, &s);
+    let (redacted, mut redactions) = redact_server(name, &s);
     if cap.profile.mcp_servers.contains_key(name) {
         return;
     }
+    let originals: BTreeMap<String, String> = s
+        .strings()
+        .into_iter()
+        .map(|(loc, v)| (format!("mcp_servers.{name}.{loc}"), v.to_string()))
+        .collect();
+    for r in &mut redactions {
+        r.fingerprint = originals
+            .get(&r.location)
+            .map(|v| crate::txn::sha256(Some(v.as_bytes())).unwrap_or_default());
+    }
+    let s = redacted;
     cap.redactions.extend(redactions);
     cap.profile.mcp_servers.insert(name.to_string(), s);
 }

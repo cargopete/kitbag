@@ -393,3 +393,35 @@ fn sandbox_ignores_real_location_overrides() {
     assert!(!elsewhere.exists());
     assert!(sb.home().join(".codex/AGENTS.md").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn project_symlinks_cannot_redirect_writes() {
+    use std::os::unix::fs::symlink;
+    let sb = Sandbox::empty();
+    sb.cli().args(["init", "prof"]).assert().success();
+    let victim = sb.path("victim");
+    fs::create_dir_all(&victim).unwrap();
+    fs::write(victim.join("authorized_keys"), "ssh-ed25519 AAAA\n").unwrap();
+    let project = sb.project();
+    symlink(victim.join("authorized_keys"), project.join("CLAUDE.md")).unwrap();
+    sb.cli()
+        .args(["apply", "prof", "--to", "claude-code", "--yes", "--project"])
+        .arg(&project)
+        .assert()
+        .code(2)
+        .stderr(contains("outside"));
+    fs::remove_file(project.join("CLAUDE.md")).unwrap();
+    symlink(victim.join("newdir/evil.md"), project.join("AGENTS.md")).unwrap();
+    sb.cli()
+        .args(["apply", "prof", "--to", "codex", "--yes", "--project"])
+        .arg(&project)
+        .assert()
+        .code(2)
+        .stderr(contains("dangling"));
+    assert_eq!(
+        fs::read_to_string(victim.join("authorized_keys")).unwrap(),
+        "ssh-ed25519 AAAA\n"
+    );
+    assert!(!victim.join("newdir").exists());
+}

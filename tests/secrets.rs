@@ -353,3 +353,25 @@ fn directory_symlinks_in_a_profile_are_rejected() {
         "{e}"
     );
 }
+
+#[test]
+fn identical_secrets_share_a_variable_and_native_refs_are_respected() {
+    let sb = Sandbox::empty();
+    let f = sb.home().join(".cursor/mcp.json");
+    fs::create_dir_all(f.parent().unwrap()).unwrap();
+    fs::write(
+        &f,
+        r#"{"mcpServers": {
+            "a": {"command": "a", "env": {"GITHUB_TOKEN": "same-secret-value-123"}},
+            "b": {"command": "b", "env": {"GITHUB_TOKEN": "same-secret-value-123"}},
+            "c": {"command": "c", "env": {"API_KEY": "${env:API_KEY}"}},
+            "d": {"command": "d", "env": {"API_KEY": "different-secret-456"}}
+        }}"#,
+    )
+    .unwrap();
+    let p = capture(&["cursor"], &sb.env(Scope::User)).profile;
+    assert_eq!(p.mcp_servers["a"].env["GITHUB_TOKEN"], "${GITHUB_TOKEN}");
+    assert_eq!(p.mcp_servers["b"].env["GITHUB_TOKEN"], "${GITHUB_TOKEN}");
+    assert_eq!(p.mcp_servers["c"].env["API_KEY"], "${API_KEY}");
+    assert_eq!(p.mcp_servers["d"].env["API_KEY"], "${D_API_KEY}");
+}

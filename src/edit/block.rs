@@ -31,11 +31,20 @@ fn end(id: &str) -> String {
 
 /// Byte range of block `id` in `text`, including a trailing newline.
 fn find_block(text: &str, id: &str) -> Option<(usize, usize)> {
-    // Pair the first end marker with the closest begin marker before it, so a
-    // stray begin marker (say, left by hand) can never swallow user text.
-    let e_marker = end(id);
-    let e = text.find(&e_marker)?;
-    let b = text[..e].rfind(&begin(id))?;
+    // A block is a begin marker followed by an end marker with no other begin
+    // marker in between. Stray markers left by hand are skipped, so they can
+    // neither swallow user text nor cause the block to be appended again.
+    let (b_marker, e_marker) = (begin(id), end(id));
+    let mut from = 0;
+    let (b, e) = loop {
+        let b = from + text[from..].find(&b_marker)?;
+        let after = b + b_marker.len();
+        let e = after + text[after..].find(&e_marker)?;
+        match text[after..e].find(&b_marker) {
+            Some(nb) => from = after + nb,
+            None => break (b, e),
+        }
+    };
     let mut stop = e + e_marker.len();
     if text[stop..].starts_with("\r\n") {
         stop += 2;
@@ -322,6 +331,16 @@ mod tests {
         let b = upsert(Some(&a), "p", Some("B"));
         assert!(b.contains("## My notes\nimportant"), "{b}");
         assert!(b.contains("\nB\n") && !b.contains("\nA\n"));
+    }
+
+    #[test]
+    fn stray_end_marker_does_not_duplicate_blocks() {
+        let mut text = "Mine\n<!-- kitbag:end p -->\nmore\n".to_string();
+        for _ in 0..3 {
+            text = upsert(Some(&text), "p", Some("X"));
+        }
+        assert_eq!(text.matches("<!-- kitbag:begin p -->").count(), 1, "{text}");
+        assert!(text.starts_with("Mine\n<!-- kitbag:end p -->\nmore\n"));
     }
 
     #[test]

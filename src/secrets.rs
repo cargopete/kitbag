@@ -171,6 +171,38 @@ const SECRET_WORDS: &[&str] = &[
     "dsn",
 ];
 
+const QUALIFIERS: &[&str] = &[
+    "ttl",
+    "timeout",
+    "expiry",
+    "expires",
+    "expiration",
+    "length",
+    "len",
+    "size",
+    "count",
+    "limit",
+    "max",
+    "min",
+    "port",
+    "interval",
+    "seconds",
+    "secs",
+    "ms",
+    "url",
+    "uri",
+    "endpoint",
+    "host",
+    "file",
+    "path",
+    "dir",
+    "name",
+    "type",
+    "header",
+    "prefix",
+    "id",
+];
+
 static CAMEL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"([a-z0-9])([A-Z])").expect("valid regex"));
 static JOINED_SECRET_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -200,6 +232,10 @@ pub fn is_secret_name(name: &str) -> bool {
     // `KEY` counts as the last word (API_KEY, STRIPE_KEY) but not as a prefix
     // (KEY_PREFIX, KEY_ID) or after PUBLIC.
     let last = w.len() - 1;
+    // TOKEN_TTL, PASSWORD_MIN_LENGTH, AUTH_PORT: settings *about* a secret.
+    if QUALIFIERS.contains(&w[last].as_str()) {
+        return false;
+    }
     w.iter().enumerate().any(|(i, word)| {
         SECRET_WORDS.contains(&word.as_str())
             || (word == "key" && i == last && (i == 0 || w[i - 1] != "public"))
@@ -293,6 +329,8 @@ static HEX40: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^[0-9a-f]{40}$").expect("valid regex"));
 static UUID: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^[0-9a-f-]{36}$").expect("valid regex"));
+static SRI_HASH: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^sha(?:1|256|384|512)-[A-Za-z0-9+/=]+$").expect("valid regex"));
 static BEARER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(Bearer|Basic|Token)\s+(.+)$").expect("valid regex"));
 
@@ -307,6 +345,7 @@ pub fn looks_random_token(value: &str) -> bool {
     }
     if URL_LIKE.is_match(v)
         || PATH_LIKE.is_match(v)
+        || SRI_HASH.is_match(v)
         || PKG_LIKE.is_match(v)
         || HEX40.is_match(v)
         || UUID.is_match(v)
@@ -328,12 +367,10 @@ pub fn looks_random_token(value: &str) -> bool {
 /// (`SESSION_TIMEOUT=3600`, `AUTH_URL=https://...`) are configuration, not secrets.
 fn obviously_not_secret(value: &str) -> bool {
     let v = value.trim();
-    v.parse::<f64>().is_ok()
-        || matches!(
-            v.to_ascii_lowercase().as_str(),
-            "true" | "false" | "yes" | "no" | "on" | "off"
-        )
-        || (URL_LIKE.is_match(v) && strong_secret_kind(v).is_none() && !URL_QUERY.is_match(v))
+    matches!(
+        v.to_ascii_lowercase().as_str(),
+        "true" | "false" | "yes" | "no" | "on" | "off"
+    ) || (URL_LIKE.is_match(v) && strong_secret_kind(v).is_none() && !URL_QUERY.is_match(v))
         || (PATH_LIKE.is_match(v) && !v.contains(char::is_whitespace))
 }
 
@@ -344,6 +381,13 @@ pub fn classify(name: Option<&str>, value: &str) -> Option<&'static str> {
     }
     if let Some(k) = strong_secret_kind(value) {
         return Some(k);
+    }
+    // `Bearer <token>` / `Basic <creds>` is a credential whatever it is called.
+    if let Some(c) = BEARER.captures(value)
+        && !has_ref(&c[2])
+        && c[2].len() >= 6
+    {
+        return Some("authorization-header");
     }
     if name.is_some_and(is_secret_name)
         && value.chars().count() >= 6
@@ -362,13 +406,16 @@ pub fn classify(name: Option<&str>, value: &str) -> Option<&'static str> {
 // Redaction
 
 /// One value that was replaced by an env reference during capture.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Redaction {
     /// Human-readable location, e.g. `mcp_servers.github.env.GITHUB_TOKEN`.
     pub location: String,
     /// Env var the value must now be supplied through.
     pub env_var: String,
     pub reason: &'static str,
+    /// SHA-256 of the redacted value (set during capture), so identical secrets
+    /// can share one variable while different ones never do.
+    pub fingerprint: Option<String>,
 }
 
 /// `ENV_VAR_NAME` built from parts (`"github", "apiKey"` -> `GITHUB_API_KEY`).
@@ -398,7 +445,7 @@ static FLAG: LazyLock<Regex> =
 static ASSIGN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^([A-Za-z_][A-Za-z0-9_]*)=(.+)$").expect("valid regex"));
 static HEADER_ARG: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^([A-Za-z][A-Za-z0-9-]*):\s+(\S.*)$").expect("valid regex"));
+    LazyLock::new(|| Regex::new(r"^([A-Za-z][A-Za-z0-9-]*):\s*([^\s/].*)$").expect("valid regex"));
 static URL_USERINFO: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^([a-z][a-z0-9+.-]*://)([^\s:/@]+):([^\s@/]+)@").expect("valid regex")
 });
@@ -419,6 +466,7 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
                 location: format!("{loc}.env.{k}"),
                 env_var,
                 reason,
+                fingerprint: None,
             });
         }
     }
@@ -448,6 +496,7 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
                 location: format!("{loc}.headers.{k}"),
                 env_var,
                 reason,
+                fingerprint: None,
             });
         }
     }
@@ -456,6 +505,17 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
     for i in 0..s.args.len() {
         let a = s.args[i].clone();
         if let Some(c) = FLAG_EQ.captures(&a) {
+            // `--header=Authorization: Bearer ...`
+            if let Some((new, env_var, reason)) = redact_header_arg(server_name, &c[2]) {
+                s.args[i] = format!("{}={new}", &c[1]);
+                out.push(Redaction {
+                    location: format!("{loc}.args[{i}]"),
+                    env_var,
+                    reason,
+                    fingerprint: None,
+                });
+                continue;
+            }
             let flag = c[1].trim_start_matches('-').to_string();
             if let Some(reason) = classify(Some(&flag), &c[2]) {
                 let env_var = env_var_name(&[server_name, &flag]);
@@ -464,6 +524,7 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
                     location: format!("{loc}.args[{i}]"),
                     env_var,
                     reason,
+                    fingerprint: None,
                 });
             }
             continue;
@@ -480,40 +541,22 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
                     location: format!("{loc}.args[{i}]"),
                     env_var,
                     reason,
+                    fingerprint: None,
                 });
             }
             continue;
         }
         // `Header-Name: value` (mcp-remote --header, curl-style wrappers).
-        if let Some(c) = HEADER_ARG.captures(&a) {
-            let (name, value) = (c[1].to_string(), c[2].trim().to_string());
-            let (scheme, raw) = match BEARER.captures(&value) {
-                Some(b) => (Some(b[1].to_string()), b[2].to_string()),
-                None => (None, value.clone()),
-            };
-            let reason = if has_ref(&raw) {
-                None
-            } else {
-                classify(Some(&name), &raw).or(scheme.as_ref().map(|_| "authorization-header"))
-            };
-            if let Some(reason) = reason {
-                let part = if name.eq_ignore_ascii_case("authorization") {
-                    "token"
-                } else {
-                    name.as_str()
-                };
-                let env_var = env_var_name(&[server_name, part]);
-                let v = match scheme {
-                    Some(sc) => format!("{sc} {}", reference(&env_var)),
-                    None => reference(&env_var),
-                };
-                s.args[i] = format!("{name}: {v}");
-                out.push(Redaction {
-                    location: format!("{loc}.args[{i}]"),
-                    env_var,
-                    reason,
-                });
-            }
+        if !URL_LIKE.is_match(&a)
+            && let Some((new, env_var, reason)) = redact_header_arg(server_name, &a)
+        {
+            s.args[i] = new;
+            out.push(Redaction {
+                location: format!("{loc}.args[{i}]"),
+                env_var,
+                reason,
+                fingerprint: None,
+            });
             continue;
         }
         // URLs: credentials in userinfo or query parameters.
@@ -526,6 +569,7 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
                         location: format!("{loc}.args[{i}]"),
                         env_var,
                         reason,
+                        fingerprint: None,
                     });
                 }
                 continue;
@@ -547,6 +591,7 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
                 location: format!("{loc}.args[{i}]"),
                 env_var,
                 reason,
+                fingerprint: None,
             });
         }
     }
@@ -560,6 +605,7 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
                     location: format!("{loc}.url"),
                     env_var,
                     reason,
+                    fingerprint: None,
                 });
             }
         }
@@ -575,10 +621,36 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
             location: format!("{loc}.command"),
             env_var,
             reason: kind,
+            fingerprint: None,
         });
     }
 
     (s, out)
+}
+
+/// `Name: value` with a secret value -> (`Name: ${VAR}`, VAR, reason).
+fn redact_header_arg(server_name: &str, arg: &str) -> Option<(String, String, &'static str)> {
+    let c = HEADER_ARG.captures(arg)?;
+    let (name, value) = (c[1].to_string(), c[2].trim().to_string());
+    let (scheme, raw) = match BEARER.captures(&value) {
+        Some(b) => (Some(b[1].to_string()), b[2].to_string()),
+        None => (None, value.clone()),
+    };
+    if has_ref(&raw) {
+        return None;
+    }
+    let reason = classify(Some(&name), &raw).or(scheme.as_ref().map(|_| "authorization-header"))?;
+    let part = if name.eq_ignore_ascii_case("authorization") {
+        "token"
+    } else {
+        name.as_str()
+    };
+    let env_var = env_var_name(&[server_name, part]);
+    let v = match scheme {
+        Some(sc) => format!("{sc} {}", reference(&env_var)),
+        None => reference(&env_var),
+    };
+    Some((format!("{name}: {v}"), env_var, reason))
 }
 
 fn percent_decode(s: &str) -> String {
@@ -675,11 +747,21 @@ const SENSITIVE_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx", "jks", "keys
 
 fn json_has_secret(v: &serde_json::Value, key: Option<&str>) -> bool {
     match v {
-        serde_json::Value::String(s) => classify(key, s).is_some(),
+        serde_json::Value::String(s) => named_secret(key, s),
         serde_json::Value::Array(a) => a.iter().any(|x| json_has_secret(x, key)),
         serde_json::Value::Object(m) => m.iter().any(|(k, x)| json_has_secret(x, Some(k))),
         _ => false,
     }
+}
+
+/// In structured files only names and known formats count; entropy alone
+/// would flag lockfile hashes and the like.
+fn named_secret(key: Option<&str>, value: &str) -> bool {
+    strong_secret_kind(value).is_some()
+        || (key.is_some_and(is_secret_name)
+            && value.chars().count() >= 6
+            && !has_ref(value)
+            && !obviously_not_secret(value))
 }
 
 /// Why a file (e.g. inside a skill) must not be copied into a profile at all:
@@ -717,13 +799,54 @@ pub fn sensitive_file(path: &str, content: &[u8]) -> Option<String> {
         for line in text.lines() {
             if let Some((k, v)) = line.split_once(['=', ':']) {
                 let v = v.trim().trim_matches(['"', '\'', ',']);
-                if classify(Some(k.trim().trim_matches('"')), v).is_some() {
+                if named_secret(Some(k.trim().trim_matches('"')), v) {
                     return Some("contains secret values".to_string());
                 }
             }
         }
     }
     None
+}
+
+static JSON_PAIR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#""([^"\\]+)"(\s*:\s*)"((?:[^"\\]|\\.)*)""#).expect("valid regex")
+});
+static TOML_PAIR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(^|[\s{,])([A-Za-z0-9_-]+|"[^"]+")(\s*=\s*)"((?:[^"\\]|\\.)*)""#)
+        .expect("valid regex")
+});
+
+/// Mask anything in one line of config text that looks like a credential:
+/// known token formats anywhere, and secret-looking values of JSON / TOML keys.
+/// Used for every line kitbag displays, so existing secrets in your files never
+/// show up in a diff.
+pub fn mask_line(line: &str) -> String {
+    let mut out = line.to_string();
+    for p in STRONG.iter() {
+        out =
+            p.re.replace_all(&out, |c: &Captures| {
+                if has_ref(&c[0]) {
+                    c[0].to_string()
+                } else {
+                    "••••••••".into()
+                }
+            })
+            .into_owned();
+    }
+    out = JSON_PAIR
+        .replace_all(&out, |c: &Captures| match classify(Some(&c[1]), &c[3]) {
+            Some(_) => format!("\"{}\"{}\"••••••••\"", &c[1], &c[2]),
+            None => c[0].to_string(),
+        })
+        .into_owned();
+    TOML_PAIR
+        .replace_all(&out, |c: &Captures| {
+            match classify(Some(c[2].trim_matches('"')), &c[4]) {
+                Some(_) => format!("{}{}{}\"••••••••\"", &c[1], &c[2], &c[3]),
+                None => c[0].to_string(),
+            }
+        })
+        .into_owned()
 }
 
 /// The forms a secret can take on disk: raw, and escaped inside a JSON / TOML string.
@@ -932,6 +1055,21 @@ mod tests {
         );
         assert_eq!(classify(Some("TOKEN_TTL"), "3600000"), None);
         assert_eq!(
+            classify(Some("DB_PASSWORD"), "84629137"),
+            Some("secret-named-field")
+        );
+        assert_eq!(
+            classify(Some("AUTH_HEADER"), "Bearer abc123def456"),
+            Some("authorization-header")
+        );
+        assert_eq!(
+            sensitive_file(
+                "package-lock.json",
+                br#"{"integrity": "sha512-q8Zr2LkP0vXa7MnB4cTy9WdEq8Zr2LkP0vXa7MnB4c=="}"#
+            ),
+            None
+        );
+        assert_eq!(
             classify(Some("API_KEY"), "a-real-looking-key"),
             Some("secret-named-field")
         );
@@ -959,6 +1097,9 @@ mod tests {
                 "Authorization: Bearer a8f3kd93jd83hd73hs".into(),
                 "-e".into(),
                 "DB_PASSWORD=hunter2".into(),
+                "--header".into(),
+                "X-Api-Key:abcabc123123".into(),
+                "--header=Authorization: Bearer lowentropytoken1".into(),
                 "postgresql://admin:s3cr3t$pw@db/app".into(),
             ],
             ..Default::default()
@@ -967,10 +1108,12 @@ mod tests {
         assert_eq!(r.args[1], "https://x.dev/sse?api_key=${REMOTE_API_KEY}");
         assert_eq!(r.args[3], "Authorization: Bearer ${REMOTE_TOKEN}");
         assert_eq!(r.args[5], "DB_PASSWORD=${DB_PASSWORD}");
-        assert_eq!(r.args[6], "postgresql://admin:${REMOTE_PASSWORD}@db/app");
-        assert_eq!(red.len(), 4);
+        assert_eq!(r.args[7], "X-Api-Key: ${REMOTE_X_API_KEY}");
+        assert_eq!(r.args[8], "--header=Authorization: Bearer ${REMOTE_TOKEN}");
+        assert_eq!(r.args[9], "postgresql://admin:${REMOTE_PASSWORD}@db/app");
+        assert_eq!(red.len(), 6);
         let flat = r.args.join(" ");
-        for leak in ["a8f3kd93", "hunter2", "s3cr3t"] {
+        for leak in ["a8f3kd93", "hunter2", "s3cr3t", "abcabc", "lowentropy"] {
             assert!(!flat.contains(leak), "{leak} in {flat}");
         }
     }
@@ -989,6 +1132,29 @@ mod tests {
         let (t, kinds) = redact_text("use ghp_FAKE0123456789abcdefghijklmnopqrstuv please");
         assert_eq!(t, "use [REDACTED:github-token] please");
         assert_eq!(kinds, vec!["github-token"]);
+    }
+
+    #[test]
+    fn masks_secret_looking_config_lines() {
+        assert_eq!(
+            mask_line(r#"      "GITHUB_TOKEN": "ghp_FAKE0123456789abcdefghijklmnopqrstuv","#),
+            r#"      "GITHUB_TOKEN": "••••••••","#
+        );
+        assert_eq!(
+            mask_line(r#"  "DB_PASSWORD": "p@ss\"w0rd","#),
+            r#"  "DB_PASSWORD": "••••••••","#
+        );
+        assert_eq!(
+            mask_line(r#"env = { API_KEY = "abcdef123456" }"#),
+            r#"env = { API_KEY = "••••••••" }"#
+        );
+        for keep in [
+            r#""command": "npx","#,
+            r#"env = { API_KEY = "${API_KEY}" }"#,
+            r#""LOG_LEVEL": "debug""#,
+        ] {
+            assert_eq!(mask_line(keep), keep);
+        }
     }
 
     #[test]

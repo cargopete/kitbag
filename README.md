@@ -222,7 +222,7 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
    key files, `credentials.json`, `.env`, JSON/TOML/YAML files with secret-named values, and
    binaries containing tokens.
    Two servers with different secrets under the same key get separate variables
-   (`API_KEY`, `MONGO_API_KEY`).
+   (`API_KEY`, `MONGO_API_KEY`), and identical secrets share one.
 2. **The profile is checked before it is written.** If anything still looks like a credential
    (the same checks as capture), kitbag refuses to write the profile at all. `kitbag doctor`
    runs the same check on any profile.
@@ -232,7 +232,8 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
 4. **Resolution is a last resort, and visible.** Some values have nowhere to go but the file,
    such as anything for Claude Desktop, or a Codex env var whose name differs from its source.
    kitbag resolves those from your environment at apply time and warns per field. The value is
-   masked as `••••••••` in every diff. New files containing resolved values are created `0600`.
+   masked as `••••••••` in every diff. Diffs also mask anything that already looks like a
+   credential in your existing files. New files containing resolved values are created `0600`.
    `--secrets never` keeps the `${VAR}` placeholder instead. Unset variables are reported and
    left as placeholders.
 5. **Profiles from git are untrusted input.** kitbag rejects symlinks inside a profile, both
@@ -256,8 +257,10 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
   Re-applying replaces the block in place. Paragraphs already in your own text are not
   duplicated into the block.
 - **Idempotent.** Applying the same profile twice changes nothing.
-- **Symlinks are respected.** If a config file is a symlink (say into a dotfiles repo), kitbag
-  writes to its target and the link stays a link, including after undo.
+- **Symlinks are respected, and confined.** At user scope, a config file that is a symlink
+  (say into a dotfiles repo) is written through: the plan names the real file, and the link
+  stays a link, including after undo. At project scope, where the files may come from someone
+  else's repository, kitbag refuses to write through links that leave the project or dangle.
 - **Backups and undo.** Every apply is a transaction. The originals are copied to the state
   directory first, writes are atomic, and a failure part-way through rolls back.
   `kitbag history` lists applies, and `kitbag undo [id]` restores them byte for byte. Undo

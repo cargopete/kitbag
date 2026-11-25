@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::adapters::{Adapter, ApplyOptions, Env, Feature, Level, Note, Support, Work};
+use crate::adapters::{Adapter, ApplyOptions, Env, Feature, Level, Note, Scope, Support, Work};
 use crate::model::Profile;
-use crate::plan_fs::FileChange;
+use crate::plan_fs::{FileChange, PlanFs};
 use crate::policy;
 use crate::secrets::{Redaction, env_var_name, reference};
 use crate::txn::{Store, Transaction, WriteOptions};
@@ -112,34 +112,47 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
 /// servers with different secrets under the same key would end up sharing one
 /// variable. Give later servers their own, prefixed variable instead.
 fn dedupe_env_vars(out: &mut CaptureResult) {
-    let mut owner: BTreeMap<String, String> = BTreeMap::new();
-    for r in &mut out.redactions {
-        let Some(rest) = r.location.strip_prefix("mcp_servers.") else {
-            continue;
-        };
-        let Some(server) = out
-            .profile
-            .mcp_servers
-            .keys()
+    let server_of = |loc: &str, names: &[String]| -> Option<String> {
+        let rest = loc.strip_prefix("mcp_servers.")?;
+        names
+            .iter()
             .filter(|n| rest.starts_with(&format!("{n}.")))
             .max_by_key(|n| n.len())
             .cloned()
-        else {
+    };
+    let names: Vec<String> = out.profile.mcp_servers.keys().cloned().collect();
+    let redacted: BTreeSet<&str> = out.redactions.iter().map(|r| r.location.as_str()).collect();
+    // Variables the configs already referenced themselves: (server, no fingerprint).
+    let mut owner: BTreeMap<String, (String, Option<String>)> = BTreeMap::new();
+    for (n, s) in &out.profile.mcp_servers {
+        for (loc, v) in s.strings() {
+            if redacted.contains(format!("mcp_servers.{n}.{loc}").as_str()) {
+                continue;
+            }
+            for var in crate::secrets::refs_in(v) {
+                owner.entry(var).or_insert_with(|| (n.clone(), None));
+            }
+        }
+    }
+    for r in &mut out.redactions {
+        let Some(server) = server_of(&r.location, &names) else {
             continue;
         };
         match owner.get(&r.env_var) {
             None => {
-                owner.insert(r.env_var.clone(), server);
+                owner.insert(r.env_var.clone(), (server, r.fingerprint.clone()));
             }
-            Some(o) if *o == server => {}
+            Some((o, _)) if *o == server => {}
+            // The same secret value in two servers can share one variable.
+            Some((_, Some(fp))) if r.fingerprint.as_ref() == Some(fp) => {}
             Some(_) => {
                 let new = env_var_name(&[&server, &r.env_var]);
-                let field = &rest[server.len() + 1..];
+                let field = r.location[format!("mcp_servers.{server}.").len()..].to_string();
                 let (old_ref, new_ref) = (reference(&r.env_var), reference(&new));
                 if let Some(s) = out.profile.mcp_servers.get_mut(&server) {
-                    s.map_string_at(field, |v| v.replace(&old_ref, &new_ref));
+                    s.map_string_at(&field, |v| v.replace(&old_ref, &new_ref));
                 }
-                owner.insert(new.clone(), server);
+                owner.insert(new.clone(), (server, r.fingerprint.clone()));
                 r.env_var = new;
             }
         }
@@ -168,7 +181,15 @@ pub fn plan(
     env: &Env,
     opts: &ApplyOptions,
 ) -> Result<Plan> {
-    let mut work = Work::default();
+    // Project configs may come from someone else's repository: never let a
+    // symlink in it redirect a write outside the project.
+    let mut work = Work {
+        fs: match env.scope {
+            Scope::Project => PlanFs::rooted(&env.project, true),
+            Scope::User => PlanFs::rooted(&env.home, false),
+        },
+        ..Work::default()
+    };
     let mut applied = Vec::new();
     for a in targets {
         if !a.scopes().contains(&env.scope) {

@@ -136,7 +136,7 @@ pub fn render_diff(
                     out.push('\n');
                     return out;
                 }
-                let text = ch.value().trim_end_matches('\n');
+                let text = crate::secrets::mask_line(ch.value().trim_end_matches('\n'));
                 let line = match ch.tag() {
                     ChangeTag::Insert => paint(GREEN, format!("+{text}")),
                     ChangeTag::Delete => paint(RED, format!("-{text}")),

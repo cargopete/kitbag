@@ -445,7 +445,13 @@ pub fn save(p: &Profile, dir: &Path, force: bool) -> Result<Vec<PathBuf>> {
                 d = cur.parent().map(Path::to_path_buf);
             }
         }
-    } else if fs::read_dir(dir).is_ok_and(|mut rd| rd.next().is_some()) {
+    } else if fs::read_dir(dir).is_ok_and(|rd| {
+        // A fresh repository (.git, README, LICENSE) is fine to capture into.
+        rd.flatten().any(|e| {
+            let n = e.file_name().to_string_lossy().to_ascii_lowercase();
+            !(n.starts_with('.') || n.starts_with("readme") || n.starts_with("license"))
+        })
+    }) {
         return Err(ProfileError::new(
             format!(
                 "{} is not empty and is not a kitbag profile; choose a new or empty directory",
@@ -622,6 +628,18 @@ mod tests {
         );
         assert!(dir.path().join("commands/notes.txt").exists());
         assert_eq!(load(dir.path()).unwrap(), p);
+    }
+
+    #[test]
+    fn captures_into_a_fresh_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        fs::write(dir.path().join("README.md"), "# dotagents").unwrap();
+        save(&sample(), dir.path(), false).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("README.md")).unwrap(),
+            "# dotagents"
+        );
     }
 
     #[test]
