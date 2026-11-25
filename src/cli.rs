@@ -177,6 +177,9 @@ struct ApplyArgs {
     allow_risky_settings: bool,
 }
 
+/// Target label of notes about the profile as a whole.
+const PROFILE_NOTE: &str = "profile";
+
 struct Ctx {
     env: Env,
     state_dir: PathBuf,
@@ -585,7 +588,10 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
         print_notes(&plan.notes);
     }
     if !plan.risky.is_empty() {
-        println!("\n{}", paint(YELLOW, "Lets agents act without asking:"));
+        println!(
+            "\n{}",
+            paint(YELLOW, "Lets agents act without asking, or runs commands:")
+        );
         for r in &plan.risky {
             println!("  - {r}");
         }
@@ -631,6 +637,9 @@ fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) ->
                 dropped.push((target.clone(), d));
             }
         }
+        for d in policy::drop_risky_content(&mut profile) {
+            dropped.push((PROFILE_NOTE.to_string(), d));
+        }
     }
     let opts = ApplyOptions {
         overwrite: !a.no_overwrite,
@@ -639,7 +648,7 @@ fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) ->
     };
     let mut plan = engine::plan(&profile, &targets, env, &opts)?;
     for (target, d) in dropped {
-        if plan.targets.contains(&target) {
+        if plan.targets.contains(&target) || (target == PROFILE_NOTE && !plan.targets.is_empty()) {
             plan.notes.push(adapters::Note {
                 level: adapters::Level::Warn,
                 target,

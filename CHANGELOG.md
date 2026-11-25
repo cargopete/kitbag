@@ -9,6 +9,7 @@ All notable changes to this project are documented here. The format follows
 ### Security
 
 - Profiles from git sources no longer add any `permissions.allow` rule unless `--allow-risky-settings` (new alias: `--trust-source`) is given; the plan lists the rules it left out. `ask` and `deny` rules still apply. The broad-rule warning for local profiles now ignores case and extra whitespace, and also names `Bash(*:*)`, whole-file-system `Read`/`Edit`/`Write` rules, interpreters, package runners, containers and piping into a shell (#1).
+- Profiles from git sources no longer install commands or skills that run shell snippets (``!`cmd` ``, Gemini CLI's `!{cmd}`), and `hooks` and `allowed-tools` are removed from the frontmatter of the rest, unless `--allow-risky-settings` is given. Local profiles get a warning listing hooks, tool grants and shell snippets (#2).
 
 ## [0.1.0] - 2026-11-25
 

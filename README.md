@@ -176,15 +176,18 @@ Anything that lets agents act without asking gets an explicit warning in the pla
 covers `permissions.defaultMode = bypassPermissions` (and `acceptEdits`, `dontAsk`, `auto`),
 `permissions.additionalDirectories`, allow rules (broad ones such as `Bash(*)` or
 `Bash(rm -rf *)` are named), `approval_policy = never` and `sandbox_mode = danger-full-access`.
-It also covers commands and skills whose frontmatter pre-approves tools (`allowed-tools`) and
-commands that run shell snippets (``!`cmd` ``).
+It also covers commands and skills whose frontmatter pre-approves tools (`allowed-tools`) or
+defines `hooks`, and commands and skills that run shell snippets (``!`cmd` `` in Claude Code,
+`!{cmd}` in Gemini CLI commands).
 
 **From a git source, the riskiest settings are dropped** unless you pass
 `--allow-risky-settings` (or its alias `--trust-source`): permissive `defaultMode`s,
 `additionalDirectories`, every `permissions.allow` rule, `approval_policy = never` and
 `sandbox_mode = danger-full-access`. `ask` and `deny` rules still apply, since they restrict.
 The plan lists everything it left out. Profiles in a local directory apply them as written,
-with the warning above. That warning names broad rules, judged case-insensitively and ignoring
+with the warning above. From a git source, commands and skills that run shell snippets are
+skipped, and `hooks` and `allowed-tools` are removed from the frontmatter of the rest, unless
+you pass the same flag. The warning for local profiles names broad rules, judged case-insensitively and ignoring
 extra whitespace: bare tools (`Bash`, `Write`), any command (`Bash(*:*)`), the whole file system
 (`Read(//**)`, `Edit(~/**)`), shells, interpreters, package runners and containers with open
 arguments (`Bash(npx:*)`, `Bash(docker run:*)`), and piping into a shell (`… | sh`).

@@ -284,7 +284,102 @@ pub fn drop_risky(target: &str, settings: &mut Map<String, Value>) -> Vec<String
     out
 }
 
-/// Commands and skills that pre-approve tools or run shell commands when used.
+/// Frontmatter keys of commands and skills that run commands (`hooks`) or
+/// pre-approve tools (`allowed-tools`). Matched ignoring case, `-` and `_`.
+fn executable_key(key: &str) -> bool {
+    let k: String = key
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    k == "hooks" || k == "allowedtools"
+}
+
+/// The shell-snippet syntax in `text`, if any: ``!`cmd` `` runs a command
+/// when a Claude Code command or skill is used, `!{cmd}` when a Gemini CLI
+/// command is.
+pub fn shell_snippet(text: &str) -> Option<&'static str> {
+    if text.contains("!`") {
+        Some("!`...`")
+    } else if text.contains("!{") {
+        Some("!{...}")
+    } else {
+        None
+    }
+}
+
+fn joined_keys(keys: &[String]) -> String {
+    keys.join(", ")
+}
+
+/// For profiles from remote sources: skip commands and skills that run shell
+/// snippets, and remove `hooks` and `allowed-tools` from the frontmatter of
+/// the rest. Returns a description of each change.
+pub fn drop_risky_content(profile: &mut crate::model::Profile) -> Vec<String> {
+    let mut out = Vec::new();
+    profile.commands.retain_mut(|c| {
+        if let Some(syntax) = shell_snippet(&c.body) {
+            out.push(format!(
+                "command '{}', which runs shell commands when invoked ({syntax})",
+                c.name
+            ));
+            return false;
+        }
+        let keys: Vec<String> = c
+            .extra
+            .keys()
+            .filter(|k| executable_key(k))
+            .cloned()
+            .collect();
+        if !keys.is_empty() {
+            c.extra.retain(|k, _| !executable_key(k));
+            out.push(format!(
+                "{} in the frontmatter of command '{}'",
+                joined_keys(&keys),
+                c.name
+            ));
+        }
+        true
+    });
+    profile.skills.retain_mut(|s| {
+        let name = s.name.clone();
+        let Some(main) = s.files.iter_mut().find(|f| f.path == "SKILL.md") else {
+            return true;
+        };
+        let text = String::from_utf8_lossy(&main.content).into_owned();
+        if let Some(syntax) = shell_snippet(&text) {
+            out.push(format!(
+                "skill '{name}', which runs shell commands when loaded ({syntax})"
+            ));
+            return false;
+        }
+        let doc = crate::frontmatter::parse(&text);
+        let keys: Vec<String> = doc
+            .data
+            .keys()
+            .filter(|k| executable_key(k))
+            .cloned()
+            .collect();
+        if !keys.is_empty() {
+            let entries: Vec<(&str, Value)> = doc
+                .data
+                .iter()
+                .filter(|(k, _)| !executable_key(k))
+                .map(|(k, v)| (k.as_str(), v.clone()))
+                .collect();
+            main.content = crate::frontmatter::render(&entries, &doc.body).into_bytes();
+            out.push(format!(
+                "{} in the frontmatter of skill '{name}'",
+                joined_keys(&keys)
+            ));
+        }
+        true
+    });
+    out
+}
+
+/// Commands and skills that pre-approve tools, define hooks or run shell
+/// commands when used.
 pub fn risky_content(profile: &crate::model::Profile) -> Vec<String> {
     let mut out = Vec::new();
     let tools = |v: &Value| match v {
@@ -296,30 +391,33 @@ pub fn risky_content(profile: &crate::model::Profile) -> Vec<String> {
             .join(", "),
         other => other.to_string(),
     };
-    for c in &profile.commands {
-        if let Some(v) = c.extra.get("allowed-tools") {
-            out.push(format!(
-                "command '{}' pre-approves tools: {}",
-                c.name,
-                tools(v)
-            ));
+    let frontmatter = |out: &mut Vec<String>, what: &str, data: &Map<String, Value>| {
+        for (k, v) in data.iter().filter(|(k, _)| executable_key(k)) {
+            if k.to_ascii_lowercase().starts_with("hook") {
+                out.push(format!(
+                    "{what} defines hooks (commands run on tool events)"
+                ));
+            } else {
+                out.push(format!("{what} pre-approves tools: {}", tools(v)));
+            }
         }
-        if c.body.contains("!`") {
+    };
+    for c in &profile.commands {
+        let what = format!("command '{}'", c.name);
+        frontmatter(&mut out, &what, &c.extra);
+        if let Some(syntax) = shell_snippet(&c.body) {
             out.push(format!(
-                "command '{}' runs shell commands when invoked (!`...`)",
-                c.name
+                "{what} runs shell commands when invoked ({syntax})"
             ));
         }
     }
     for s in &profile.skills {
         if let Some(main) = s.main_file() {
+            let what = format!("skill '{}'", s.name);
             let text = String::from_utf8_lossy(&main.content);
-            if let Some(v) = crate::frontmatter::parse(&text).data.get("allowed-tools") {
-                out.push(format!(
-                    "skill '{}' pre-approves tools: {}",
-                    s.name,
-                    tools(v)
-                ));
+            frontmatter(&mut out, &what, &crate::frontmatter::parse(&text).data);
+            if let Some(syntax) = shell_snippet(&text) {
+                out.push(format!("{what} runs shell commands when loaded ({syntax})"));
             }
         }
     }
