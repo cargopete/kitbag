@@ -46,7 +46,8 @@ struct Staged {
 pub struct PlanFs {
     staged: BTreeMap<PathBuf, Staged>,
     base: Option<PathBuf>,
-    confine: bool,
+    /// With confinement: the canonical form of `base`. Every write must land under it.
+    root: Option<PathBuf>,
 }
 
 /// Read a file, mapping "not found" to `None`.
@@ -307,6 +308,17 @@ pub fn subdirs(dir: &Path) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// Is `path` (made of an existing, canonical prefix plus not-yet-existing
+/// plain components) inside `root`? `..` and other non-normal components in
+/// the part that doesn't exist yet count as outside.
+fn within(path: &Path, root: &Path) -> bool {
+    let Ok(rest) = path.strip_prefix(root) else {
+        return false;
+    };
+    rest.components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
 fn keep_bom(before: Option<&[u8]>, content: Vec<u8>) -> Vec<u8> {
     if before.is_some_and(|b| b.starts_with(UTF8_BOM))
         && !content.starts_with(UTF8_BOM)
@@ -333,17 +345,41 @@ impl PlanFs {
     /// Symbolic links below `base` are resolved so the plan names the file that
     /// really changes. With `confine`, links that lead outside `base` (or
     /// dangle) are refused: a cloned project must not redirect writes elsewhere.
+    ///
+    /// Confinement compares canonical paths, so it also holds when `base` is
+    /// reached through a symbolic link itself (`~/src -> /data/src`).
     pub fn rooted(base: &Path, confine: bool) -> Self {
         PlanFs {
             staged: BTreeMap::new(),
             base: Some(base.to_path_buf()),
-            confine,
+            root: confine.then(|| base.canonicalize().unwrap_or_else(|_| base.to_path_buf())),
         }
     }
 
     /// The path a write to `path` really lands on.
     pub fn real_path(&self, path: &Path) -> Result<PathBuf> {
-        self.resolve(path, 0)
+        let Some(root) = &self.root else {
+            return self.resolve(path, 0);
+        };
+        // Spell the path from the canonical root, so links are checked from there.
+        let path = match self.base.as_ref().and_then(|b| path.strip_prefix(b).ok()) {
+            Some(rest) => root.join(rest),
+            None => path.to_path_buf(),
+        };
+        let real = self.resolve(&path, 0)?;
+        if !within(&real, root) {
+            bail!(
+                "{} resolves to {}, outside {}; refusing to write there",
+                path.display(),
+                real.display(),
+                root.display()
+            );
+        }
+        // Name it as the user spelled the project root (the same directory).
+        match (&self.base, real.strip_prefix(root)) {
+            (Some(base), Ok(rest)) => Ok(base.join(rest)),
+            _ => Ok(real),
+        }
     }
 
     fn resolve(&self, path: &Path, depth: usize) -> Result<PathBuf> {
@@ -352,7 +388,7 @@ impl PlanFs {
         }
         let total = path.components().count();
         // Components above the base (e.g. macOS's /var -> /private/var) are trusted.
-        let start = match &self.base {
+        let start = match self.root.as_ref().or(self.base.as_ref()) {
             Some(b) if path.starts_with(b) => b.components().count(),
             _ => total.saturating_sub(1),
         };
@@ -374,18 +410,15 @@ impl PlanFs {
                     cur.display()
                 );
             };
-            if self.confine
-                && let Some(base) = &self.base
+            if let Some(root) = &self.root
+                && !target.starts_with(root)
             {
-                let root = base.canonicalize().unwrap_or_else(|_| base.clone());
-                if !target.starts_with(&root) {
-                    bail!(
-                        "{} is a symbolic link to {}, outside {}; refusing to write through it",
-                        cur.display(),
-                        target.display(),
-                        base.display()
-                    );
-                }
+                bail!(
+                    "{} is a symbolic link to {}, outside {}; refusing to write through it",
+                    cur.display(),
+                    target.display(),
+                    root.display()
+                );
             }
             let rest: PathBuf = path.components().skip(i + 1).collect();
             let next = if rest.as_os_str().is_empty() {

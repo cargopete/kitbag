@@ -25,7 +25,7 @@ use crate::edit::block;
 use crate::edit::json::parse_value;
 use crate::frontmatter;
 use crate::model::{Command, Profile, Rule, RuleMode, Transport, is_valid_name};
-use crate::plan_fs::{join_rel, read_text_opt, walk_files};
+use crate::plan_fs::{join_rel, walk_files};
 use crate::profile_io::rule_from_markdown;
 use crate::secrets::RefStyle;
 
@@ -190,10 +190,10 @@ impl Adapter for Cursor {
     }
 
     fn capture(&self, env: &Env) -> Result<Captured> {
-        let mut cap = Captured::default();
+        let mut cap = Captured::for_env(env);
         let p = paths(env);
 
-        if let Some(text) = read_text_opt(&p.mcp)? {
+        if let Some(text) = cap.read_config(&p.mcp, ID)? {
             cap.sources.push(p.mcp.clone());
             let doc = parse_value(Some(&text), &p.mcp)?;
             for (name, def) in

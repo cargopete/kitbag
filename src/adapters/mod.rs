@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
@@ -211,9 +211,59 @@ pub struct Captured {
     pub redactions: Vec<Redaction>,
     /// Files and directories that were read.
     pub sources: Vec<PathBuf>,
+    /// At project scope: the project root as given and canonicalised. Files
+    /// under it are only read if their real location is inside it too.
+    pub project: Option<(PathBuf, PathBuf)>,
 }
 
 impl Captured {
+    /// An empty capture for `env`; at project scope reads are confined to the project.
+    pub fn for_env(env: &Env) -> Self {
+        let project = (env.scope == Scope::Project).then(|| {
+            let real = env
+                .project
+                .canonicalize()
+                .unwrap_or_else(|_| env.project.clone());
+            (env.project.clone(), real)
+        });
+        Captured {
+            project,
+            ..Self::default()
+        }
+    }
+
+    /// Does `path`, a project file or directory, really live outside the
+    /// project (through a symbolic link)? If so, warn that it was skipped.
+    /// Paths outside the project (the home directory) are not checked.
+    pub fn escapes(&mut self, path: &Path, target: &str) -> bool {
+        let Some((given, root)) = &self.project else {
+            return false;
+        };
+        if !path.starts_with(given) && !path.starts_with(root) {
+            return false;
+        }
+        match path.canonicalize() {
+            Ok(real) if !real.starts_with(root) => {
+                let msg = format!(
+                    "skipped {}: symbolic link to {}, outside the project",
+                    path.display(),
+                    real.display()
+                );
+                self.warn(target, msg);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Read a config file for capture, skipping one that escapes the project.
+    pub fn read_config(&mut self, path: &Path, target: &str) -> Result<Option<String>> {
+        if self.escapes(path, target) {
+            return Ok(None);
+        }
+        crate::plan_fs::read_text_opt(path)
+    }
+
     pub fn info(&mut self, target: &str, message: impl Into<String>) {
         self.notes.push(Note {
             level: Level::Info,

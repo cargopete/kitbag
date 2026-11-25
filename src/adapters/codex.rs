@@ -30,7 +30,6 @@ use crate::edit::toml::{
     item_to_json, json_to_table, json_to_value, parse, set_keep_decor, table_mut,
 };
 use crate::model::{McpServer, Profile, Transport};
-use crate::plan_fs::read_text_opt;
 use crate::policy;
 use crate::profile_io::command_to_markdown;
 use crate::secrets::{reference, sole_ref};
@@ -289,9 +288,9 @@ impl Adapter for Codex {
     }
 
     fn capture(&self, env: &Env) -> Result<Captured> {
-        let mut cap = Captured::default();
+        let mut cap = Captured::for_env(env);
         let p = paths(env);
-        if let Some(text) = read_text_opt(&p.config)? {
+        if let Some(text) = cap.read_config(&p.config, ID)? {
             cap.sources.push(p.config.clone());
             let doc = parse(Some(&text), &p.config)?;
             let servers = doc.get("mcp_servers").map(item_to_json);

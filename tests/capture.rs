@@ -370,3 +370,48 @@ fn one_broken_tool_does_not_stop_a_multi_tool_capture() {
         .failure()
         .stderr(contains("none of the selected tools could be read"));
 }
+
+#[cfg(unix)]
+#[test]
+fn project_capture_skips_links_that_leave_the_project() {
+    use std::os::unix::fs::symlink;
+    let sb = Sandbox::empty();
+    let creds = write(
+        &sb,
+        ".aws/credentials",
+        "[default]\naws_secret_access_key = FAKEcredentialLeftOutsideTheProject\n",
+    );
+    let project = sb.project();
+    fs::create_dir_all(project.join(".claude/rules")).unwrap();
+    fs::create_dir_all(project.join(".cursor")).unwrap();
+    symlink(&creds, project.join("CLAUDE.md")).unwrap();
+    symlink(&creds, project.join(".claude/rules/style.md")).unwrap();
+    symlink(&creds, project.join(".mcp.json")).unwrap();
+    symlink(sb.home().join(".aws"), project.join(".claude/commands")).unwrap();
+    symlink(sb.home().join(".aws"), project.join(".cursor/rules")).unwrap();
+    // A link that stays inside the project is still followed.
+    fs::write(project.join("docs.md"), "Inside the project.\n").unwrap();
+    symlink("../../docs.md", project.join(".claude/rules/docs.md")).unwrap();
+
+    let r = capture(&["claude-code", "cursor"], &sb.env(Scope::Project));
+    let text = format!("{:?}", r.profile);
+    assert!(!text.contains("FAKEcredential"), "{text}");
+    assert!(warned(&r, "outside the project"));
+    for f in ["CLAUDE.md", "style.md", ".mcp.json", "commands"] {
+        assert!(
+            r.notes
+                .iter()
+                .any(|n| n.message.contains(f) && n.message.contains("outside the project")),
+            "{f}: {:?}",
+            r.notes
+        );
+    }
+    assert_eq!(
+        r.profile
+            .rules
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["docs"]
+    );
+}

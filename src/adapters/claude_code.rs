@@ -299,10 +299,10 @@ impl Adapter for ClaudeCode {
     }
 
     fn capture(&self, env: &Env) -> Result<Captured> {
-        let mut cap = Captured::default();
+        let mut cap = Captured::for_env(env);
         let p = paths(env);
 
-        if let Some(text) = read_text_opt(&p.mcp)? {
+        if let Some(text) = cap.read_config(&p.mcp, ID)? {
             cap.sources.push(p.mcp.clone());
             let doc = parse_value(Some(&text), &p.mcp)?;
             for (name, def) in
@@ -340,7 +340,7 @@ impl Adapter for ClaudeCode {
         capture_markdown_dir(&mut cap, &p.commands, ".md", MdKind::Command, ID)?;
         capture_skills_dir(&mut cap, &p.skills, ID)?;
 
-        if let Some(text) = read_text_opt(&p.settings)? {
+        if let Some(text) = cap.read_config(&p.settings, ID)? {
             cap.sources.push(p.settings.clone());
             if let Value::Object(doc) = parse_value(Some(&text), &p.settings)? {
                 pick_settings(&mut cap, ID, &doc);

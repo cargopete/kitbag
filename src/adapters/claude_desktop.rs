@@ -77,7 +77,7 @@ impl Adapter for ClaudeDesktop {
     }
 
     fn capture(&self, env: &Env) -> Result<Captured> {
-        let mut cap = Captured::default();
+        let mut cap = Captured::for_env(env);
         let file = config_path(env);
         let Some(text) = read_text_opt(&file)? else {
             return Ok(cap);

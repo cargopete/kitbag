@@ -392,6 +392,50 @@ fn project_symlinks_cannot_redirect_writes() {
     assert!(!victim.join("newdir").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn project_writes_stay_inside_the_real_project_root() {
+    use std::os::unix::fs::symlink;
+    let sb = Sandbox::empty();
+    sb.cli().args(["init", "prof"]).assert().success();
+    fs::create_dir_all(sb.path("prof/rules")).unwrap();
+    fs::write(
+        sb.path("prof/rules/x.md"),
+        "---\ndescription: r\n---\nrule body\n",
+    )
+    .unwrap();
+    // real/proj/.claude -> inner (stays inside), inner/rules -> outside (escapes).
+    let real = sb.path("real/proj");
+    let outside = sb.path("outside");
+    fs::create_dir_all(real.join("inner")).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    symlink("inner", real.join(".claude")).unwrap();
+    symlink(&outside, real.join("inner/rules")).unwrap();
+    symlink(sb.path("real"), sb.path("alias")).unwrap();
+    for project in [real.clone(), sb.path("alias/proj")] {
+        sb.cli()
+            .args(["apply", "prof", "--to", "claude-code", "--yes", "--project"])
+            .arg(&project)
+            .assert()
+            .code(2)
+            .stderr(contains("outside"));
+        assert_eq!(
+            fs::read_dir(&outside).unwrap().count(),
+            0,
+            "{}",
+            project.display()
+        );
+    }
+    // A link that stays inside the project still works, through the alias too.
+    fs::remove_file(real.join("inner/rules")).unwrap();
+    sb.cli()
+        .args(["apply", "prof", "--to", "claude-code", "--yes", "--project"])
+        .arg(sb.path("alias/proj"))
+        .assert()
+        .success();
+    assert!(real.join("inner/rules/x.md").exists());
+}
+
 /// A home whose skill, rule, command and CLAUDE.md hold secret-looking lines.
 fn home_with_secrets(sb: &Sandbox) -> Vec<(std::path::PathBuf, String)> {
     let xai = format!("xai-{}", "Zk3jQ9vLm2Xp8RtY4wNb7HcF".repeat(3));

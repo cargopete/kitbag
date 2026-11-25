@@ -22,7 +22,7 @@ use super::common::{
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
 use crate::model::{Command, Profile, Transport, is_valid_name};
-use crate::plan_fs::{join_rel, read_text_opt, walk_files};
+use crate::plan_fs::{join_rel, walk_files};
 use crate::secrets::RefStyle;
 
 const ID: &str = "gemini-cli";
@@ -125,9 +125,9 @@ impl Adapter for GeminiCli {
     }
 
     fn capture(&self, env: &Env) -> Result<Captured> {
-        let mut cap = Captured::default();
+        let mut cap = Captured::for_env(env);
         let p = paths(env);
-        if let Some(text) = read_text_opt(&p.settings)? {
+        if let Some(text) = cap.read_config(&p.settings, ID)? {
             cap.sources.push(p.settings.clone());
             let doc = parse_value(Some(&text), &p.settings)?;
             {

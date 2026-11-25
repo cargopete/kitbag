@@ -806,6 +806,9 @@ pub fn read_text_item(cap: &mut Captured, path: &Path, target: &str) -> Option<S
         cap.warn(target, format!("skipped {}: {why}", path.display()));
         None
     };
+    if cap.escapes(path, target) {
+        return None;
+    }
     match std::fs::metadata(path) {
         Ok(m) if m.len() > MAX_FILE_BYTES => {
             return skip(
@@ -936,6 +939,9 @@ pub fn capture_markdown_dir(
     kind: MdKind,
     target: &str,
 ) -> Result<()> {
+    if cap.escapes(dir, target) {
+        return Ok(());
+    }
     for rel in walk_files(dir, 500)? {
         if !rel.ends_with(ext) {
             continue;
@@ -963,11 +969,17 @@ pub fn capture_markdown_dir(
 
 /// Capture every `<dir>/<name>/SKILL.md` skill with its supporting files.
 pub fn capture_skills_dir(cap: &mut Captured, dir: &Path, target: &str) -> Result<()> {
+    if cap.escapes(dir, target) {
+        return Ok(());
+    }
     for name in subdirs(dir)? {
         if !is_valid_name(&name) || cap.profile.skills.iter().any(|s| s.name == name) {
             continue;
         }
         let skill_dir = dir.join(&name);
+        if cap.escapes(&skill_dir, target) {
+            continue;
+        }
         let walk = match walk_confined(&skill_dir, MAX_SKILL_FILES) {
             Ok(w) => w,
             Err(e) => {
