@@ -815,21 +815,66 @@ fn placeholder_password(pw: &str) -> bool {
     )
 }
 
-/// The kind of credential in free text (instructions, rules, commands, skills).
-/// Like [`strong_secret_kind`], except that only the password of a URL counts,
-/// and placeholder passwords in documentation examples don't.
+/// The kind of credential in free text (instructions, rules, commands, skills,
+/// frontmatter, permission rules): anything [`redact_text`] would replace.
 pub fn text_secret_kind(text: &str) -> Option<&'static str> {
-    if let Some(p) = STRONG
-        .iter()
-        .filter(|p| p.kind != "url-credentials")
-        .find(|p| p.re.find_iter(text).any(|m| !has_ref(m.as_str())))
-    {
-        return Some(p.kind);
+    redact_text(text).1.first().copied()
+}
+
+static TEXT_NAME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[A-Za-z_][A-Za-z0-9_-]*").expect("valid regex"));
+static TEXT_BEARER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(Bearer|Basic)\s+([A-Za-z0-9._~+/=-]{8,})").expect("valid regex")
+});
+
+/// A value in free text that is a credential rather than prose, code or a
+/// placeholder: a single token of at least 6 characters mixing letters and
+/// digits (or random-looking), and not a reference, path, URL or `<example>`.
+fn secret_text_value(v: &str) -> bool {
+    let token = v
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "._~+/=!@#$%^&*-".contains(c));
+    token
+        && v.chars().count() >= 6
+        && !v.starts_with('$')
+        && !has_ref(v)
+        && !placeholder_password(v)
+        && !obviously_not_secret(v)
+        && ((v.chars().any(|c| c.is_ascii_digit()) && v.chars().any(|c| c.is_ascii_alphabetic()))
+            || looks_random_token(v))
+}
+
+/// Byte ranges of values assigned to secret-sounding names in free text:
+/// `NAME=value` (shell, `docker -e`), `Name: value` (headers, YAML),
+/// `--flag=value` and `--flag value`.
+fn assignment_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for m in TEXT_NAME.find_iter(text) {
+        if !is_secret_name(m.as_str()) {
+            continue;
+        }
+        let flag = text[..m.start()].ends_with('-');
+        let rest = &text[m.end()..];
+        let after_space = rest.trim_start_matches([' ', '\t']);
+        let spaced = after_space.len() < rest.len();
+        let value_from = match after_space.chars().next() {
+            Some(c @ ('=' | ':')) => after_space[c.len_utf8()..].trim_start_matches([' ', '\t']),
+            Some(_) if flag && spaced => after_space,
+            _ => continue,
+        };
+        let quoted = value_from.starts_with(['"', '\'']);
+        let value = if quoted { &value_from[1..] } else { value_from };
+        let start = text.len() - value.len();
+        let len = value
+            .find(|c: char| c.is_whitespace() || "\"'`<>,;()[]{}".contains(c))
+            .unwrap_or(value.len());
+        let raw = &value[..len];
+        let trimmed = raw.trim_end_matches(['.', ':', '!']);
+        if secret_text_value(trimmed) {
+            out.push((start, start + trimmed.len()));
+        }
     }
-    URL_PASSWORD
-        .captures_iter(text)
-        .any(|c| !placeholder_password(&c[2]))
-        .then_some("url-credentials")
+    out
 }
 
 /// Redact high-confidence secrets from free text (instructions, rules, commands, skills).
@@ -873,7 +918,65 @@ pub fn redact_text(text: &str) -> (String, Vec<&'static str>) {
         kinds.push("url-credentials");
         out = replaced;
     }
+    // `Authorization: Bearer <token>` (curl -H, docs).
+    let mut hit = false;
+    let replaced = TEXT_BEARER
+        .replace_all(&out, |c: &Captures| {
+            if secret_text_value(&c[2]) {
+                hit = true;
+                format!("{} {REDACTED_PASSWORD}", &c[1])
+            } else {
+                c[0].to_string()
+            }
+        })
+        .into_owned();
+    if hit {
+        kinds.push("authorization-header");
+        out = replaced;
+    }
+    // `export DB_PASSWORD=...`, `X-Api-Key: ...`, `--token ...`.
+    let spans = assignment_spans(&out);
+    if !spans.is_empty() {
+        for (a, b) in spans.into_iter().rev() {
+            out.replace_range(a..b, REDACTED_PASSWORD);
+        }
+        kinds.push("secret-named-value");
+    }
     (out, kinds)
+}
+
+/// [`redact_text`] applied to every string inside a JSON value (frontmatter,
+/// settings). Returns the kinds of secret found.
+pub fn redact_json_strings(v: &mut serde_json::Value) -> Vec<&'static str> {
+    let mut kinds = Vec::new();
+    match v {
+        serde_json::Value::String(s) => {
+            let (red, k) = redact_text(s);
+            if !k.is_empty() {
+                *s = red;
+                kinds.extend(k);
+            }
+        }
+        serde_json::Value::Array(a) => a
+            .iter_mut()
+            .for_each(|x| kinds.extend(redact_json_strings(x))),
+        serde_json::Value::Object(m) => m
+            .values_mut()
+            .for_each(|x| kinds.extend(redact_json_strings(x))),
+        _ => {}
+    }
+    kinds.dedup();
+    kinds
+}
+
+/// Every string inside a JSON value.
+pub fn json_strings(v: &serde_json::Value) -> Vec<&str> {
+    match v {
+        serde_json::Value::String(s) => vec![s.as_str()],
+        serde_json::Value::Array(a) => a.iter().flat_map(json_strings).collect(),
+        serde_json::Value::Object(m) => m.values().flat_map(json_strings).collect(),
+        _ => Vec::new(),
+    }
 }
 
 static MARKER: LazyLock<Regex> =
@@ -1430,6 +1533,41 @@ mod tests {
             redact_text("https://x:ghp_FAKE0123456789abcdefghijklmnopqrstuv@github.com/o/r");
         assert_eq!(t, "https://x:[REDACTED:github-token]@github.com/o/r");
         assert_eq!(kinds, vec!["github-token"]);
+    }
+
+    #[test]
+    fn free_text_assignments_to_secret_names_are_redacted() {
+        for (text, want) in [
+            (
+                "export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEYU and password: hunter2hunterV.",
+                "export AWS_SECRET_ACCESS_KEY=[REDACTED] and password: [REDACTED].",
+            ),
+            (
+                "Bash(curl -H 'X-Api-Key: abcd1234efgh5678Q' https://api.x.example/*)",
+                "Bash(curl -H 'X-Api-Key: [REDACTED]' https://api.x.example/*)",
+            ),
+            ("run with --token abc123def456", "run with --token [REDACTED]"),
+            ("Authorization: Bearer lowentropy42tok", "Authorization: Bearer [REDACTED]"),
+            ("DB_PASSWORD=\"s3cr3t-pw\" psql", "DB_PASSWORD=\"[REDACTED]\" psql"),
+        ] {
+            let (t, kinds) = redact_text(text);
+            assert_eq!(t, want, "{text}");
+            assert!(!kinds.is_empty());
+        }
+        for keep in [
+            "password = os.environ[\"DB_PASSWORD\"]",
+            "token = get_token(42)",
+            "api_key: ${API_KEY}",
+            "API_KEY=$API_KEY",
+            "set API_KEY=<your-key-1> first",
+            "Set the token: it expires after 3600 seconds.",
+            "password: changeme",
+            "TOKEN_TTL=3600",
+            "the token is stored in ~/.config/x/token1",
+            "Use the Bearer scheme.",
+        ] {
+            assert_eq!(redact_text(keep), (keep.to_string(), vec![]), "{keep}");
+        }
     }
 
     #[test]

@@ -529,20 +529,33 @@ pub fn scan_for_secrets(p: &Profile) -> Vec<String> {
         }
     }
     for (t, m) in &p.settings {
-        check(
-            format!("settings.{t}"),
-            &Value::Object(m.clone()).to_string(),
-            false,
-        );
+        let all = Value::Object(m.clone());
+        check(format!("settings.{t}"), &all.to_string(), false);
+        for s in crate::secrets::json_strings(&all) {
+            check(format!("settings.{t}"), s, true);
+        }
     }
     if let Some(i) = &p.instructions {
         check("instructions.md".into(), i, true);
     }
     for r in &p.rules {
-        check(format!("rules/{}.md", r.name), &r.body, true);
+        let at = format!("rules/{}.md", r.name);
+        check(at.clone(), &r.body, true);
+        if let Some(d) = &r.description {
+            check(at, d, true);
+        }
     }
     for c in &p.commands {
-        check(format!("commands/{}.md", c.name), &c.body, true);
+        let at = format!("commands/{}.md", c.name);
+        check(at.clone(), &c.body, true);
+        for v in [&c.description, &c.argument_hint].into_iter().flatten() {
+            check(at.clone(), v, true);
+        }
+        for v in c.extra.values() {
+            for s in crate::secrets::json_strings(v) {
+                check(at.clone(), s, true);
+            }
+        }
     }
     for s in &p.skills {
         for f in &s.files {

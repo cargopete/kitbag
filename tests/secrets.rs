@@ -9,6 +9,8 @@ use kitbag::adapters::{ApplyOptions, Scope, SecretsMode};
 use kitbag::engine;
 use kitbag::model::{McpServer, Profile};
 use kitbag::profile_io;
+use predicates::prelude::*;
+use predicates::str::contains;
 
 const FAKE_SECRETS: &[&str] = &["ghp_FAKE", "hunter2secret", "sntrys_FAKE", "sk-ant-FAKE"];
 const ALL: &[&str] = &[
@@ -411,4 +413,97 @@ fn header_args_without_a_space_are_redacted_and_captured() {
     );
     assert!(profile_io::scan_for_secrets(&p).is_empty());
     assert!(!all_text_under(&sb.path("prof")).contains("Zk3jQ9"));
+}
+
+/// Fake secrets in places capture used to copy verbatim: command, rule and
+/// skill frontmatter, free-text assignments, and Claude Code permission rules.
+fn home_with_frontmatter_secrets(sb: &Sandbox) -> Vec<(std::path::PathBuf, String)> {
+    let files = [
+        (
+            ".claude/commands/c.md",
+            "---\ndescription: deploy with sk-ant-api03-FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE\nallowed-tools: Bash(curl -H \"Authorization: Bearer ghp_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE\" *)\n---\n\nbody\n",
+        ),
+        (
+            ".claude/rules/r.md",
+            "---\ndescription: \"uses X-Api-Key: abcd1234efgh5678P\"\n---\n\nexport AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEYU and password: hunter2hunterV\n",
+        ),
+        (
+            ".claude/skills/s/SKILL.md",
+            "---\nname: s\ndescription: deploy with DB_PASSWORD=hunter2hunterS\n---\n\nSkill body.\n",
+        ),
+        (
+            ".claude/settings.json",
+            r#"{"permissions":{"allow":["Bash(curl -H 'X-Api-Key: abcd1234efgh5678Q' https://api.x.example/*)","Bash(DB_PASSWORD=hunter2hunterR psql:*)","Bash(cargo test:*)"]}}"#,
+        ),
+    ];
+    files
+        .into_iter()
+        .map(|(rel, text)| {
+            let p = sb.home().join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, text).unwrap();
+            (p, text.to_string())
+        })
+        .collect()
+}
+
+const FRONTMATTER_LEAKS: &[&str] = &["FAKEFAKE", "abcd1234", "wJalr", "hunter2"];
+
+#[test]
+fn frontmatter_free_text_and_permission_rules_are_redacted_on_capture() {
+    let sb = Sandbox::empty();
+    fs::write(sb.home().join(".claude.json"), "{}").unwrap();
+    let files = home_with_frontmatter_secrets(&sb);
+    sb.cli()
+        .args(["capture", "--from", "claude-code", "-o", "prof"])
+        .assert()
+        .success();
+    let text = all_text_under(&sb.path("prof"));
+    for leak in FRONTMATTER_LEAKS {
+        assert!(!text.contains(leak), "{leak} leaked:\n{text}");
+    }
+    assert!(text.contains("Bash(cargo test:*)") && text.contains("Skill body."));
+    sb.cli().args(["doctor", "prof"]).assert().success();
+
+    // Applying it back keeps the originals, and adds no redacted permission rules.
+    sb.cli()
+        .args(["apply", "prof", "--to", "claude-code", "--yes"])
+        .assert()
+        .success();
+    for (path, text) in &files {
+        assert_eq!(
+            &fs::read_to_string(path).unwrap(),
+            text,
+            "{}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn doctor_flags_secrets_left_in_frontmatter_and_permission_rules() {
+    let sb = Sandbox::empty();
+    let dir = sb.path("prof");
+    fs::create_dir_all(dir.join("commands")).unwrap();
+    fs::create_dir_all(dir.join("rules")).unwrap();
+    fs::write(
+        dir.join("kitbag.toml"),
+        "kitbag = 1\nname = \"x\"\n[settings.claude-code]\npermissions = { allow = [\"Bash(DB_PASSWORD=hunter2hunterR psql:*)\"] }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("commands/c.md"),
+        "---\ndescription: d\nallowed-tools: Bash(curl -H \"Authorization: Bearer ghp_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE\" *)\n---\nbody\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("rules/r.md"),
+        "---\ndescription: \"uses X-Api-Key: abcd1234efgh5678P\"\n---\nbody\n",
+    )
+    .unwrap();
+    sb.cli().args(["doctor", "prof"]).assert().code(1).stdout(
+        contains("commands/c.md")
+            .and(contains("rules/r.md"))
+            .and(contains("settings.claude-code")),
+    );
 }

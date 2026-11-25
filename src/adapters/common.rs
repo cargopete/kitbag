@@ -85,7 +85,27 @@ fn markdown_matches(cur: &[u8], want: &[u8], eq: impl Fn(&str, &str) -> bool) ->
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     };
-    clean(&da.data) == clean(&db.data) && eq(db.body.trim(), da.body.trim())
+    values_match(
+        &Value::Object(clean(&da.data)),
+        &Value::Object(clean(&db.data)),
+        &eq,
+    ) && eq(db.body.trim(), da.body.trim())
+}
+
+/// `cur` and `want` have the same shape, and strings compare with `eq(want, cur)`.
+fn values_match(cur: &Value, want: &Value, eq: &impl Fn(&str, &str) -> bool) -> bool {
+    match (cur, want) {
+        (Value::String(c), Value::String(w)) => eq(w, c),
+        (Value::Array(c), Value::Array(w)) => {
+            c.len() == w.len() && c.iter().zip(w).all(|(c, w)| values_match(c, w, eq))
+        }
+        (Value::Object(c), Value::Object(w)) => {
+            c.len() == w.len()
+                && c.iter()
+                    .all(|(k, cv)| w.get(k).is_some_and(|wv| values_match(cv, wv, eq)))
+        }
+        (c, w) => c == w,
+    }
 }
 
 /// Before writing profile content that holds redaction markers over `cur`:
@@ -840,8 +860,21 @@ pub fn capture_instructions(cap: &mut Captured, path: &Path, target: &str) -> Re
     Ok(())
 }
 
+/// Redact an optional frontmatter string in place, collecting the kinds found.
+fn redact_opt(v: &mut Option<String>, kinds: &mut Vec<&'static str>) {
+    if let Some(s) = v {
+        let (red, k) = redact_text(s);
+        if !k.is_empty() {
+            *s = red;
+            kinds.extend(k);
+        }
+    }
+}
+
 pub fn add_rule(cap: &mut Captured, mut r: Rule, target: &str) {
-    let (body, kinds) = redact_text(&r.body);
+    let (body, mut kinds) = redact_text(&r.body);
+    redact_opt(&mut r.description, &mut kinds);
+    kinds.dedup();
     if !kinds.is_empty() {
         cap.warn(
             target,
@@ -855,7 +888,13 @@ pub fn add_rule(cap: &mut Captured, mut r: Rule, target: &str) {
 }
 
 pub fn add_command(cap: &mut Captured, mut c: Command, target: &str) {
-    let (body, kinds) = redact_text(&c.body);
+    let (body, mut kinds) = redact_text(&c.body);
+    redact_opt(&mut c.description, &mut kinds);
+    redact_opt(&mut c.argument_hint, &mut kinds);
+    for v in c.extra.values_mut() {
+        kinds.extend(crate::secrets::redact_json_strings(v));
+    }
+    kinds.dedup();
     if !kinds.is_empty() {
         cap.warn(
             target,
@@ -1031,11 +1070,23 @@ pub fn capture_skills_dir(cap: &mut Captured, dir: &Path, target: &str) -> Resul
 /// Allow-listed keys of a settings object, with notes about notable skipped keys.
 pub fn pick_settings(cap: &mut Captured, target: &str, doc: &Map<String, Value>) {
     let keys = policy::allowed_keys(target);
-    let picked: Map<String, Value> = doc
+    let mut picked: Map<String, Value> = doc
         .iter()
         .filter(|(k, v)| keys.contains(&k.as_str()) && !v.is_null())
         .map(|(k, v)| (k.clone(), strip_nulls(v)))
         .collect();
+    // Permission rules such as `Bash(curl -H 'X-Api-Key: ...' *)` can embed secrets.
+    let mut kinds = Vec::new();
+    for v in picked.values_mut() {
+        kinds.extend(crate::secrets::redact_json_strings(v));
+    }
+    kinds.dedup();
+    if !kinds.is_empty() {
+        cap.warn(
+            target,
+            format!("redacted {} from settings", kinds.join(", ")),
+        );
+    }
     if !picked.is_empty() {
         cap.profile.settings.insert(target.to_string(), picked);
     }

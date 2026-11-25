@@ -248,7 +248,10 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
    Redaction covers env values, headers, URL credentials and query parameters. It also covers
    secrets passed through `args`, as in `--api-key=…`, `--token …`, `NAME=value` (e.g.
    `docker -e`), `Authorization: Bearer …` (e.g. `mcp-remote --header`) and URLs.
-   Known token formats are also redacted from instructions, rules, commands and skill files.
+   Known token formats are also redacted from instructions, rules, commands and skill files,
+   frontmatter included, and so are values given to secret-sounding names there
+   (`DB_PASSWORD=…`, `X-Api-Key: …`, `--token …`, `Bearer …`). Claude Code permission rules
+   in `settings.json` get the same treatment; a rule with a redacted part is not applied back.
    There, a token becomes `[REDACTED:<kind>]`, and in a URL only the password is replaced
    (`postgres://admin:[REDACTED]@db/app`), so the Markdown around it survives. Placeholder
    passwords in documentation examples (`user:pass@`, `:password@`, `:<password>@`,

@@ -224,6 +224,41 @@ fn note_not_carried(cap: &mut Captured, env: &Env) {
     }
 }
 
+/// A permission rule capture redacted (`Bash(curl -H 'X-Api-Key: [REDACTED]' *)`)
+/// no longer matches what it used to, so it isn't added.
+fn drop_redacted_rules(settings: &mut Map<String, Value>, work: &mut Work) {
+    let Some(Value::Object(perms)) = settings.get_mut("permissions") else {
+        return;
+    };
+    let mut dropped = Vec::new();
+    for list in ["allow", "ask", "deny"] {
+        if let Some(Value::Array(rules)) = perms.get_mut(list) {
+            rules.retain(|r| {
+                let redacted = r.as_str().is_some_and(crate::secrets::has_redaction_marker);
+                if redacted {
+                    dropped.push(format!("permissions.{list} {r}"));
+                }
+                !redacted
+            });
+            if rules.is_empty() {
+                perms.remove(list);
+            }
+        }
+    }
+    if perms.is_empty() {
+        settings.remove("permissions");
+    }
+    if !dropped.is_empty() {
+        work.warn(
+            ID,
+            format!(
+                "permission rules with [REDACTED] markers not applied (capture removed a secret from them; add them back by hand): {}",
+                dropped.join(", ")
+            ),
+        );
+    }
+}
+
 impl Adapter for ClaudeCode {
     fn id(&self) -> &'static str {
         ID
@@ -403,7 +438,8 @@ impl Adapter for ClaudeCode {
             write_skill(work, &p.skills.join(&s.name), s, opts, ID)?;
         }
 
-        let settings = safe_settings(profile, ID, work);
+        let mut settings = safe_settings(profile, ID, work);
+        drop_redacted_rules(&mut settings, work);
         merge_json_settings(work, &p.settings, &settings, opts, ID)?;
         Ok(())
     }
