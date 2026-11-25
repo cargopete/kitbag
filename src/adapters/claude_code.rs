@@ -16,13 +16,13 @@ use serde_json::{Map, Value, json};
 use super::common::{
     MdKind, capture_instructions, capture_markdown_dir, capture_skills_dir, import_server,
     merge_json_servers, merge_json_settings, pick_settings, render_server, safe_settings,
-    server_from_json, servers_for, write_instructions, write_owned, write_skill,
+    server_entries, server_from_json, servers_for, write_instructions, write_owned, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
 use crate::frontmatter::{self, opt};
 use crate::model::{McpServer, Profile, Rule, RuleMode, Transport};
-use crate::plan_fs::read_text_opt;
+use crate::plan_fs::{read_text_opt, walk_files};
 use crate::profile_io::command_to_markdown;
 use crate::secrets::RefStyle;
 
@@ -142,6 +142,88 @@ fn import(cap: &mut Captured, name: &str, def: &Map<String, Value>) {
     import_server(cap, ID, name, s, false);
 }
 
+/// Output styles that ship with Claude Code; any other name is a file in `output-styles/`.
+const BUILTIN_OUTPUT_STYLES: &[&str] = &["default", "explanatory", "learning"];
+
+/// `outputStyle` naming a custom style would point at a file the profile doesn't carry.
+fn drop_custom_output_style(cap: &mut Captured) {
+    let Some(settings) = cap.profile.settings.get_mut(ID) else {
+        return;
+    };
+    let Some(Value::String(style)) = settings.get("outputStyle") else {
+        return;
+    };
+    if BUILTIN_OUTPUT_STYLES.contains(&style.to_ascii_lowercase().as_str()) {
+        return;
+    }
+    let style = style.clone();
+    settings.remove("outputStyle");
+    if settings.is_empty() {
+        cap.profile.settings.remove(ID);
+    }
+    cap.warn(
+        ID,
+        format!(
+            "dropped setting outputStyle = \"{style}\": it names a custom output style, and kitbag doesn't carry output styles"
+        ),
+    );
+}
+
+/// Claude Code features kitbag has no portable form for yet, so the user
+/// knows what a captured profile leaves behind.
+fn note_not_carried(cap: &mut Captured, env: &Env) {
+    let dir = match env.scope {
+        Scope::User => config_dir(env),
+        Scope::Project => env.project.join(".claude"),
+    };
+    let count_md = |sub: &str| {
+        walk_files(&dir.join(sub), 10_000)
+            .map(|f| f.iter().filter(|r| r.ends_with(".md")).count())
+            .unwrap_or(0)
+    };
+    let plugins = read_text_opt(&dir.join("plugins").join("installed_plugins.json"))
+        .ok()
+        .flatten()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .map_or(0, |v| match v.get("plugins") {
+            Some(Value::Object(m)) => m.len(),
+            Some(Value::Array(a)) => a.len(),
+            _ => 0,
+        });
+    let plural =
+        |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let mut parts = Vec::new();
+    let agents = count_md("agents");
+    if agents > 0 {
+        parts.push(format!(
+            "{} (agents/)",
+            plural(agents, "subagent", "subagents")
+        ));
+    }
+    let styles = count_md("output-styles");
+    if styles > 0 {
+        parts.push(format!(
+            "{} (output-styles/)",
+            plural(styles, "output style", "output styles")
+        ));
+    }
+    if plugins > 0 {
+        parts.push(format!(
+            "{} (plugins/installed_plugins.json)",
+            plural(plugins, "plugin", "plugins")
+        ));
+    }
+    if !parts.is_empty() {
+        cap.info(
+            ID,
+            format!(
+                "not carried by kitbag (no portable form yet): {}",
+                parts.join(", ")
+            ),
+        );
+    }
+}
+
 impl Adapter for ClaudeCode {
     fn id(&self) -> &'static str {
         ID
@@ -188,12 +270,10 @@ impl Adapter for ClaudeCode {
         if let Some(text) = read_text_opt(&p.mcp)? {
             cap.sources.push(p.mcp.clone());
             let doc = parse_value(Some(&text), &p.mcp)?;
-            if let Some(Value::Object(servers)) = doc.get("mcpServers") {
-                for (name, def) in servers {
-                    if let Value::Object(def) = def {
-                        import(&mut cap, name, def);
-                    }
-                }
+            for (name, def) in
+                server_entries(&mut cap, ID, &p.mcp, "mcpServers", doc.get("mcpServers"))
+            {
+                import(&mut cap, name, def);
             }
         }
         if env.scope == Scope::Project {
@@ -202,17 +282,15 @@ impl Adapter for ClaudeCode {
             if let Some(text) = read_text_opt(&cj)? {
                 let doc = parse_value(Some(&text), &cj)?;
                 let key = env.project.to_string_lossy();
-                if let Some(Value::Object(servers)) = doc
+                let servers = doc
                     .get("projects")
                     .and_then(|p| p.get(key.as_ref()))
-                    .and_then(|p| p.get("mcpServers"))
-                    && !servers.is_empty()
-                {
+                    .and_then(|p| p.get("mcpServers"));
+                let entries = server_entries(&mut cap, ID, &cj, "mcpServers", servers);
+                if !entries.is_empty() {
                     cap.sources.push(cj.clone());
-                    for (name, def) in servers {
-                        if let Value::Object(def) = def {
-                            import(&mut cap, name, def);
-                        }
+                    for (name, def) in entries {
+                        import(&mut cap, name, def);
                     }
                     cap.info(
                         ID,
@@ -237,6 +315,7 @@ impl Adapter for ClaudeCode {
                     "apiKeyHelper",
                     "awsAuthRefresh",
                     "statusLine",
+                    "enabledPlugins",
                 ]
                 .into_iter()
                 .filter(|k| doc.contains_key(*k))
@@ -251,7 +330,9 @@ impl Adapter for ClaudeCode {
                     );
                 }
             }
+            drop_custom_output_style(&mut cap);
         }
+        note_not_carried(&mut cap, env);
         Ok(cap)
     }
 

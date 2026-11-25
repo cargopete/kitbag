@@ -380,6 +380,10 @@ Good next candidates: Windsurf, Zed, VS Code / GitHub Copilot, OpenCode.
 - At project scope, Cursor and Codex both read `AGENTS.md`. When both are targeted, Cursor also
   sees Codex's folded rules section.
 - Apply is additive and doesn't delete entries that were removed from the profile (see above).
+- **Not carried yet:** Claude Code subagents (`agents/`), output styles (`output-styles/`),
+  plugins and hooks. Capture lists what it found of these and leaves them out. It also drops
+  `outputStyle` when it names a custom style (built-ins such as `Explanatory` are kept),
+  since the style file wouldn't be in the profile.
 - **Encodings.** Capture reads UTF-8 (with or without a byte-order mark) and UTF-16 with a
   byte-order mark. Instructions, rules and commands in any other encoding are skipped with a
   warning. Skill supporting files are copied byte for byte. A UTF-8 byte-order mark at the

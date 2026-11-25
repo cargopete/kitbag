@@ -16,8 +16,8 @@ use serde_json::{Map, Value, json};
 use super::common::{
     add_command, capture_instructions, capture_skills_dir, import_server, merge_json_servers,
     merge_json_settings, name_from_rel, pick_settings, read_text_item, render_server,
-    safe_settings, server_from_json, servers_for, skill_with_required_frontmatter, str_of,
-    write_instructions, write_owned, write_skill,
+    safe_settings, server_entries, server_from_json, servers_for, skill_with_required_frontmatter,
+    str_of, write_instructions, write_owned, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
@@ -130,9 +130,14 @@ impl Adapter for GeminiCli {
         if let Some(text) = read_text_opt(&p.settings)? {
             cap.sources.push(p.settings.clone());
             let doc = parse_value(Some(&text), &p.settings)?;
-            if let Some(Value::Object(servers)) = doc.get("mcpServers") {
-                for (name, def) in servers {
-                    let Value::Object(def) = def else { continue };
+            {
+                for (name, def) in server_entries(
+                    &mut cap,
+                    ID,
+                    &p.settings,
+                    "mcpServers",
+                    doc.get("mcpServers"),
+                ) {
                     let mut s = server_from_json(def);
                     if let Some(http) = str_of(def.get("httpUrl")) {
                         s.url = Some(http);

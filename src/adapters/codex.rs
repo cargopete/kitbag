@@ -21,8 +21,9 @@ use toml_edit::Item;
 
 use super::common::{
     MdKind, Resolver, capture_instructions, capture_markdown_dir, capture_skills_dir,
-    import_server, merge_server_def, safe_settings, servers_for, skill_with_required_frontmatter,
-    str_of, string_list, string_map, write_instructions, write_owned, write_skill,
+    import_server, merge_server_def, safe_settings, server_entries, servers_for,
+    skill_with_required_frontmatter, str_of, string_list, string_map, write_instructions,
+    write_owned, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::toml::{
@@ -293,14 +294,11 @@ impl Adapter for Codex {
         if let Some(text) = read_text_opt(&p.config)? {
             cap.sources.push(p.config.clone());
             let doc = parse(Some(&text), &p.config)?;
-            if let Some(servers) = doc.get("mcp_servers")
-                && let Value::Object(servers) = item_to_json(servers)
+            let servers = doc.get("mcp_servers").map(item_to_json);
+            for (name, def) in
+                server_entries(&mut cap, ID, &p.config, "mcp_servers", servers.as_ref())
             {
-                for (name, def) in &servers {
-                    if let Value::Object(def) = def {
-                        import(&mut cap, name, def);
-                    }
-                }
+                import(&mut cap, name, def);
             }
             let mut settings = Map::new();
             for k in policy::allowed_keys(ID) {

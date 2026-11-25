@@ -602,6 +602,58 @@ pub fn server_from_json(def: &Map<String, Value>) -> McpServer {
     }
 }
 
+/// The server definitions under `key` in a config file, warning about anything
+/// malformed (`"mcpServers": []`, `"a": "not an object"`) instead of ignoring it.
+pub fn server_entries<'v>(
+    cap: &mut Captured,
+    target: &str,
+    file: &Path,
+    key: &str,
+    servers: Option<&'v Value>,
+) -> Vec<(&'v String, &'v Map<String, Value>)> {
+    let map = match servers {
+        None | Some(Value::Null) => return Vec::new(),
+        Some(Value::Object(m)) => m,
+        Some(other) => {
+            cap.warn(
+                target,
+                format!(
+                    "ignored '{key}' in {}: expected an object of servers, found {}",
+                    file.display(),
+                    json_kind(other)
+                ),
+            );
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for (name, def) in map {
+        match def {
+            Value::Object(d) => out.push((name, d)),
+            other => cap.warn(
+                target,
+                format!(
+                    "skipped MCP server '{name}' in {}: expected an object, found {}",
+                    file.display(),
+                    json_kind(other)
+                ),
+            ),
+        }
+    }
+    out
+}
+
+fn json_kind(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
+
 /// Normalise one captured server (tool syntax -> canonical), redact secrets, and add it.
 pub fn import_server(
     cap: &mut Captured,

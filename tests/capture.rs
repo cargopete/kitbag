@@ -265,3 +265,76 @@ fn skill_symlinks_are_followed_only_inside_the_skill() {
     let text = format!("{:?}", r.profile);
     assert!(!text.contains("private notes") && !text.contains("region = eu"));
 }
+
+#[test]
+fn reports_what_is_not_carried_and_drops_custom_output_styles() {
+    let sb = Sandbox::empty();
+    write(
+        &sb,
+        ".claude/agents/reviewer.md",
+        "---\nname: reviewer\n---\nReview.\n",
+    );
+    write(
+        &sb,
+        ".claude/agents/nested/tester.md",
+        "---\nname: tester\n---\nTest.\n",
+    );
+    write(
+        &sb,
+        ".claude/output-styles/Jenny.md",
+        "---\nname: Jenny\n---\nBe Jenny.\n",
+    );
+    write(
+        &sb,
+        ".claude/plugins/installed_plugins.json",
+        r#"{"version": 2, "plugins": {"a@mkt": [{"scope": "user"}], "b@mkt": [{"scope": "user"}]}}"#,
+    );
+    let settings = write(
+        &sb,
+        ".claude/settings.json",
+        r#"{"outputStyle": "Jenny", "model": "opus", "hooks": {}}"#,
+    );
+    let r = capture(&["claude-code"], &sb.env(Scope::User));
+    assert!(
+        warned(
+            &r,
+            "not carried by kitbag (no portable form yet): 2 subagents (agents/), 1 output style (output-styles/), 2 plugins (plugins/installed_plugins.json)"
+        ),
+        "{:?}",
+        r.notes
+    );
+    assert!(warned(&r, "dropped setting outputStyle = \"Jenny\""));
+    assert!(warned(&r, "hooks"));
+    assert_eq!(
+        serde_json::Value::Object(r.profile.settings["claude-code"].clone()),
+        serde_json::json!({"model": "opus"})
+    );
+
+    // Built-in styles are carried.
+    fs::write(&settings, r#"{"outputStyle": "Explanatory"}"#).unwrap();
+    let r = capture(&["claude-code"], &sb.env(Scope::User));
+    assert_eq!(
+        r.profile.settings["claude-code"]["outputStyle"],
+        "Explanatory"
+    );
+    assert!(!warned(&r, "dropped setting"));
+}
+
+#[test]
+fn malformed_server_entries_are_reported() {
+    let sb = Sandbox::empty();
+    write(
+        &sb,
+        ".claude.json",
+        r#"{"mcpServers": {"a": "notanobject", "b": {"command": "b-mcp"}, "c": {}}}"#,
+    );
+    write(&sb, ".cursor/mcp.json", r#"{"mcpServers": []}"#);
+    write(&sb, ".codex/config.toml", "mcp_servers = 3\n");
+    let r = capture(&["claude-code", "cursor", "codex"], &sb.env(Scope::User));
+    assert_eq!(r.profile.mcp_servers.keys().collect::<Vec<_>>(), vec!["b"]);
+    assert!(warned(&r, "skipped MCP server 'a' in"));
+    assert!(warned(&r, "expected an object, found a string"));
+    assert!(warned(&r, "skipped MCP server 'c': no command or url"));
+    assert!(warned(&r, "expected an object of servers, found an array"));
+    assert!(warned(&r, "ignored 'mcp_servers' in"));
+}

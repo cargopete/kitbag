@@ -11,7 +11,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde_json::{Map, Value, json};
 
-use super::common::{Resolver, import_server, merge_json_servers, server_from_json, servers_for};
+use super::common::{
+    Resolver, import_server, merge_json_servers, server_entries, server_from_json, servers_for,
+};
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Os, Scope, Support, Work};
 use crate::edit::json::parse_value;
 use crate::model::{Profile, Transport};
@@ -81,12 +83,10 @@ impl Adapter for ClaudeDesktop {
             return Ok(cap);
         };
         cap.sources.push(file.clone());
-        if let Some(Value::Object(servers)) = parse_value(Some(&text), &file)?.get("mcpServers") {
-            for (name, def) in servers {
-                if let Value::Object(def) = def {
-                    import_server(&mut cap, ID, name, server_from_json(def), false);
-                }
-            }
+        let doc = parse_value(Some(&text), &file)?;
+        for (name, def) in server_entries(&mut cap, ID, &file, "mcpServers", doc.get("mcpServers"))
+        {
+            import_server(&mut cap, ID, name, server_from_json(def), false);
         }
         Ok(cap)
     }

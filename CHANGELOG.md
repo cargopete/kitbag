@@ -26,3 +26,5 @@ All notable changes to this project are documented here. The format follows
 - A UTF-8 byte-order mark at the start of a JSON/JSONC/TOML config no longer fails with "invalid JSON"; it is kept when the file is written back.
 - Capture follows symbolic links inside a skill only when they stay inside the skill. Escaping links, loops, dangling links and unreadable entries are skipped with a warning.
 - Capture skips files over the 2 MiB profile limit (and skills beyond 200 files) with a warning, so it no longer writes profiles that `apply` refuses.
+- Capture lists Claude Code subagents, output styles and plugins it found but doesn't carry, and drops an `outputStyle` setting that names a custom style.
+- Malformed server entries (`"mcpServers": []`, a server that isn't an object) are reported instead of silently ignored.

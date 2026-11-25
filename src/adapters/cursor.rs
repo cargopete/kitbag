@@ -18,7 +18,7 @@ use serde_json::{Map, Value, json};
 use super::common::{
     add_command, add_instructions, add_rule, capture_instructions, capture_skills_dir,
     import_server, merge_json_servers, name_from_rel, read_text_item, render_server,
-    server_from_json, servers_for, write_instructions, write_owned, write_skill,
+    server_entries, server_from_json, servers_for, write_instructions, write_owned, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::block;
@@ -195,14 +195,11 @@ impl Adapter for Cursor {
 
         if let Some(text) = read_text_opt(&p.mcp)? {
             cap.sources.push(p.mcp.clone());
-            if let Some(Value::Object(servers)) =
-                parse_value(Some(&text), &p.mcp)?.get("mcpServers")
+            let doc = parse_value(Some(&text), &p.mcp)?;
+            for (name, def) in
+                server_entries(&mut cap, ID, &p.mcp, "mcpServers", doc.get("mcpServers"))
             {
-                for (name, def) in servers {
-                    if let Value::Object(def) = def {
-                        import(&mut cap, name, def);
-                    }
-                }
+                import(&mut cap, name, def);
             }
         }
 
