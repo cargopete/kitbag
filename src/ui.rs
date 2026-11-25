@@ -1,6 +1,8 @@
 //! Terminal output helpers: styles, notes, paths and diffs.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::path::Path;
 
 use anstyle::{AnsiColor, Style};
@@ -22,9 +24,58 @@ pub fn paint(style: Style, text: impl std::fmt::Display) -> String {
     format!("{style}{text}{style:#}")
 }
 
-/// `~/...` for paths under `home`.
+/// Text from a profile or a tool's config, made safe to print: control
+/// characters and bidi overrides are shown as escapes (`\x1b`, `\r`,
+/// `\u{202e}`), so they can't move the cursor, rewrite earlier lines or
+/// reorder what the user reads. Newlines and tabs are kept. Everything kitbag
+/// prints that it didn't write itself goes through here.
+pub fn visible(text: &str) -> Cow<'_, str> {
+    escape(text, true)
+}
+
+/// [`visible`] for one-line values (names, args, paths): newlines are escaped
+/// too, so a value can't fake a line of its own.
+pub fn visible_line(text: &str) -> Cow<'_, str> {
+    escape(text, false)
+}
+
+fn escape(text: &str, keep_newlines: bool) -> Cow<'_, str> {
+    let unsafe_char = |c: char| match c {
+        '\t' => false,
+        '\n' => !keep_newlines,
+        _ => {
+            c.is_control()
+                || matches!(c,
+                    '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{2028}' | '\u{2029}'
+                    | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        }
+    };
+    if !text.chars().any(unsafe_char) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len() + 8);
+    for c in text.chars() {
+        if !unsafe_char(c) {
+            out.push(c);
+            continue;
+        }
+        match c {
+            '\r' => out.push_str("\\r"),
+            '\n' => out.push_str("\\n"),
+            c if (c as u32) < 0x80 => {
+                let _ = write!(out, "\\x{:02x}", c as u32);
+            }
+            c => {
+                let _ = write!(out, "\\u{{{:x}}}", c as u32);
+            }
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// `~/...` for paths under `home`, ready to print.
 pub fn tildify(path: &Path, home: &Path) -> String {
-    match path.strip_prefix(home) {
+    let shown = match path.strip_prefix(home) {
         Ok(rest) if !home.as_os_str().is_empty() => {
             let rest = rest.display().to_string();
             if rest.is_empty() {
@@ -34,7 +85,8 @@ pub fn tildify(path: &Path, home: &Path) -> String {
             }
         }
         _ => path.display().to_string(),
-    }
+    };
+    visible_line(&shown).into_owned()
 }
 
 pub fn format_note(n: &Note) -> String {
@@ -45,8 +97,8 @@ pub fn format_note(n: &Note) -> String {
     format!(
         "  {} {} {}",
         paint(style, label),
-        paint(DIM, format!("[{}]", n.target)),
-        n.message
+        paint(DIM, format!("[{}]", visible_line(&n.target))),
+        visible_line(&n.message)
     )
 }
 
@@ -99,12 +151,14 @@ pub fn render_diff(
         let size = c.after.as_ref().map_or(0, Vec::len);
         return format!(
             "{}\n  (binary file, {size} bytes)\n",
-            paint(BOLD, display_path)
+            paint(BOLD, visible_line(display_path))
         );
     };
     let before = mask(&before, sensitive);
     let after = mask(&after, sensitive);
     let diff = TextDiff::from_lines(&before, &after);
+    let display_path = visible_line(display_path);
+    let display_path = display_path.as_ref();
     let mut out = format!(
         "{}\n{}\n",
         paint(
@@ -136,7 +190,14 @@ pub fn render_diff(
                     out.push('\n');
                     return out;
                 }
-                let text = crate::secrets::mask_line(ch.value().trim_end_matches('\n'));
+                // The line ending isn't shown; a lone `\r` that ends a line is.
+                let value = ch.value();
+                let value = value
+                    .strip_suffix("\r\n")
+                    .or_else(|| value.strip_suffix('\n'))
+                    .unwrap_or(value);
+                let text = crate::secrets::mask_line(value);
+                let text = visible_line(&text);
                 let line = match ch.tag() {
                     ChangeTag::Insert => paint(GREEN, format!("+{text}")),
                     ChangeTag::Delete => paint(RED, format!("-{text}")),
@@ -149,4 +210,23 @@ pub fn render_diff(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_characters_are_shown_not_sent() {
+        assert!(matches!(visible("plain\ttext\nok"), Cow::Borrowed(_)));
+        assert_eq!(
+            visible("a\u{1b}[2K\u{1b}[1A\rb\u{7}\u{7f}\u{9b}c\u{202e}d\u{2066}\n\te"),
+            "a\\x1b[2K\\x1b[1A\\rb\\x07\\x7f\\u{9b}c\\u{202e}d\\u{2066}\n\te"
+        );
+        assert_eq!(visible_line("one\ntwo\tthree"), "one\\ntwo\tthree");
+        // Escaping is idempotent and leaves ordinary text alone.
+        let once = visible_line("x\u{1b}y").into_owned();
+        assert_eq!(visible_line(&once), once);
+        assert_eq!(visible("C:\\Users\\me ✓ ü"), "C:\\Users\\me ✓ ü");
+    }
 }

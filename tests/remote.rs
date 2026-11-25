@@ -321,3 +321,74 @@ fn local_plans_list_servers_and_flag_secret_fallbacks() {
             .and(contains("1 problem(s) found")),
     );
 }
+
+/// What a terminal would act on: anything that is not one of kitbag's own
+/// colour codes (`ESC [ ... m`) and is a control character or a bidi override.
+fn raw_controls(out: &str) -> Vec<char> {
+    let sgr = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+    sgr.replace_all(out, "")
+        .chars()
+        .filter(|&c| {
+            (c.is_control() && c != '\n' && c != '\t')
+                || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
+        .collect()
+}
+
+#[test]
+fn profile_text_cannot_drive_the_terminal() {
+    if !has_git() {
+        return;
+    }
+    let sb = Sandbox::empty();
+    std::fs::write(sb.home().join(".claude.json"), "{}").unwrap();
+    let manifest = r#"kitbag = 1
+name = "e\u001b]0;pwned\u0007"
+[mcp_servers.docs]
+command = "npx"
+args = ["-y", "evil\u001b[2K\u001b[1A\u001b[2K\rdocs: npx -y @safe/docs-mcp", "\u009b2K\u202eabc"]
+env = { "K\u001b[1A" = "x" }
+"#;
+    let instructions = "Line one\u{1b}[2K\rLooks harmless\n\tindented \u{202e}txt\n";
+    let url = sb.git_profile(
+        "e",
+        &[("kitbag.toml", manifest), ("instructions.md", instructions)],
+    );
+    let run = |args: &[&str]| {
+        let out = sb
+            .cli()
+            .env_remove("NO_COLOR")
+            .env("CLICOLOR_FORCE", "1")
+            .args(args)
+            .output()
+            .unwrap();
+        let text = String::from_utf8(out.stdout).unwrap() + &String::from_utf8(out.stderr).unwrap();
+        assert_eq!(raw_controls(&text), Vec::<char>::new(), "{args:?}:\n{text}");
+        text
+    };
+    let diff = run(&["diff", &url, "--to", "claude-code"]);
+    // Shown, not executed; the diff keeps its lines and tabs.
+    assert!(diff.contains(r"evil\x1b[2K\x1b[1A\x1b[2K\rdocs"), "{diff}");
+    assert!(diff.contains(r"\u{9b}2K\u{202e}abc"), "{diff}");
+    assert!(diff.contains(r"+Line one\x1b[2K\r"), "{diff}");
+    assert!(diff.contains("+Looks harmless"), "{diff}");
+    assert!(diff.contains("+\tindented \\u{202e}txt"), "{diff}");
+    run(&["apply", &url, "--to", "claude-code", "--dry-run"]);
+    run(&["apply", &url, "--to", "claude-code", "--yes"]);
+    run(&["history"]);
+    run(&["doctor", &url]);
+    run(&["undo"]);
+    // Files on disk get the profile's text unchanged.
+    run(&[
+        "apply",
+        &url,
+        "--to",
+        "claude-code",
+        "--yes",
+        "--trust-source",
+    ]);
+    assert!(
+        sb.read("home/.claude/CLAUDE.md")
+            .contains(instructions.trim_end())
+    );
+}

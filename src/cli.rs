@@ -20,7 +20,7 @@ use crate::policy;
 use crate::profile_io::{self, MANIFEST};
 use crate::source;
 use crate::txn::{Status, Store};
-use crate::ui::{self, BOLD, CYAN, DIM, GREEN, RED, YELLOW, paint, tildify};
+use crate::ui::{self, BOLD, CYAN, DIM, GREEN, RED, YELLOW, paint, tildify, visible, visible_line};
 
 const ABOUT: &str = "Pack your AI agent setup once, unpack it into any coding tool.";
 
@@ -452,15 +452,21 @@ fn cmd_init(dir: &Path, name: Option<String>, force: bool) -> Result<i32> {
     println!(
         "{} profile '{}' in {}",
         paint(GREEN, "Created"),
-        name,
-        dir.display()
+        visible_line(&name),
+        visible_line(&dir.display().to_string())
     );
     for (rel, _) in &files {
         println!("  {rel}");
     }
     println!(
         "\nNext: edit the files, then preview with {}",
-        paint(BOLD, format!("kitbag diff {} --to all", dir.display()))
+        paint(
+            BOLD,
+            format!(
+                "kitbag diff {} --to all",
+                visible_line(&dir.display().to_string())
+            )
+        )
     );
     Ok(0)
 }
@@ -503,7 +509,7 @@ fn cmd_capture(
         } else {
             format!(
                 ", settings for {}",
-                p.settings.keys().cloned().collect::<Vec<_>>().join(", ")
+                visible_line(&p.settings.keys().cloned().collect::<Vec<_>>().join(", "))
             )
         }
     );
@@ -518,9 +524,9 @@ fn cmd_capture(
         for red in &r.redactions {
             println!(
                 "  {}  ->  ${{{}}}  {}",
-                red.location,
-                paint(BOLD, &red.env_var),
-                paint(DIM, format!("({})", red.reason))
+                visible_line(&red.location),
+                paint(BOLD, visible_line(&red.env_var)),
+                paint(DIM, format!("({})", visible_line(red.reason)))
             );
         }
     }
@@ -537,17 +543,27 @@ fn cmd_capture(
         return Ok(0);
     }
     profile_io::save(p, out, force)?;
-    println!("\n{} {}", paint(GREEN, "Wrote profile to"), out.display());
+    println!(
+        "\n{} {}",
+        paint(GREEN, "Wrote profile to"),
+        visible_line(&out.display().to_string())
+    );
     let req = profile_io::required_env(p);
     if !req.is_empty() {
         println!(
             "  Env vars this profile expects: {}",
-            req.keys().cloned().collect::<Vec<_>>().join(", ")
+            visible_line(&req.keys().cloned().collect::<Vec<_>>().join(", "))
         );
     }
     println!(
         "  Review it, commit it to git, then apply it anywhere with {}",
-        paint(BOLD, format!("kitbag apply {} --to <tool>", out.display()))
+        paint(
+            BOLD,
+            format!(
+                "kitbag apply {} --to <tool>",
+                visible_line(&out.display().to_string())
+            )
+        )
     );
     Ok(0)
 }
@@ -594,7 +610,7 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
             paint(YELLOW, "Lets agents act without asking, or runs commands:")
         );
         for r in &plan.risky {
-            println!("  - {r}");
+            println!("  - {}", visible_line(r));
         }
     }
     if !plan.servers.is_empty() {
@@ -613,16 +629,7 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
         // and control characters can't rewrite the terminal.
         let shown = |s: &str| {
             let masked = crate::secrets::mask(&crate::secrets::mask_line(s), &plan.sensitive);
-            masked
-                .chars()
-                .flat_map(|c| {
-                    if c.is_control() {
-                        c.escape_default().collect::<Vec<_>>()
-                    } else {
-                        vec![c]
-                    }
-                })
-                .collect::<String>()
+            visible_line(&masked).into_owned()
         };
         for s in &plan.servers {
             println!(
@@ -645,11 +652,14 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
                 YELLOW,
                 "Unset env vars (needed by tools that can't read the environment):"
             ),
-            plan.missing_env
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
+            visible_line(
+                &plan
+                    .missing_env
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         );
     }
 }
@@ -712,9 +722,9 @@ fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) ->
     println!(
         "{} '{}' from {}\n  -> {} ({where_})\n",
         paint(BOLD, "Profile"),
-        profile.name,
-        resolved.origin,
-        plan.targets.join(", ")
+        visible_line(&profile.name),
+        visible_line(&resolved.origin),
+        visible_line(&plan.targets.join(", "))
     );
     let show_diff = matches!(mode, Mode::Diff { .. } | Mode::Apply { dry_run: true, .. });
     if plan.changes.is_empty() {
@@ -781,7 +791,12 @@ fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) ->
 fn cmd_undo(ctx: &Ctx, id: Option<&str>, force: bool) -> Result<i32> {
     let store = Store::new(&ctx.state_dir);
     let tx = store.undo(id, force)?;
-    println!("{} {} ({})", paint(GREEN, "Undid"), tx.id, tx.description);
+    println!(
+        "{} {} ({})",
+        paint(GREEN, "Undid"),
+        visible_line(&tx.id),
+        visible_line(&tx.description)
+    );
     for e in &tx.entries {
         let what = if e.existed { "restored" } else { "removed" };
         println!(
@@ -825,11 +840,11 @@ fn cmd_history(ctx: &Ctx, as_json: bool) -> Result<i32> {
         };
         println!(
             "{}  {}  {:<11}  {} file(s)  {}",
-            paint(BOLD, &t.id),
+            paint(BOLD, visible_line(&t.id)),
             t.created_at(),
             status,
             t.entries.len(),
-            t.description
+            visible_line(&t.description)
         );
     }
     Ok(0)
@@ -857,17 +872,23 @@ fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
         "{}",
         paint(BOLD, format!("kitbag {}", env!("CARGO_PKG_VERSION")))
     );
-    println!("  home        {}", env.home.display());
+    println!(
+        "  home        {}",
+        visible_line(&env.home.display().to_string())
+    );
     println!(
         "  scope       {}{}",
         env.scope,
         if env.scope == Scope::Project {
-            format!(" ({})", env.project.display())
+            format!(" ({})", visible_line(&env.project.display().to_string()))
         } else {
             String::new()
         }
     );
-    println!("  state dir   {}", ctx.state_dir.display());
+    println!(
+        "  state dir   {}",
+        visible_line(&ctx.state_dir.display().to_string())
+    );
     let git = std::process::Command::new("git")
         .arg("--version")
         .output()
@@ -877,7 +898,7 @@ fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
         "  git         {}",
         git.map_or_else(
             || paint(YELLOW, "not found (needed only for git URL sources)"),
-            |o| String::from_utf8_lossy(&o.stdout).trim().to_string()
+            |o| visible_line(String::from_utf8_lossy(&o.stdout).trim()).into_owned()
         )
     );
 
@@ -906,7 +927,7 @@ fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
             }
             if let Some(err) = check_file(&path) {
                 problems += 1;
-                println!("      {} {}", paint(RED, "error"), err);
+                println!("      {} {}", paint(RED, "error"), visible(&err));
             }
             seen.push(path);
         }
@@ -917,10 +938,14 @@ fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
         match load_source(src, t.path.as_deref()) {
             Err(e) => {
                 problems += 1;
-                println!("  {} {e:#}", paint(RED, "error"));
+                println!("  {} {}", paint(RED, "error"), visible(&format!("{e:#}")));
             }
             Ok((resolved, p)) => {
-                println!("  '{}' from {}", p.name, resolved.origin);
+                println!(
+                    "  '{}' from {}",
+                    visible_line(&p.name),
+                    visible_line(&resolved.origin)
+                );
                 println!(
                     "  {} MCP server(s), {} rule(s), {} command(s), {} skill(s){}",
                     p.mcp_servers.len(),
@@ -935,45 +960,49 @@ fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
                 );
                 for leak in profile_io::scan_for_secrets(&p) {
                     problems += 1;
-                    println!("  {} {leak}", paint(RED, "secret"));
+                    println!("  {} {}", paint(RED, "secret"), visible_line(&leak));
                 }
                 for (var, uses) in profile_io::required_env(&p) {
                     let set = env.vars.get(&var).is_some_and(|v| !v.is_empty());
                     println!(
-                        "  {} ${{{var}}}  {}",
+                        "  {} ${{{}}}  {}",
                         if set {
                             paint(GREEN, "set  ")
                         } else {
                             paint(YELLOW, "unset")
                         },
-                        paint(DIM, uses.join(", "))
+                        visible_line(&var),
+                        paint(DIM, visible_line(&uses.join(", ")))
                     );
                 }
                 for (target, settings) in &p.settings {
+                    let shown_target = visible_line(target);
                     if adapters::get(target).is_none() {
                         println!(
-                            "  {} settings.{target}: unknown target",
+                            "  {} settings.{shown_target}: unknown target",
                             paint(YELLOW, "warn")
                         );
                     }
                     let (allowed, dropped) = policy::filter(target, Some(settings));
                     if !dropped.is_empty() {
                         println!(
-                            "  {} settings.{target}: will not apply {}",
+                            "  {} settings.{shown_target}: will not apply {}",
                             paint(YELLOW, "warn"),
-                            dropped.join(", ")
+                            visible_line(&dropped.join(", "))
                         );
                     }
                     for r in policy::risky(target, &allowed) {
-                        println!("  {} {r}", paint(YELLOW, "risky"));
+                        println!("  {} {}", paint(YELLOW, "risky"), visible_line(&r));
                     }
                 }
                 for (n, s) in &p.mcp_servers {
                     for id in s.only.iter().chain(&s.except) {
                         if adapters::get(id).is_none() {
                             println!(
-                                "  {} mcp_servers.{n}: unknown target '{id}' in only/except",
-                                paint(YELLOW, "warn")
+                                "  {} mcp_servers.{}: unknown target '{}' in only/except",
+                                paint(YELLOW, "warn"),
+                                visible_line(n),
+                                visible_line(id)
                             );
                         }
                     }
@@ -1055,5 +1084,5 @@ fn cmd_list_targets(ctx: &Ctx, as_json: bool) -> Result<i32> {
 
 /// Print an error chain the way users expect.
 pub fn report_error(e: &anyhow::Error) {
-    eprintln!("{} {e:#}", paint(RED, "error:"));
+    eprintln!("{} {}", paint(RED, "error:"), visible(&format!("{e:#}")));
 }
