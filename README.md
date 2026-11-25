@@ -6,9 +6,23 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 kitbag captures your MCP servers, instructions, rules, slash commands, skills and settings
-from the AI coding tools you already use. It stores them as a small, secret-free, git-friendly
-**profile** and applies that profile to any other tool in one step. Claude Code, Cursor,
+from the AI coding tools you already use. It stores them as a small, git-friendly **profile** with secrets
+redacted and applies that profile to any other tool in one step. Claude Code, Cursor,
 OpenAI Codex CLI, Gemini CLI and Claude Desktop are supported, at user and project scope.
+
+> [!IMPORTANT]
+> **Status: early release (v0.1).** kitbag works today and is tested against real setups,
+> and it's improving quickly. Two things to know while it matures:
+>
+> - **Secret redaction is best-effort.** It catches the common key formats, secret-named
+>   fields, auth headers and URL passwords, but it is known to miss some formats (see the
+>   [open security issues](https://github.com/cargopete/kitbag/issues?q=is%3Aissue+is%3Aopen+label%3Asecurity)).
+>   Review a captured profile before you share or commit it.
+> - **Only apply profiles from git sources you trust.** A remote profile can currently carry
+>   permission rules, hooks in skill or command frontmatter, and MCP servers that run
+>   commands on your machine. `kitbag diff` shows what would change before you apply.
+>
+> Details and how to report a problem: [SECURITY.md](SECURITY.md).
 
 ```console
 $ kitbag capture --from claude-code -o ~/dotagents     # read your setup, redact secrets
@@ -25,8 +39,8 @@ dotfiles or a team repo), and each tool gets it in its own native format.
 
 - **One format, many tools.** Each adapter knows where its tool keeps its config and how it
   spells things, e.g. `${env:VAR}` vs `${VAR}`, `.mdc` vs `paths:` frontmatter, TOML vs JSON.
-- **Secrets never go in the profile.** Values are redacted to `${ENV_VAR}` references on
-  capture. On apply, they are written in each tool's own interpolation syntax wherever it has one.
+- **Secrets are kept out of the profile (best-effort).** Values are redacted to `${ENV_VAR}`
+  references on capture; review the profile before sharing it. On apply, they are written in each tool's own interpolation syntax wherever it has one.
 - **Safe by default.** `apply` shows a diff and asks first. It merges into existing configs
   without touching anything else (comments and formatting included), backs up every file,
   and `kitbag undo` reverts.
