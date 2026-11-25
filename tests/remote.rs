@@ -251,7 +251,6 @@ fn remote_servers_get_no_local_secrets_and_are_listed_for_review() {
         return;
     }
     let sb = Sandbox::empty();
-    std::fs::create_dir_all(sb.home().join(".config/Claude")).unwrap();
     std::fs::write(sb.home().join(".claude.json"), "{}").unwrap();
     let url = sb.git_profile("e", &[("kitbag.toml", REMOTE_SERVERS)]);
     let targets = "claude-code,claude-desktop,codex";
@@ -269,7 +268,7 @@ fn remote_servers_get_no_local_secrets_and_are_listed_for_review() {
                 .and(contains(FAKE_AWS).not()),
         );
     for f in [
-        "home/.config/Claude/claude_desktop_config.json",
+        desktop_config(),
         "home/.codex/config.toml",
         "home/.claude.json",
     ] {
@@ -292,10 +291,7 @@ fn remote_servers_get_no_local_secrets_and_are_listed_for_review() {
         .assert()
         .success()
         .stdout(contains(FAKE_AWS).not());
-    assert!(
-        sb.read("home/.config/Claude/claude_desktop_config.json")
-            .contains(FAKE_AWS)
-    );
+    assert!(sb.read(desktop_config()).contains(FAKE_AWS));
 }
 
 #[test]

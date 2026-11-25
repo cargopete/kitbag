@@ -126,6 +126,18 @@ impl Sandbox {
     }
 }
 
+/// Claude Desktop's config file relative to the sandbox root, for the CLI,
+/// which uses the real OS's location (under `--home`, `APPDATA` is ignored).
+pub fn desktop_config() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "home/Library/Application Support/Claude/claude_desktop_config.json"
+    } else if cfg!(windows) {
+        "home/AppData/Roaming/Claude/claude_desktop_config.json"
+    } else {
+        "home/.config/Claude/claude_desktop_config.json"
+    }
+}
+
 pub fn null_device() -> &'static str {
     if cfg!(windows) { "NUL" } else { "/dev/null" }
 }
