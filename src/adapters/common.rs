@@ -32,7 +32,8 @@ pub fn write_owned(
     label: &str,
 ) -> Result<()> {
     let cur = work.fs.read_bytes(path)?;
-    if cur.as_deref() == Some(content) {
+    if cur.as_deref() == Some(content) || cur.as_deref().is_some_and(|c| same_markdown(c, content))
+    {
         return Ok(());
     }
     if cur.is_some() && !opts.overwrite {
@@ -46,6 +47,26 @@ pub fn write_owned(
         return Ok(());
     }
     work.fs.write(path, content.to_vec())
+}
+
+/// Markdown files that differ only in frontmatter formatting (quoting, key
+/// order) or surrounding whitespace are left alone, so re-applying a profile
+/// to the tool it was captured from doesn't churn files.
+fn same_markdown(a: &[u8], b: &[u8]) -> bool {
+    let (Ok(a), Ok(b)) = (std::str::from_utf8(a), std::str::from_utf8(b)) else {
+        return false;
+    };
+    if !a.starts_with("---") && !b.starts_with("---") {
+        return a.trim() == b.trim();
+    }
+    let (da, db) = (frontmatter::parse(a), frontmatter::parse(b));
+    let clean = |m: &Map<String, Value>| -> Map<String, Value> {
+        m.iter()
+            .filter(|(_, v)| !v.is_null())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    };
+    clean(&da.data) == clean(&db.data) && da.body.trim() == db.body.trim()
 }
 
 /// SKILL.md with the `name` / `description` frontmatter some tools require.
@@ -142,7 +163,17 @@ pub fn write_instructions(
     opts: &ApplyOptions,
     fold_rules: bool,
 ) -> Result<()> {
-    upsert_block_file(work, path, &opts.block_id, profile.instructions.as_deref())?;
+    let outside = work
+        .fs
+        .read(path)?
+        .map(|t| block::split(&t).outside)
+        .unwrap_or_default();
+    let content = profile
+        .instructions
+        .as_deref()
+        .map(|i| block::without_paragraphs_in(i, &outside))
+        .filter(|c| !c.trim().is_empty());
+    upsert_block_file(work, path, &opts.block_id, content.as_deref())?;
     if fold_rules {
         let folded = block::fold_rules(&profile.rules);
         let id = format!("{}{RULES_BLOCK_SUFFIX}", opts.block_id);

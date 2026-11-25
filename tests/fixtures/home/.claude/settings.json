@@ -1,0 +1,10 @@
+{
+  "model": "opus",
+  "permissions": {
+    "allow": ["Bash(npm test:*)"],
+    "deny": ["Read(./.env)"]
+  },
+  "env": {
+    "ANTHROPIC_API_KEY": "sk-ant-FAKE-api03-abcdefghijklmnopqrstuvwxyz0123456789"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "brave-search": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "env": { "BRAVE_API_KEY": "${env:BRAVE_API_KEY}" }
+    },
+    "sentry": {
+      "url": "https://mcp.sentry.dev/mcp",
+      "headers": { "X-Api-Key": "sntrys_FAKEeyJpYXQiOjE3MDAwMDAwMDAsInVybCI6Imh0dHBzOi8v" }
+    }
+  }
+}

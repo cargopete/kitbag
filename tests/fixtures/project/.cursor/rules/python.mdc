@@ -1,0 +1,7 @@
+---
+description: Python style
+globs: *.py,scripts/**/*.py
+alwaysApply: false
+---
+
+Use type hints and f-strings.

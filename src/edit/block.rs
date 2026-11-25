@@ -128,6 +128,29 @@ fn collapse_blank_lines(s: &str) -> String {
     out
 }
 
+/// Paragraphs (blank-line separated) of `content` that do not already appear
+/// verbatim in `existing`. Used so instructions captured from a file's own
+/// text are not duplicated into that file's managed block.
+pub fn without_paragraphs_in(content: &str, existing: &str) -> String {
+    if existing.trim().is_empty() {
+        return content.to_string();
+    }
+    let have: Vec<String> = paragraphs(existing).collect();
+    paragraphs(content)
+        .filter(|p| !have.contains(p))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn paragraphs(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.replace("\r\n", "\n")
+        .split("\n\n")
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
 const RULE_OPEN: &str = "<!-- kitbag:rule ";
 const RULE_END: &str = "<!-- kitbag:rule-end -->";
 
@@ -271,6 +294,17 @@ mod tests {
                 ("a:rules".to_string(), "R body".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn drops_paragraphs_already_present() {
+        let existing = "# Mine\n\nRun make lint.\n";
+        let content = "Be brief.\n\nRun make lint.\n\nUse tabs.";
+        assert_eq!(
+            without_paragraphs_in(content, existing),
+            "Be brief.\n\nUse tabs."
+        );
+        assert_eq!(without_paragraphs_in(content, ""), content);
     }
 
     #[test]

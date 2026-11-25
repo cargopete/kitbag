@@ -1,0 +1,25 @@
+# My Codex config
+model = "gpt-5-codex"
+model_reasoning_effort = "high"
+approval_policy = "on-request"
+
+[features]
+web_search_request = true
+
+# Docs server
+[mcp_servers.context7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp"]
+env_vars = ["CONTEXT7_API_KEY"]
+startup_timeout_sec = 20
+
+[mcp_servers.figma]
+url = "https://mcp.figma.com/mcp"
+bearer_token_env_var = "FIGMA_TOKEN"
+
+[mcp_servers.legacy]
+command = "legacy-mcp"
+enabled = false
+
+[mcp_servers.legacy.env]
+MODE = "safe"

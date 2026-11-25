@@ -121,14 +121,19 @@ pub fn render_diff(
         paint(BOLD, format!("+++ {display_path}"))
     );
     let mut lines = 0;
-    for group in diff.grouped_ops(3) {
+    for (i, group) in diff.grouped_ops(3).into_iter().enumerate() {
+        if i > 0 {
+            out.push_str(&paint(DIM, "  ..."));
+            out.push('\n');
+        }
         for op in group {
             for ch in diff.iter_changes(&op) {
                 if lines >= max_lines {
                     out.push_str(&paint(
                         DIM,
-                        "  ... (diff truncated; use 'kitbag diff' to see everything)\n",
+                        "  ... (diff truncated; use 'kitbag diff' to see everything)",
                     ));
+                    out.push('\n');
                     return out;
                 }
                 let text = ch.value().trim_end_matches('\n');
@@ -142,7 +147,6 @@ pub fn render_diff(
                 lines += 1;
             }
         }
-        out.push_str(&paint(DIM, "  ...\n"));
     }
     out
 }

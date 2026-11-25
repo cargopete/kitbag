@@ -140,21 +140,21 @@ pub fn plan(
             continue;
         }
         let mut unsupported = Vec::new();
-        let count = |f: Feature| match f {
-            Feature::Rules => profile.rules.len(),
-            Feature::Commands => profile.commands.len(),
-            Feature::Skills => profile.skills.len(),
-            Feature::Instructions => usize::from(profile.instructions.is_some()),
-            _ => 0,
-        };
-        for f in [
-            Feature::Instructions,
-            Feature::Rules,
-            Feature::Commands,
-            Feature::Skills,
-        ] {
-            if count(f) > 0 && a.supports(env.scope, f) == Support::None {
-                unsupported.push(format!("{} {}", count(f), f.as_str()));
+        let items = [
+            (
+                Feature::Instructions,
+                usize::from(profile.instructions.is_some()),
+            ),
+            (Feature::Rules, profile.rules.len()),
+            (Feature::Commands, profile.commands.len()),
+            (Feature::Skills, profile.skills.len()),
+        ];
+        for (f, n) in items {
+            if n > 0 && a.supports(env.scope, f) == Support::None {
+                unsupported.push(match f {
+                    Feature::Instructions => "instructions".to_string(),
+                    _ => format!("{n} {}", f.as_str()),
+                });
             }
         }
         if !unsupported.is_empty() {

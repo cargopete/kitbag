@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-use anstream::{eprintln, println};
+use anstream::{eprintln, print, println};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;

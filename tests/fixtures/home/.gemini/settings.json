@@ -1,0 +1,15 @@
+{
+  "theme": "GitHub",
+  "mcpServers": {
+    "weather": {
+      "command": "node",
+      "args": ["/opt/weather/index.js"],
+      "env": { "WEATHER_API_KEY": "$WEATHER_API_KEY" },
+      "timeout": 30000
+    },
+    "docs": {
+      "httpUrl": "https://docs.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${DOCS_TOKEN}" }
+    }
+  }
+}

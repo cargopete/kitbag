@@ -99,12 +99,10 @@ impl Adapter for ClaudeDesktop {
         work: &mut Work,
     ) -> Result<()> {
         let mut servers = Vec::new();
+        let mut remote = Vec::new();
         for (name, s) in servers_for(profile, ID, work, false) {
             if s.transport() != Transport::Stdio {
-                work.info(
-                    ID,
-                    format!("MCP server '{name}' is remote; add it in Claude Desktop under Settings > Connectors (the config file holds local servers only)"),
-                );
+                remote.push(name.as_str());
                 continue;
             }
             if s.cwd.is_some() {
@@ -139,6 +137,15 @@ impl Adapter for ClaudeDesktop {
                 "claude_desktop_config.json",
             );
             servers.push((name.clone(), Value::Object(def)));
+        }
+        if !remote.is_empty() {
+            work.info(
+                ID,
+                format!(
+                    "remote MCP server(s) {} skipped: add them in Claude Desktop under Settings > Connectors (the config file holds local servers only)",
+                    remote.join(", ")
+                ),
+            );
         }
         merge_json_servers(
             work,

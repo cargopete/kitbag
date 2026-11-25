@@ -1,0 +1,4 @@
+description = "Draft a changelog entry"
+prompt = """
+Write a changelog entry for: {{args}}
+"""

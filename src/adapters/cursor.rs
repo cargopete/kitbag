@@ -348,7 +348,7 @@ impl Adapter for Cursor {
                 if profile.instructions.is_some() || !profile.rules.is_empty() {
                     work.info(
                         ID,
-                        "Cursor keeps user-level rules in Settings > Rules, not in files; instructions and rules were not applied at user scope (apply with --project to write .cursor/rules and AGENTS.md)",
+                        "Cursor keeps user rules in Settings > Rules, not in files; paste instructions there, or apply with --project to write .cursor/rules and AGENTS.md",
                     );
                 }
             }

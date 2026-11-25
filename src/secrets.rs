@@ -238,7 +238,7 @@ static STRONG: LazyLock<Vec<Pattern>> =
         ("huggingface-token", r"\bhf_[A-Za-z0-9]{30,}"),
         ("linear-key", r"\blin_api_[A-Za-z0-9]{30,}"),
         ("notion-token", r"\b(?:ntn_|secret_)[A-Za-z0-9]{40,}"),
-        ("sentry-token", r"\bsntr[ysu]_[A-Za-z0-9_+/=-]{30,}"),
+        ("sentry-token", r"\bsntry[su]?_[A-Za-z0-9_+/=-]{30,}"),
         ("digitalocean-token", r"\bdo[opr]_v1_[a-f0-9]{64}"),
         ("sendgrid-key", r"\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}"),
         ("shopify-token", r"\bshp(?:at|ca|pa|ss)_[a-fA-F0-9]{32}"),

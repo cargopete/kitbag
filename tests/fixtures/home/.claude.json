@@ -1,0 +1,36 @@
+{
+  "numStartups": 42,
+  "theme": "dark",
+  "hasCompletedOnboarding": true,
+  "projects": {
+    "/work/app": {
+      "allowedTools": [],
+      "mcpServers": {}
+    }
+  },
+  "mcpServers": {
+    "github": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_FAKE0123456789abcdefghijklmnopqrstuv"
+      }
+    },
+    "linear": {
+      "type": "http",
+      "url": "https://mcp.linear.app/mcp",
+      "headers": {
+        "Authorization": "Bearer ${LINEAR_API_KEY}"
+      }
+    },
+    "postgres": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-postgres", "--connection-string", "postgresql://admin:hunter2secret@db.internal:5432/app"],
+      "env": {
+        "LOG_LEVEL": "debug"
+      }
+    }
+  }
+}
