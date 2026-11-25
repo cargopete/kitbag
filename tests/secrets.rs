@@ -168,6 +168,67 @@ fn new_files_holding_resolved_secrets_are_private() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn files_getting_secrets_from_env_or_fallbacks_end_up_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &std::path::Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let has_note =
+        |p: &engine::Plan, needle: &str| p.notes.iter().any(|n| n.message.contains(needle));
+
+    // An existing, world-readable file that gets a resolved value is tightened, with a note.
+    let sb = Sandbox::empty();
+    let desktop = sb.home().join(".config/Claude/claude_desktop_config.json");
+    fs::create_dir_all(desktop.parent().unwrap()).unwrap();
+    fs::write(&desktop, "{}").unwrap();
+    fs::set_permissions(&desktop, fs::Permissions::from_mode(0o644)).unwrap();
+    let env = sb.env_with(Scope::User, &[("MY_TOKEN", "FAKE-env-value-123456")]);
+    let p = apply(&sb, &secret_profile(), &["claude-desktop"], &env);
+    assert_eq!(mode(&desktop), 0o600);
+    assert!(has_note(&p, "0600"), "{:?}", p.notes);
+    assert!(has_note(&p, "resolved from your environment"));
+
+    // A secret-looking ${VAR:-fallback}, with VAR unset, is just as secret on disk.
+    let mut prof = Profile::new("s");
+    prof.mcp_servers.insert(
+        "svc".into(),
+        McpServer {
+            command: Some("svc-mcp".into()),
+            env: [(
+                "API_KEY".to_string(),
+                "${API_KEY:-FAKE-fallback-value-42}".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        },
+    );
+    let sb = Sandbox::empty();
+    let p = apply(
+        &sb,
+        &prof,
+        &["claude-desktop", "cursor"],
+        &sb.env(Scope::User),
+    );
+    let desktop = sb.home().join(".config/Claude/claude_desktop_config.json");
+    let cursor = sb.home().join(".cursor/mcp.json");
+    for f in [&desktop, &cursor] {
+        assert!(
+            fs::read_to_string(f)
+                .unwrap()
+                .contains("FAKE-fallback-value-42")
+        );
+        assert_eq!(mode(f), 0o600, "{}", f.display());
+    }
+    assert!(p.sensitive.contains("FAKE-fallback-value-42"));
+    assert!(
+        !has_note(&p, "resolved from your environment"),
+        "{:?}",
+        p.notes
+    );
+    assert!(has_note(&p, "fallback"));
+}
+
 #[test]
 fn diff_output_masks_resolved_secrets() {
     let sb = Sandbox::empty();

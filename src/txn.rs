@@ -73,7 +73,8 @@ pub fn sha256(data: Option<&[u8]>) -> Option<String> {
 /// Options for writing new files.
 #[derive(Debug, Clone, Default)]
 pub struct WriteOptions {
-    /// New files that contain resolved secrets; created owner-only (0600 on Unix).
+    /// Files that will contain resolved secrets; written owner-only (0600 on
+    /// Unix), tightening existing files too. Undo restores the old mode.
     pub private: std::collections::BTreeSet<PathBuf>,
 }
 
@@ -103,7 +104,8 @@ pub fn write_atomic(path: &Path, content: &[u8], mode: Option<u32>) -> Result<()
     Ok(())
 }
 
-fn file_mode(path: &Path) -> Option<u32> {
+/// The permission bits of `path` (Unix only; `None` elsewhere or if missing).
+pub fn file_mode(path: &Path) -> Option<u32> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -233,9 +235,12 @@ impl Store {
                         let dest = &c.path;
                         let parent = dest.parent().context("path has no parent")?;
                         mkdirp(parent, &mut tx.created_dirs)?;
-                        let mode = tx.entries[i]
-                            .mode
-                            .or(opts.private.contains(&c.path).then_some(0o600));
+                        // Files holding secrets are private even if they weren't before.
+                        let mode = if opts.private.contains(&c.path) {
+                            Some(0o600)
+                        } else {
+                            tx.entries[i].mode
+                        };
                         write_atomic(dest, content, mode)?;
                     }
                 }

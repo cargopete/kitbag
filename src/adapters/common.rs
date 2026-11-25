@@ -304,6 +304,8 @@ pub struct Resolver<'a> {
     env: &'a Env,
     mode: SecretsMode,
     resolved: Vec<String>,
+    /// Locations written with a `${VAR:-fallback}` because VAR was unset.
+    defaulted: Vec<String>,
     missing: Vec<String>,
     kept: Vec<String>,
 }
@@ -314,6 +316,7 @@ impl<'a> Resolver<'a> {
             env,
             mode: opts.secrets,
             resolved: Vec::new(),
+            defaulted: Vec::new(),
             missing: Vec::new(),
             kept: Vec::new(),
         }
@@ -332,11 +335,18 @@ impl<'a> Resolver<'a> {
         let out = render_refs(v, RefStyle::Resolve, &self.env.vars, &mut probe);
         work.render.resolved.extend(probe.resolved);
         work.render.missing.extend(probe.missing.iter().cloned());
-        if probe.missing.is_empty() {
-            self.resolved.push(location.to_string());
-        } else {
+        let from_env = crate::secrets::refs_in(v)
+            .iter()
+            .any(|r| self.env.vars.contains_key(r));
+        if !probe.missing.is_empty() {
             self.missing.push(location.to_string());
+        } else if from_env {
+            self.resolved.push(location.to_string());
         }
+        if !probe.fallbacks.is_empty() {
+            self.defaulted.push(location.to_string());
+        }
+        work.render.fallbacks.extend(probe.fallbacks);
         out
     }
 
@@ -347,6 +357,15 @@ impl<'a> Resolver<'a> {
                 format!(
                     "MCP server '{server}': {} resolved from your environment and written to {file} ({tool} can't expand env references there)",
                     self.resolved.join(", ")
+                ),
+            );
+        }
+        if !self.defaulted.is_empty() {
+            work.warn(
+                target,
+                format!(
+                    "MCP server '{server}': {} written to {file} with the ${{VAR:-…}} fallback, because the variable is unset ({tool} can't expand env references there)",
+                    self.defaulted.join(", ")
                 ),
             );
         }

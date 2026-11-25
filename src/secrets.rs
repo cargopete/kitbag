@@ -122,6 +122,8 @@ pub struct RenderState {
     pub resolved: BTreeSet<String>,
     /// Var names left as `${VAR}` placeholders because resolving was off (`--secrets never`).
     pub kept: BTreeSet<String>,
+    /// Var names that were unset, so their `${VAR:-fallback}` was written instead.
+    pub fallbacks: BTreeSet<String>,
 }
 
 /// Render `value` in `style`, recording missing / resolved values into `state`.
@@ -139,9 +141,18 @@ pub fn render_refs(
             let name = &c[1];
             let fallback = c.get(2).map(|m| m.as_str());
             let set = env.get(name);
+            // A fallback written to disk is as sensitive as a resolved value
+            // when it looks like a secret.
+            let mut use_fallback = |fb: &str| {
+                state.fallbacks.insert(name.to_string());
+                if classify(Some(name), fb).is_some() {
+                    state.resolved.insert(fb.to_string());
+                }
+                fb.to_string()
+            };
             match style {
                 RefStyle::EnvColon | RefStyle::DollarPlain => match (fallback, set) {
-                    (Some(fb), None) => fb.to_string(),
+                    (Some(fb), None) => use_fallback(fb),
                     _ if style == RefStyle::EnvColon => format!("${{env:{name}}}"),
                     _ => reference(name),
                 },
@@ -152,7 +163,7 @@ pub fn render_refs(
                         }
                         v.clone()
                     }
-                    (None, Some(fb)) => fb.to_string(),
+                    (None, Some(fb)) => use_fallback(fb),
                     (None, None) => {
                         state.missing.insert(name.to_string());
                         c[0].to_string()

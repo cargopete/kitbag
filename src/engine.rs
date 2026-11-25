@@ -218,6 +218,9 @@ pub struct Plan {
     pub kept_env: BTreeSet<String>,
     /// Settings that widen what agents may do without asking.
     pub risky: Vec<String>,
+    /// Files that will hold secret values (from `sensitive`): written with
+    /// mode 0600 on Unix, existing files included.
+    pub private: BTreeSet<PathBuf>,
 }
 
 pub fn plan(
@@ -333,6 +336,28 @@ pub fn plan(
     if !applied.is_empty() {
         risky.extend(policy::risky_content(profile));
     }
+    let changes = work.fs.changes();
+    let private: BTreeSet<PathBuf> = changes
+        .iter()
+        .filter(|c| {
+            c.after.as_ref().is_some_and(|a| {
+                crate::secrets::contains_any(&String::from_utf8_lossy(a), &work.render.resolved)
+            })
+        })
+        .map(|c| c.path.clone())
+        .collect();
+    for path in &private {
+        if let Some(mode) = crate::txn::file_mode(path).filter(|m| m & 0o077 != 0) {
+            work.notes.push(note(
+                Level::Warn,
+                "apply",
+                format!(
+                    "{} will hold secret values; its mode is tightened from {mode:04o} to 0600",
+                    path.display()
+                ),
+            ));
+        }
+    }
     let mut notes: Vec<Note> = Vec::new();
     for n in work.notes {
         if !notes.contains(&n) {
@@ -340,7 +365,8 @@ pub fn plan(
         }
     }
     Ok(Plan {
-        changes: work.fs.changes(),
+        changes,
+        private,
         notes,
         targets: applied,
         missing_env: work.render.missing,
@@ -357,16 +383,7 @@ pub fn commit(plan: &Plan, description: &str, state_dir: &Path) -> Result<Option
         return Ok(None);
     }
     let store = Store::new(state_dir);
-    let private = plan
-        .changes
-        .iter()
-        .filter(|c| {
-            c.after.as_ref().is_some_and(|a| {
-                crate::secrets::contains_any(&String::from_utf8_lossy(a), &plan.sensitive)
-            })
-        })
-        .map(|c| c.path.clone())
-        .collect();
+    let private = plan.private.clone();
     store
         .commit(
             &plan.changes,
