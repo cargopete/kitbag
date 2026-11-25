@@ -524,8 +524,11 @@ pub fn scan_for_secrets(p: &Profile) -> Vec<String> {
             }
         }
         // Anything capture-time redaction would still replace is a secret too.
+        // (Secret fallbacks are reported above, with a clearer message.)
         for r in redact_server(n, s).1 {
-            out_extra.push(format!("{}: looks like a {}", r.location, r.reason));
+            if r.reason != "secret-fallback" {
+                out_extra.push(format!("{}: looks like a {}", r.location, r.reason));
+            }
         }
     }
     for (t, m) in &p.settings {

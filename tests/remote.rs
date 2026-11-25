@@ -316,11 +316,8 @@ fn local_plans_list_servers_and_flag_secret_fallbacks() {
                 .and(contains("LEVEL:-").not())
                 .and(contains("s3cret").not()),
         );
-    sb.cli()
-        .args(["doctor", "local"])
-        .assert()
-        .code(1)
-        .stdout(contains(
-            "mcp_servers.s.env.API_KEY: the ${API_KEY:-…} fallback looks like a secret",
-        ));
+    sb.cli().args(["doctor", "local"]).assert().code(1).stdout(
+        contains("mcp_servers.s.env.API_KEY: the ${API_KEY:-…} fallback looks like a secret")
+            .and(contains("1 problem(s) found")),
+    );
 }
