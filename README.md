@@ -513,6 +513,50 @@ What keeps a profile portable:
 - **Secrets travel separately.** The profile holds `${VAR}` references; set the variables on
   each machine (`kitbag doctor ~/dotfiles/kitbag` lists the ones that are unset).
 
+## Which instruction files does a tool load?
+
+`kitbag doctor --why [DIR]` lists, per tool, the instruction files it reads when started in
+`DIR` (the current directory by default), in load order, the ones it reads later or skips
+and why, and known traps. It only looks at files; nothing is run or changed.
+
+```console
+$ kitbag doctor --why ~/code/app --to claude,codex
+Instruction files for ~/code/app
+
+Claude Code
+  load 1     ~/.claude/CLAUDE.md  user instructions
+  load 2     ~/code/CLAUDE.md  parent directory
+  skip       ~/code/app/AGENTS.md  shadowed: Claude Code reads AGENTS.md only when there is no CLAUDE.md in or above the directory, and ~/code/CLAUDE.md exists
+  note       set instructionFiles to "claude-md-and-agents-md" in ~/.claude/settings.json to read both, or @import AGENTS.md from CLAUDE.md
+
+Codex CLI
+  trap       ~/code/app/.codex/config.toml  ignored: Codex reads a project's .codex/config.toml only when the project is trusted, and ~/code/app is not marked trusted in ~/.codex/config.toml
+  load 1     ~/code/app/AGENTS.md  project
+  trap       ~/code/app/AGENTS.md  truncated: Codex reads only the first 32.0 KiB of its 40.2 KiB (project_doc_max_bytes is 32.0 KiB in total for all project files; raise it in config.toml)
+```
+
+Lines are `load N` (read at start, in that order), `later` (read when the agent touches
+matching files, such as path-scoped rules), `skip` (exists but isn't read: wrong name, too
+large, untrusted, shadowed by another file), `trap`, `note` and `unverified` (a question
+the tool's documentation doesn't answer; kitbag says so instead of guessing). It knows about:
+
+- **Claude Code**: the managed, user and `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`
+  files from the file system root down, `.claude/rules/`, and that any of those in or above
+  the directory turns `AGENTS.md` off (unless `instructionFiles` in `~/.claude/settings.json`
+  says otherwise). It flags a `~/.claude/CLAUDE.md` that links to a project's `AGENTS.md`
+  (read twice) and the bug that skips `AGENTS.md` under the home directory.
+- **Codex CLI**: `AGENTS.override.md` / `AGENTS.md` (one per directory, from the git root
+  down), the 32 KiB total cap (`project_doc_max_bytes`), and a project `.codex/config.toml`
+  that is ignored because the project isn't trusted.
+- **Cursor**: `.cursor/rules/*.mdc` by rule type and `AGENTS.md`; user rules live in
+  Cursor's app storage, not on disk, so they can't be listed.
+- **Gemini CLI** (with `context.fileName`), **Antigravity** (including its 24,000-byte
+  truncation) and **opencode** (`AGENTS.md`, else `CLAUDE.md`, per directory).
+
+By default every tool that reads instruction files is shown; `--to` limits it, and `--home`
+(or `KITBAG_HOME`) points it at a sandbox. Under `--home`, Claude Code's managed policy file is
+not checked.
+
 ## Commands
 
 | Command | What it does |
@@ -526,6 +570,7 @@ What keeps a profile portable:
 | `kitbag undo [ID] [--force]` | Revert the latest (or a specific) apply; with an ID, also an interrupted one |
 | `kitbag history [--json]` | List applies |
 | `kitbag doctor [SOURCE]` | Check installed tools' configs, a profile, required env vars, risky settings, interrupted applies |
+| `kitbag doctor --why [DIR] [--to IDS]` | Which instruction files each tool loads in `DIR` (default: the current directory), in order, which it skips and why, and known traps |
 | `kitbag list-targets [--json]` | Targets, what they support, which are detected, file locations |
 
 Common options:
