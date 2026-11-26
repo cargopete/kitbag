@@ -371,7 +371,9 @@ impl Store {
         })();
         if let Err(e) = result {
             let entries: Vec<Entry> = tx.entries[..done].to_vec();
-            let _ = self.restore(&tx, &entries, &[]);
+            let _ = self
+                .read_backups(&tx, &entries)
+                .and_then(|backups| self.restore(&tx, &entries, &backups, &[]));
             tx.status = Status::RolledBack;
             let _ = self.save(&tx);
             return Err(e.context("apply failed; changes already written were rolled back"));
@@ -417,18 +419,37 @@ impl Store {
         Ok(())
     }
 
-    /// Put `entries` back as they were before `tx`. Directories `tx` created
-    /// are removed when empty, except around files in `kept`.
-    fn restore(&self, tx: &Transaction, entries: &[Entry], kept: &[PathBuf]) -> Result<()> {
-        for e in entries.iter().rev() {
-            match (&e.backup, e.existed) {
-                (Some(b), true) => {
-                    let data = fs::read(self.tx_dir(&tx.id).join(b))
-                        .with_context(|| format!("reading backup of {}", e.path.display()))?;
+    /// The backup of each of `entries` (`None` where there is none), read once
+    /// so that undo restores exactly the bytes it checked.
+    fn read_backups(&self, tx: &Transaction, entries: &[Entry]) -> Result<Vec<Option<Vec<u8>>>> {
+        entries
+            .iter()
+            .map(|e| match &e.backup {
+                Some(b) => fs::read(self.tx_dir(&tx.id).join(b))
+                    .map(Some)
+                    .with_context(|| format!("reading backup of {}", e.path.display())),
+                None => Ok(None),
+            })
+            .collect()
+    }
+
+    /// Put `entries` back as they were before `tx`, from `backups` (see
+    /// [`Store::read_backups`]). Directories `tx` created are removed when
+    /// empty, except around files in `kept`.
+    fn restore(
+        &self,
+        tx: &Transaction,
+        entries: &[Entry],
+        backups: &[Option<Vec<u8>>],
+        kept: &[PathBuf],
+    ) -> Result<()> {
+        for (e, backup) in entries.iter().zip(backups).rev() {
+            match (backup, e.existed) {
+                (Some(data), true) => {
                     if let Some(parent) = e.path.parent() {
                         fs::create_dir_all(parent)?;
                     }
-                    write_atomic(&e.path, &data, e.mode)?;
+                    write_atomic(&e.path, data, e.mode)?;
                 }
                 _ => match fs::remove_file(&e.path) {
                     Err(err) if err.kind() != io::ErrorKind::NotFound => {
@@ -479,25 +500,33 @@ impl Store {
         self.drift_in(&tx.entries)
     }
 
-    /// Backups of `entries` that no longer hold what was saved at apply time.
-    /// Entries without a recorded hash can't be checked and are trusted.
-    fn tampered_backups(&self, tx: &Transaction, entries: &[Entry]) -> Result<Vec<Tampered>> {
+    /// Backups of `entries` (read into `backups`) that no longer hold what was
+    /// saved at apply time. Entries without a recorded hash can't be checked
+    /// and are trusted.
+    ///
+    /// The hash is kept in `transaction.json`, next to the backups, so this
+    /// catches a backup that changed on its own (a sync tool, a disk error, a
+    /// stray edit), not someone who can write to the state directory: they
+    /// can change the recorded hash too.
+    fn tampered_backups(
+        &self,
+        tx: &Transaction,
+        entries: &[Entry],
+        backups: &[Option<Vec<u8>>],
+    ) -> Vec<Tampered> {
         let mut out = Vec::new();
-        for e in entries {
-            let (Some(b), Some(want)) = (&e.backup, &e.before_sha256) else {
+        for (e, data) in entries.iter().zip(backups) {
+            let (Some(b), Some(want), Some(data)) = (&e.backup, &e.before_sha256, data) else {
                 continue;
             };
-            let backup = self.tx_dir(&tx.id).join(b);
-            let data = fs::read(&backup)
-                .with_context(|| format!("reading backup of {}", e.path.display()))?;
-            if sha256(Some(&data)).as_ref() != Some(want) {
+            if sha256(Some(data)).as_ref() != Some(want) {
                 out.push(Tampered {
                     path: e.path.clone(),
-                    backup,
+                    backup: self.tx_dir(&tx.id).join(b),
                 });
             }
         }
-        Ok(out)
+        out
     }
 
     fn drift_in(&self, entries: &[Entry]) -> Result<Vec<PathBuf>> {
@@ -602,7 +631,10 @@ impl Store {
                 list.join("\n")
             );
         }
-        let tampered = self.tampered_backups(&tx, &entries)?;
+        // Restore from the very bytes that were checked, so a backup that
+        // changes between the check and the restore can't slip through.
+        let backups = self.read_backups(&tx, &entries)?;
+        let tampered = self.tampered_backups(&tx, &entries, &backups);
         if !tampered.is_empty() && !force {
             let list: Vec<String> = tampered
                 .iter()
@@ -615,7 +647,7 @@ impl Store {
             );
         }
         let kept: Vec<PathBuf> = refused.iter().map(|r| r.path.clone()).collect();
-        self.restore(&tx, &entries, &kept)?;
+        self.restore(&tx, &entries, &backups, &kept)?;
         tx.status = Status::Undone;
         self.save(&tx)?;
         Ok(Undone {
@@ -745,6 +777,36 @@ mod tests {
         assert_eq!(done.tampered.len(), 1);
         assert_eq!(done.tampered[0].path, f);
         assert_eq!(fs::read_to_string(&f).unwrap(), "planted");
+    }
+
+    /// Undo restores the bytes it checked: a backup changed after the check
+    /// doesn't reach the file.
+    #[test]
+    fn restore_writes_the_backup_bytes_that_were_checked() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path().join("state"));
+        let f = root.path().join("f.txt");
+        fs::write(&f, "original").unwrap();
+        let tx = store
+            .commit(
+                &[change(&f, Some("kitbag"))],
+                "t",
+                &[],
+                &WriteOptions::default(),
+            )
+            .unwrap();
+        let backups = store.read_backups(&tx, &tx.entries).unwrap();
+        assert!(
+            store
+                .tampered_backups(&tx, &tx.entries, &backups)
+                .is_empty()
+        );
+        let backup = store
+            .tx_dir(&tx.id)
+            .join(tx.entries[0].backup.as_ref().unwrap());
+        fs::write(&backup, "planted").unwrap();
+        store.restore(&tx, &tx.entries, &backups, &[]).unwrap();
+        assert_eq!(fs::read_to_string(&f).unwrap(), "original");
     }
 
     /// A backup without a recorded hash (hand-edited or very old state) can't

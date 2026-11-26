@@ -343,7 +343,8 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
   directory first, writes are atomic, and a failure part-way through rolls back.
   `kitbag history` lists applies, and `kitbag undo [id]` restores them byte for byte. Undo
   refuses if you edited a file since, or if a backup no longer matches the SHA-256 recorded
-  when it was taken, unless you pass `--force`. A file whose directory now
+  when it was taken, unless you pass `--force`. (The hash sits next to the backups, so it
+  catches a backup that changed on its own, not someone who can write to the state directory.) A file whose directory now
   resolves somewhere else (a symbolic link appeared or changed since the apply), or that is
   now a link itself, is left alone even with `--force`: undo reverts the rest, names it and
   exits with status 1. If a file changes between planning and writing, the apply is refused.
