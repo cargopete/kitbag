@@ -558,8 +558,9 @@ Good next candidates: Windsurf, Zed, VS Code / GitHub Copilot, OpenCode.
   byte-order mark. Instructions, rules and commands in any other encoding are skipped with a
   warning. Skill supporting files are copied byte for byte. A UTF-8 byte-order mark at the
   start of a JSON or TOML config is kept when kitbag writes the file back.
-- **Size limits.** Profile files are limited to 2 MiB and skills to 200 files. Capture skips
-  anything larger with a warning, so it never writes a profile that can't be applied.
+- **Size limits.** Profile files are limited to 2 MiB, skills to 200 files and a whole
+  profile to 64 MiB. Capture skips files that are too large with a warning, and refuses to
+  write a profile over the total, so it never writes a profile that can't be applied.
 
 ## Development
 

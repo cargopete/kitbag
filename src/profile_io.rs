@@ -27,9 +27,37 @@ pub const MAX_SKILL_FILES: usize = 200;
 /// never writes a profile that can't be loaded.
 pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
+/// Most bytes all files of a profile may hold together, so loading a
+/// profile (perhaps someone else's repository) has bounded memory use.
+pub const MAX_PROFILE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// What is left of [`MAX_PROFILE_BYTES`] while one profile is read.
+struct ReadBudget<'a> {
+    dir: &'a Path,
+    left: u64,
+}
+
+impl ReadBudget<'_> {
+    fn take(&mut self, bytes: u64) -> Result<()> {
+        if bytes > self.left {
+            anyhow::bail!(
+                "{} is larger than {} in total, the most a profile may hold; remove large files from it",
+                self.dir.display(),
+                max_size(MAX_PROFILE_BYTES)
+            );
+        }
+        self.left -= bytes;
+        Ok(())
+    }
+}
+
+fn max_size(bytes: u64) -> String {
+    format!("{} MiB", bytes / (1024 * 1024))
+}
+
 /// `MAX_FILE_BYTES` for messages.
 pub fn max_file_size() -> String {
-    format!("{} MiB", MAX_FILE_BYTES / (1024 * 1024))
+    max_size(MAX_FILE_BYTES)
 }
 
 /// A profile that failed validation, with every problem found.
@@ -109,8 +137,9 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
     })
 }
 
-/// Read a file from an (untrusted) profile directory: no symlinks, bounded size.
-fn read_profile_file(path: &Path) -> Result<Option<Vec<u8>>> {
+/// Read a file from an (untrusted) profile directory: no symlinks, bounded
+/// size, and counted against the profile's total.
+fn read_profile_file(path: &Path, budget: &mut ReadBudget) -> Result<Option<Vec<u8>>> {
     let meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -127,13 +156,15 @@ fn read_profile_file(path: &Path) -> Result<Option<Vec<u8>>> {
     if meta.len() > MAX_FILE_BYTES {
         anyhow::bail!("{} is larger than {}", path.display(), max_file_size());
     }
-    Ok(Some(
-        fs::read(path).with_context(|| format!("reading {}", path.display()))?,
-    ))
+    budget.take(meta.len())?;
+    let data = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    // The file may have grown since it was measured.
+    budget.take((data.len() as u64).saturating_sub(meta.len()))?;
+    Ok(Some(data))
 }
 
-fn read_profile_text(path: &Path) -> Result<Option<String>> {
-    match read_profile_file(path)? {
+fn read_profile_text(path: &Path, budget: &mut ReadBudget) -> Result<Option<String>> {
+    match read_profile_file(path, budget)? {
         None => Ok(None),
         Some(b) => {
             Ok(Some(String::from_utf8(b).with_context(|| {
@@ -240,7 +271,12 @@ pub fn skill_description(files: &[SkillFile]) -> Option<String> {
     string(frontmatter::parse(&text).data.get("description"))
 }
 
-fn read_skill_dir(dir: &Path, prefix: &str, out: &mut Vec<SkillFile>) -> Result<()> {
+fn read_skill_dir(
+    dir: &Path,
+    prefix: &str,
+    out: &mut Vec<SkillFile>,
+    budget: &mut ReadBudget,
+) -> Result<()> {
     for (name, is_dir) in list_profile_dir(dir)? {
         if name == ".git" || name == ".DS_Store" || name == "node_modules" {
             continue;
@@ -255,8 +291,8 @@ fn read_skill_dir(dir: &Path, prefix: &str, out: &mut Vec<SkillFile>) -> Result<
         };
         let abs = dir.join(&name);
         if is_dir {
-            read_skill_dir(&abs, &rel, out)?;
-        } else if let Some(content) = read_profile_file(&abs)? {
+            read_skill_dir(&abs, &rel, out, budget)?;
+        } else if let Some(content) = read_profile_file(&abs, budget)? {
             out.push(SkillFile {
                 path: rel,
                 content,
@@ -269,8 +305,13 @@ fn read_skill_dir(dir: &Path, prefix: &str, out: &mut Vec<SkillFile>) -> Result<
 
 /// Load a profile directory.
 pub fn load(dir: &Path) -> Result<Profile> {
+    load_with_limit(dir, MAX_PROFILE_BYTES)
+}
+
+fn load_with_limit(dir: &Path, limit: u64) -> Result<Profile> {
+    let budget = &mut ReadBudget { dir, left: limit };
     let manifest = dir.join(MANIFEST);
-    let text = read_profile_text(&manifest)?.ok_or_else(|| {
+    let text = read_profile_text(&manifest, budget)?.ok_or_else(|| {
         ProfileError::new(
             format!(
                 "no {MANIFEST} found in {} (create one with 'kitbag init')",
@@ -280,7 +321,7 @@ pub fn load(dir: &Path) -> Result<Profile> {
         )
     })?;
     let mut p = parse_manifest(&text, &manifest)?;
-    if let Some(i) = read_profile_text(&dir.join("instructions.md"))?
+    if let Some(i) = read_profile_text(&dir.join("instructions.md"), budget)?
         && !i.trim().is_empty()
     {
         p.instructions = Some(i.trim().to_string());
@@ -300,7 +341,7 @@ pub fn load(dir: &Path) -> Result<Profile> {
             issues.push(format!("rules/{file}: invalid file name"));
             continue;
         }
-        let text = read_profile_text(&dir.join("rules").join(&file))?.unwrap_or_default();
+        let text = read_profile_text(&dir.join("rules").join(&file), budget)?.unwrap_or_default();
         p.rules.push(rule_from_markdown(stem, &text));
     }
     for (file, is_dir) in list_profile_dir(&dir.join("commands"))? {
@@ -314,7 +355,8 @@ pub fn load(dir: &Path) -> Result<Profile> {
             issues.push(format!("commands/{file}: invalid file name"));
             continue;
         }
-        let text = read_profile_text(&dir.join("commands").join(&file))?.unwrap_or_default();
+        let text =
+            read_profile_text(&dir.join("commands").join(&file), budget)?.unwrap_or_default();
         p.commands.push(command_from_markdown(stem, &text));
     }
     for (name, is_dir) in list_profile_dir(&dir.join("skills"))? {
@@ -326,7 +368,7 @@ pub fn load(dir: &Path) -> Result<Profile> {
             continue;
         }
         let mut files = Vec::new();
-        read_skill_dir(&dir.join("skills").join(&name), "", &mut files)?;
+        read_skill_dir(&dir.join("skills").join(&name), "", &mut files, budget)?;
         if !files.iter().any(|f| f.path == "SKILL.md") {
             issues.push(format!("skills/{name}: missing SKILL.md"));
             continue;
@@ -454,6 +496,18 @@ pub fn save(p: &Profile, dir: &Path, force: bool) -> Result<Vec<PathBuf>> {
                 max_file_size()
             ),
             oversize,
+        )
+        .into());
+    }
+    let total: u64 = new_files.values().map(|c| c.len() as u64).sum();
+    if total > MAX_PROFILE_BYTES {
+        return Err(ProfileError::new(
+            format!(
+                "refusing to write a profile that couldn't be loaded: it would hold {} MiB, more than the {} a profile may hold in total",
+                total.div_ceil(1024 * 1024),
+                max_size(MAX_PROFILE_BYTES)
+            ),
+            vec![],
         )
         .into());
     }
@@ -641,6 +695,24 @@ pub fn required_env(p: &Profile) -> BTreeMap<String, Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn total_profile_size_is_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(MANIFEST), "kitbag = 1\nname = \"me\"\n").unwrap();
+        fs::create_dir_all(dir.path().join("skills/big")).unwrap();
+        fs::write(dir.path().join("skills/big/SKILL.md"), "Big.\n").unwrap();
+        for i in 0..4 {
+            fs::write(dir.path().join(format!("skills/big/{i}.bin")), [b'x'; 1000]).unwrap();
+        }
+        assert!(load_with_limit(dir.path(), 10_000).is_ok());
+        let err = load_with_limit(dir.path(), 3_000).unwrap_err().to_string();
+        assert!(
+            err.contains("in total, the most a profile may hold"),
+            "{err}"
+        );
+        assert!(MAX_PROFILE_BYTES >= 16 * MAX_FILE_BYTES);
+    }
 
     fn sample() -> Profile {
         let mut p = Profile::new("demo");

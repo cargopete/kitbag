@@ -21,6 +21,7 @@ All notable changes to this project are documented here. The format follows
 - Edits to JSON and TOML configs and to managed blocks in instruction files keep a file's Windows (`\r\n`) line endings. They used to write the lines they added with `\n`. A file is taken to use `\r\n` when most of its line breaks are `\r\n`; its other lines are then written with `\r\n` too (#38).
 - Rules, commands, skills and skill files named after a Windows device (`CON`, `nul.md`, `COM1`, `aux.sh` ...), or whose names differ only in case (`Build.md` and `build.md`), are refused when a profile is loaded or captured, on every OS, naming each one: profiles move between machines, and such files can't be created on Windows or are one file on Windows and macOS (#38).
 - Backups of files with very long names no longer fail to be written: the file name part of a backup's name is cut to 100 bytes, and the number in front keeps it unique (#38).
+- Loading a profile reads at most 64 MiB in all, besides the 2 MiB limit per file; a larger profile is refused with an error naming its directory, and capture refuses to write one (#38).
 
 ### Security
 
