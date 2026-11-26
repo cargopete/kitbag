@@ -334,6 +334,7 @@ dependencies = [
  "jsonc-parser",
  "predicates",
  "regex",
+ "rustix",
  "serde",
  "serde_json",
  "serde_norway",

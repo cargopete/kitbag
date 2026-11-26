@@ -307,6 +307,67 @@ fn a_failing_server_is_reported_and_the_others_still_count() {
     );
 }
 
+/// A wrapper such as `sh -c` that times out: what it started is stopped too.
+#[cfg(unix)]
+#[test]
+fn a_timed_out_wrappers_children_are_stopped_too() {
+    let sb = Sandbox::empty();
+    let pid_file = sb.path("grandchild.pid");
+    let mut wrapper = toml::Table::new();
+    wrapper.insert("command".into(), "sh".into());
+    wrapper.insert(
+        "args".into(),
+        toml::Value::Array(vec![
+            "-c".into(),
+            format!(
+                "sleep 4242 </dev/null & echo $! > '{}'; wait",
+                pid_file.display()
+            )
+            .into(),
+        ]),
+    );
+    let dir = profile(&sb, vec![("wrapper", wrapper)]);
+    let (code, out) = doctor(
+        &sb,
+        &[
+            dir.to_str().unwrap(),
+            "--to",
+            "claude",
+            "--mcp-tokens",
+            "--mcp-timeout",
+            "1",
+        ],
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        row(&out, "Claude Code", "wrapper").contains("failed timed out after 1s"),
+        "{out}"
+    );
+    let pid = fs::read_to_string(&pid_file).unwrap().trim().to_string();
+    assert!(!pid.is_empty());
+    let alive = || {
+        std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    };
+    // Killed at once; give init a moment to reap it.
+    let gone = (0..50).any(|_| {
+        if alive() {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            false
+        } else {
+            true
+        }
+    });
+    if !gone {
+        let _ = std::process::Command::new("kill").arg(&pid).status();
+        panic!("the server's child {pid} outlived the timeout");
+    }
+}
+
 #[test]
 fn a_server_disabled_for_a_tool_is_not_counted_against_it() {
     let sb = Sandbox::empty();

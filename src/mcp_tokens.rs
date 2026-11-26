@@ -2,7 +2,10 @@
 //!
 //! Used by `kitbag doctor --mcp-tokens`. A local (stdio) server is started only
 //! long enough to answer `initialize` and `tools/list`, with a deadline, and is
-//! then killed. Its stderr is discarded and its stdout is only parsed for those
+//! then killed. On Unix it runs in a process group of its own and the whole
+//! group is killed, so a wrapper (`sh -c`, `npx`, `uvx`) can't leave the real
+//! server running; on Windows only the process kitbag started is stopped.
+//! Its stderr is discarded and its stdout is only parsed for those
 //! answers: nothing a server prints, and none of its tools' text, is shown,
 //! logged or stored. Remote servers are never contacted here.
 //!
@@ -11,8 +14,9 @@
 //! exact count; real numbers differ by model and by how a tool wraps them.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -78,17 +82,59 @@ struct Running(Child);
 impl Drop for Running {
     fn drop(&mut self) {
         drop(self.0.stdin.take());
+        // The group's id is the server's pid, which stays taken until the
+        // server is reaped below, so this can't hit an unrelated group.
+        #[cfg(unix)]
+        if let Some(pid) = i32::try_from(self.0.id())
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+        {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
 }
 
-/// Start `launch`, ask it for its tools and stop it, within `timeout` in all.
-/// The error says what went wrong in kitbag's words; it never carries text
-/// from the server.
-pub fn list_tools(launch: &Launch, timeout: Duration) -> Result<Vec<Value>, String> {
-    let deadline = Instant::now() + timeout;
-    let mut cmd = Command::new(&launch.command);
+/// Windows: a bare `command` such as `npx` that isn't an `.exe` (`npx.cmd`),
+/// found in `path` with one of the `pathext` extensions. Rust only looks for
+/// `.exe` itself. `None` when `command` has an extension or a directory part,
+/// or isn't found.
+fn find_with_pathext(command: &str, path: &OsStr, pathext: &str) -> Option<PathBuf> {
+    let p = Path::new(command);
+    if p.extension().is_some() || p.components().count() != 1 || command.contains(['/', '\\']) {
+        return None;
+    }
+    std::env::split_paths(path).find_map(|dir| {
+        pathext
+            .split(';')
+            .map(str::trim)
+            .filter(|e| e.starts_with('.') && e.len() > 1)
+            .map(|ext| dir.join(format!("{command}{ext}")))
+            .find(|c| c.is_file())
+    })
+}
+
+/// Windows: the `.cmd`/`.bat` (or other PATHEXT) file a bare command such as
+/// `npx` names, for when starting it as given found nothing.
+fn pathext_fallback(launch: &Launch) -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    // A PATH set for the server is the one searched, as for the first try.
+    let path = launch
+        .env
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("PATH"))
+        .map(|(_, v)| std::ffi::OsString::from(v))
+        .or_else(|| std::env::var_os("PATH"))?;
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    find_with_pathext(&launch.command, &path, &pathext)
+}
+
+/// How to start `launch` with `program` as the executable.
+fn command(launch: &Launch, program: &OsStr) -> Command {
+    let mut cmd = Command::new(program);
     cmd.args(&launch.args)
         .envs(&launch.env)
         .stdin(Stdio::piped())
@@ -97,10 +143,25 @@ pub fn list_tools(launch: &Launch, timeout: Duration) -> Result<Vec<Value>, Stri
     if let Some(cwd) = &launch.cwd {
         cmd.current_dir(cwd);
     }
-    let mut child = Running(
-        cmd.spawn()
-            .map_err(|e| format!("could not start it: {e}"))?,
-    );
+    // Its own process group, so Running can stop everything it starts.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    cmd
+}
+
+/// Start `launch`, ask it for its tools and stop it, within `timeout` in all.
+/// The error says what went wrong in kitbag's words; it never carries text
+/// from the server.
+pub fn list_tools(launch: &Launch, timeout: Duration) -> Result<Vec<Value>, String> {
+    let deadline = Instant::now() + timeout;
+    let spawned = match command(launch, OsStr::new(&launch.command)).spawn() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => match pathext_fallback(launch) {
+            Some(found) => command(launch, found.as_os_str()).spawn(),
+            None => Err(e),
+        },
+        other => other,
+    };
+    let mut child = Running(spawned.map_err(|e| format!("could not start it: {e}"))?);
     let stdout = child.0.stdout.take().ok_or("no stdout")?;
     let mut stdin = child.0.stdin.take().ok_or("no stdin")?;
     let lines = read_lines(stdout);
@@ -305,6 +366,30 @@ mod tests {
         assert_eq!(thousands(999), "999");
         assert_eq!(thousands(1000), "1,000");
         assert_eq!(thousands(1234567), "1,234,567");
+    }
+
+    #[test]
+    fn pathext_finds_a_cmd_for_a_bare_command() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::write(b.path().join("npx.cmd"), "").unwrap();
+        std::fs::write(b.path().join("tool.bat"), "").unwrap();
+        let path = std::env::join_paths([a.path(), b.path()]).unwrap();
+        let exts = ".COM;.EXE;.BAT;.CMD";
+        assert_eq!(
+            find_with_pathext("npx", &path, exts),
+            Some(b.path().join("npx.cmd"))
+        );
+        assert_eq!(
+            find_with_pathext("tool", &path, exts),
+            Some(b.path().join("tool.bat"))
+        );
+        // Not found, an extension given, or a directory part: left alone.
+        assert_eq!(find_with_pathext("uvx", &path, exts), None);
+        assert_eq!(find_with_pathext("npx.exe", &path, exts), None);
+        assert_eq!(find_with_pathext("bin/npx", &path, exts), None);
+        assert_eq!(find_with_pathext("bin\\npx", &path, exts), None);
+        assert_eq!(find_with_pathext("npx", &path, ".EXE"), None);
     }
 
     #[test]
