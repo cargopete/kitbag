@@ -3,9 +3,11 @@
 //!
 //! * MCP: Copilot's native files use a top-level `mcpServers` object:
 //!   `$COPILOT_HOME/mcp-config.json` (default `~/.copilot/mcp-config.json`) for
-//!   the user, and `.mcp.json` at the workspace root for a project. Both Copilot
-//!   CLI and VS Code's Copilot harness read them. Local servers take `type`
-//!   (`stdio`, or `local` in older files), `command`, `args`, `env` and `cwd`;
+//!   the user, and `.mcp.json` at the workspace root for a project. Copilot CLI
+//!   reads both; VS Code reads the user file and, with the experimental
+//!   `chat.mcp.workspaceRootConfig.enabled` setting, the workspace `.mcp.json`.
+//!   Local servers take `type` (`stdio`; Copilot CLI's examples use `local`),
+//!   `command`, `args`, `env` and `cwd`;
 //!   remote servers `type` (`http` or `sse`), `url` and `headers`; `tools`
 //!   selects tools (`["*"]` for all). References are written as `${VAR}` and
 //!   `${VAR:-default}`, which Copilot expands itself, so no secret reaches disk.
@@ -13,9 +15,10 @@
 //!   it with Claude Code's server shape (no `tools`, no `cwd`), and neither
 //!   target removes a server there that the other still gets.
 //!   Capture also reads `.github/mcp.json` (Copilot CLI), the bare top-level
-//!   format Copilot CLI accepts in project files, and VS Code's older
-//!   editor-managed `.vscode/mcp.json` (`servers`, `${env:VAR}`); servers in
-//!   `disabledMcpServers` (`settings.json`) are captured as disabled.
+//!   format Copilot CLI accepts in project files, and VS Code's deprecated
+//!   editor-managed `.vscode/mcp.json` (`servers`, `${env:VAR}`), which Copilot
+//!   CLI doesn't read; servers in `disabledMcpServers` (`~/.copilot/settings.json`
+//!   or `.github/copilot/settings.json`) are captured as disabled.
 //! * Instructions: `$COPILOT_HOME/copilot-instructions.md` and
 //!   `.github/copilot-instructions.md`, in a managed block.
 //! * Rules: `*.instructions.md` files with `applyTo` globs, in
@@ -338,7 +341,9 @@ impl Adapter for Copilot {
                     for (name, def) in
                         server_entries(&mut cap, ID, &p.mcp, "mcpServers", doc.get("mcpServers"))
                     {
-                        // Copilot CLI expands a bare `$VAR` too.
+                        // The docs only promise `${VAR}` here (VS Code keeps a
+                        // bare `$VAR` as text), but a bare `$VAR` is still taken
+                        // as a reference so its value is never captured.
                         import(&mut cap, name, def, &p.mcp, true);
                     }
                 }
