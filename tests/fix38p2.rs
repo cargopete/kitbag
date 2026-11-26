@@ -5,7 +5,6 @@ mod common;
 use std::fs;
 
 use common::*;
-use predicates::prelude::*;
 use predicates::str::contains;
 
 const SERVER_PROFILE: &str = "kitbag = 1\nname = \"me\"\n\n[mcp_servers.docs]\ncommand = \"npx\"\nargs = [\"-y\", \"docs-mcp\"]\n";
@@ -165,4 +164,39 @@ fn capture_refuses_a_reserved_command_name() {
         .failure()
         .stderr(contains("commands/nul: reserved device name on Windows"));
     assert!(!sb.path("prof/kitbag.toml").exists());
+}
+
+#[test]
+fn home_without_state_dir_keeps_state_under_that_home() {
+    let sb = Sandbox::empty();
+    fs::create_dir_all(sb.path("p")).unwrap();
+    fs::write(sb.path("p/kitbag.toml"), "kitbag = 1\nname = \"me\"\n").unwrap();
+    fs::write(sb.path("p/instructions.md"), "Be brief.\n").unwrap();
+    let elsewhere = sb.path("elsewhere");
+    let cli = || {
+        let mut c = sb.cli();
+        c.env_remove("KITBAG_STATE_DIR")
+            .env("XDG_STATE_HOME", &elsewhere)
+            .env("LOCALAPPDATA", &elsewhere);
+        c
+    };
+    cli()
+        .args(["apply", "p", "--to", "claude-code", "--yes"])
+        .assert()
+        .success();
+    assert!(sb.home().join(".local/state/kitbag/backups").is_dir());
+    assert!(!elsewhere.exists() && !sb.state().exists());
+    cli()
+        .arg("history")
+        .assert()
+        .success()
+        .stdout(contains("claude-code"));
+    cli().arg("undo").assert().success();
+    assert!(!sb.home().join(".claude/CLAUDE.md").exists());
+    // KITBAG_STATE_DIR still wins over --home.
+    sb.cli()
+        .args(["apply", "p", "--to", "claude-code", "--yes"])
+        .assert()
+        .success();
+    assert!(sb.state().join("backups").is_dir());
 }

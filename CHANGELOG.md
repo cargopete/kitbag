@@ -22,6 +22,7 @@ All notable changes to this project are documented here. The format follows
 - Rules, commands, skills and skill files named after a Windows device (`CON`, `nul.md`, `COM1`, `aux.sh` ...), or whose names differ only in case (`Build.md` and `build.md`), are refused when a profile is loaded or captured, on every OS, naming each one: profiles move between machines, and such files can't be created on Windows or are one file on Windows and macOS (#38).
 - Backups of files with very long names no longer fail to be written: the file name part of a backup's name is cut to 100 bytes, and the number in front keeps it unique (#38).
 - Loading a profile reads at most 64 MiB in all, besides the 2 MiB limit per file; a larger profile is refused with an error naming its directory, and capture refuses to write one (#38).
+- The README and `--help` now say where state goes with `--home DIR`: `KITBAG_STATE_DIR` if set, else `DIR/.local/state/kitbag`, never `XDG_STATE_HOME` or `LOCALAPPDATA`. A test covers it (#38).
 
 ### Security
 

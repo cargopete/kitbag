@@ -353,7 +353,8 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
 - **Profile directories.** `init --force` and `capture --force` replace a symbolic link inside
   the profile directory (a file or a sub-directory) with a regular file or directory; they
   never write through it.
-- **State directory:** `$KITBAG_STATE_DIR`, else `$XDG_STATE_HOME/kitbag`, else
+- **State directory:** `$KITBAG_STATE_DIR` if set; else, with `--home DIR` (or
+  `KITBAG_HOME`), `DIR/.local/state/kitbag`; else `$XDG_STATE_HOME/kitbag`, else
   `~/.local/state/kitbag` (`%LOCALAPPDATA%\kitbag` on Windows).
 
 Apply is additive: removing a server from the profile does not remove it from tools you
@@ -470,7 +471,9 @@ Common options:
   `--allow-risky-settings` (`--trust-source`) apply to `apply` and `diff`.
 - `--path SUBDIR` selects a profile inside a repository.
 - `--home DIR` (or `KITBAG_HOME`) treats `DIR` as the home directory for sandboxes and tests.
-  It also ignores `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME` and `APPDATA`.
+  It also ignores `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME` and `APPDATA`, and
+  keeps backups and history in `DIR/.local/state/kitbag` (not `XDG_STATE_HOME` or
+  `LOCALAPPDATA`) unless `KITBAG_STATE_DIR` is set, which always wins.
 
 **Sources** are a local directory or a git URL:
 
