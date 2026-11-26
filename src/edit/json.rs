@@ -27,6 +27,18 @@ fn duplicate_key(obj: &CstObject) -> Option<String> {
         .find(|name| !seen.insert(name.clone()))
 }
 
+/// How many properties of `obj` are named `key`.
+fn key_count(obj: &CstObject, key: &str) -> usize {
+    obj.properties()
+        .iter()
+        .filter(|p| {
+            p.name()
+                .and_then(|n| n.decoded_value().ok())
+                .is_some_and(|n| n == key)
+        })
+        .count()
+}
+
 /// The first duplicate key in `node` or anything nested in it, with the keys
 /// leading to the object that holds it.
 fn duplicate_key_deep(node: &CstNode, at: &mut Vec<String>) -> Option<String> {
@@ -97,11 +109,13 @@ impl JsonDoc {
         })
     }
 
-    /// Refuse to edit at `path` when a key appears twice in the same object,
-    /// in any object along `path` or anywhere inside the value at `path`.
-    /// Edits would change the first copy while tools read the last one, so
-    /// kitbag does not guess which one was meant.
-    pub fn check_unique_keys(&self, path: &[&str]) -> Result<()> {
+    /// Refuse to edit `keys` of the object at `path` when a key kitbag
+    /// would edit appears twice in its object: one of the keys along `path`,
+    /// one of `keys`, or any key nested inside the values of `keys`. Edits
+    /// would change one copy while tools read the last one, so kitbag does
+    /// not guess which one was meant. Duplicates elsewhere in the file are
+    /// left alone.
+    pub fn check_unique_keys(&self, path: &[&str], keys: &[&str]) -> Result<()> {
         let fail = |at: &[String], key: &str| {
             let place = if at.is_empty() {
                 "at the top level".to_string()
@@ -109,9 +123,9 @@ impl JsonDoc {
                 format!("in '{}'", at.join("."))
             };
             anyhow!(
-                "{}: key '{key}' appears more than once {place}. Tools read the last one and \
-                 kitbag would edit the first, so it changed nothing; remove the duplicate and \
-                 run kitbag again",
+                "{}: key '{key}' appears more than once {place}, where kitbag edits. Tools \
+                 read the last copy and kitbag won't guess which one to change, so it changed \
+                 nothing; remove the duplicate and run kitbag again",
                 self.path.display()
             )
         };
@@ -123,8 +137,8 @@ impl JsonDoc {
             let Some(obj) = node.as_object() else {
                 return Ok(());
             };
-            if let Some(dup) = duplicate_key(&obj) {
-                return Err(fail(&at, &dup));
+            if key_count(&obj, key) > 1 {
+                return Err(fail(&at, key));
             }
             let Some(next) = obj.get(key).and_then(|p| p.value()) else {
                 return Ok(());
@@ -132,10 +146,23 @@ impl JsonDoc {
             at.push((*key).to_string());
             node = next;
         }
-        match duplicate_key_deep(&node, &mut at) {
-            Some(dup) => Err(fail(&at, &dup)),
-            None => Ok(()),
+        let Some(obj) = node.as_object() else {
+            return Ok(());
+        };
+        for key in keys {
+            if key_count(&obj, key) > 1 {
+                return Err(fail(&at, key));
+            }
+            let Some(value) = obj.get(key).and_then(|p| p.value()) else {
+                continue;
+            };
+            at.push((*key).to_string());
+            if let Some(dup) = duplicate_key_deep(&value, &mut at) {
+                return Err(fail(&at, &dup));
+            }
+            at.pop();
         }
+        Ok(())
     }
 
     /// The whole document as a plain value.
@@ -250,35 +277,53 @@ mod tests {
 
     #[test]
     fn duplicate_keys_are_refused_where_kitbag_edits() {
+        let check = |text: &str, path: &[&str], keys: &[&str]| {
+            let d = JsonDoc::parse(Some(text), Path::new(P)).unwrap();
+            d.check_unique_keys(path, keys).map_err(|e| e.to_string())
+        };
+        // The key on the way to the servers.
         let text = "{\"mcpServers\": {\"a\": {}}, \"x\": 1, \"mcpServers\": {\"b\": {}}}";
-        let d = JsonDoc::parse(Some(text), Path::new(P)).unwrap();
-        let err = d
-            .check_unique_keys(&["mcpServers"])
-            .unwrap_err()
-            .to_string();
+        let err = check(text, &["mcpServers"], &["a"]).unwrap_err();
         assert!(
             err.contains("test.json") && err.contains("'mcpServers'"),
             "{err}"
         );
         assert!(err.contains("at the top level"), "{err}");
 
+        // A server kitbag writes, named twice.
+        let text = "{\"mcpServers\": {\"a\": {}, \"a\": {\"command\": \"y\"}}}";
+        let err = check(text, &["mcpServers"], &["a"]).unwrap_err();
+        assert!(
+            err.contains("'a'") && err.contains("in 'mcpServers'"),
+            "{err}"
+        );
+
+        // A key inside a server kitbag writes.
         let text = "{\"mcpServers\": {\"a\": {\"command\": \"x\", \"command\": \"y\"}}}";
-        let d = JsonDoc::parse(Some(text), Path::new(P)).unwrap();
-        let err = d
-            .check_unique_keys(&["mcpServers"])
-            .unwrap_err()
-            .to_string();
+        let err = check(text, &["mcpServers"], &["a"]).unwrap_err();
         assert!(
             err.contains("'command'") && err.contains("in 'mcpServers.a'"),
             "{err}"
         );
+        // A setting kitbag writes, and a key inside it.
+        let text = "{\"model\": \"a\", \"model\": \"b\"}";
+        assert!(check(text, &[], &["model"]).is_err());
+        let text = "{\"permissions\": {\"allow\": [], \"allow\": []}}";
+        let err = check(text, &[], &["permissions"]).unwrap_err();
+        assert!(err.contains("in 'permissions'"), "{err}");
 
-        // Duplicates elsewhere in the file are not kitbag's business.
-        let text = "{\"other\": {\"k\": 1, \"k\": 2}, \"mcpServers\": {\"a\": {}}}";
-        let d = JsonDoc::parse(Some(text), Path::new(P)).unwrap();
-        d.check_unique_keys(&["mcpServers"]).unwrap();
-        d.check_unique_keys(&["missing", "deeper"]).unwrap();
-        assert!(d.check_unique_keys(&["other"]).is_err());
+        // Duplicates kitbag doesn't edit are left alone: elsewhere in the
+        // file, at the top level, inside the servers object next to the
+        // path, or inside a server kitbag doesn't write.
+        let text = "{\"other\": {\"k\": 1, \"k\": 2}, \"theme\": 1, \"theme\": 2, \
+                    \"mcpServers\": {\"a\": {}, \"b\": 1, \"b\": 2, \
+                    \"c\": {\"command\": \"x\", \"command\": \"y\"}}}";
+        check(text, &["mcpServers"], &["a", "new"]).unwrap();
+        check(text, &["missing", "deeper"], &["a"]).unwrap();
+        check(text, &[], &["model"]).unwrap();
+        assert!(check(text, &[], &["other"]).is_err());
+        assert!(check(text, &[], &["theme"]).is_err());
+        assert!(check(text, &["mcpServers"], &["c"]).is_err());
     }
 
     #[test]

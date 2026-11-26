@@ -45,6 +45,50 @@ fn duplicate_json_keys_are_refused_naming_file_and_key() {
             "key 'command' appears more than once in 'mcpServers.docs'",
         ));
     assert_eq!(sb.read("home/.claude.json"), config);
+
+    // Antigravity's config goes through the same check.
+    let ag = sb.home().join(".gemini/config/mcp_config.json");
+    fs::create_dir_all(ag.parent().unwrap()).unwrap();
+    let config = "{\"mcpServers\": {\"docs\": {}, \"docs\": {\"command\": \"b\"}}}\n";
+    fs::write(&ag, config).unwrap();
+    sb.cli()
+        .args(["apply", "p", "--to", "antigravity", "--yes"])
+        .assert()
+        .failure()
+        .stderr(contains("mcp_config.json"))
+        .stderr(contains(
+            "key 'docs' appears more than once in 'mcpServers'",
+        ));
+    assert_eq!(fs::read_to_string(&ag).unwrap(), config);
+}
+
+#[test]
+fn duplicate_json_keys_kitbag_does_not_edit_are_left_alone() {
+    let sb = Sandbox::empty();
+    server_profile(&sb);
+    // A top-level key kitbag doesn't write, and a key inside a server it
+    // doesn't touch.
+    let config = "{\n  \"theme\": \"dark\",\n  \"theme\": \"light\",\n  \"mcpServers\": {\n    \"other\": {\"command\": \"a\", \"command\": \"b\"}\n  }\n}\n";
+    fs::write(sb.home().join(".claude.json"), config).unwrap();
+    sb.cli()
+        .args(["diff", "p", "--to", "claude-code"])
+        .assert()
+        .success()
+        .stdout(contains("docs-mcp"));
+    sb.cli()
+        .args(["apply", "p", "--to", "claude-code", "--yes"])
+        .assert()
+        .success();
+    let text = sb.read("home/.claude.json");
+    assert!(text.contains("docs-mcp"), "{text}");
+    assert!(
+        text.contains("\"theme\": \"dark\",\n  \"theme\": \"light\""),
+        "{text}"
+    );
+    assert!(
+        text.contains("{\"command\": \"a\", \"command\": \"b\"}"),
+        "{text}"
+    );
 }
 
 fn no_bare_lf(text: &str) -> bool {
