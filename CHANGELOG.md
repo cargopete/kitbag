@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `kitbag undo` after an `apply` or `sync` that had nothing to write no longer leaves `status` saying `tool edited` where it should say `profile changed`. The no-op recorded every item again without a transaction, so undoing the earlier apply that wrote them couldn't set those records aside. Now an item whose last record already matches isn't recorded again, and any other is tied to the transaction of the record it replaces, so undo sets it aside too. A repeated `sync` that holds back an edited item, which records the tool's other items, hit this too (#63).
+
 ## [0.1.4] - 2026-11-26
 
 ### Added
