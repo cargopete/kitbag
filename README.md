@@ -8,8 +8,9 @@
 kitbag captures your MCP servers, instructions, rules, slash commands, skills and settings
 from the AI coding tools you already use. It stores them as a small, git-friendly **profile** with secrets
 redacted and applies that profile to any other tool in one step. Claude Code, Cursor,
-OpenAI Codex CLI, Gemini CLI, Claude Desktop, Google Antigravity and opencode (the last two
-for MCP servers and instructions) are supported, at user and project scope.
+OpenAI Codex CLI, Gemini CLI, Claude Desktop, Google Antigravity, opencode (the last two
+for MCP servers and instructions) and GitHub Copilot (MCP servers, instructions and rules) are
+supported, at user and project scope.
 
 > [!IMPORTANT]
 > **Status: early release (v0.1).** kitbag works today and is tested against real setups,
@@ -86,6 +87,7 @@ Starting from scratch? `kitbag init my-profile` writes a commented starter profi
 | `claude-desktop` | Claude Desktop    | user          | ✓ (local servers) | -  | -          | -            | -      | -        |
 | `antigravity`    | Google Antigravity | user, project | ✓  | ✓            | -          | -            | -      | -        |
 | `opencode`       | opencode          | user, project | ✓   | ✓            | -          | -            | -      | -        |
+| `copilot`        | GitHub Copilot (CLI, VS Code) | user, project | ✓ | ✓    | ✓          | -            | -      | -        |
 
 `claude` is accepted as an alias for `claude-code` wherever a target id is given (`--to`,
 `--from`, `targets`, `disabled_on`, and `[settings.claude]`, read as `[settings.claude-code]`;
@@ -107,6 +109,7 @@ Where things go:
 | Claude Desktop | `claude_desktop_config.json` in `~/Library/Application Support/Claude` (macOS), `%APPDATA%\Claude` (Windows), `~/.config/Claude` (Linux) | n/a |
 | Antigravity | `~/.gemini/config/mcp_config.json`, `~/.gemini/GEMINI.md` (the same file and managed block as Gemini CLI); capture also reads `~/.gemini/AGENTS.md` and `~/.gemini/config/{AGENTS,GEMINI}.md` | `.agents/mcp_config.json`, `AGENTS.md` (shared with Codex and Cursor); capture also reads `GEMINI.md` and `.agents/{AGENTS,GEMINI}.md` |
 | opencode | `~/.config/opencode/opencode.json` or `opencode.jsonc` (`mcp.servers`), `~/.config/opencode/AGENTS.md`; honours `XDG_CONFIG_HOME` | `opencode.json(c)` or `.opencode/opencode.json(c)` (the first that exists, else `opencode.json`), `AGENTS.md` (shared with Codex, Cursor and Antigravity); capture reads every config file there is |
+| GitHub Copilot | `$COPILOT_HOME/mcp-config.json` (`mcpServers`, default `~/.copilot`), `$COPILOT_HOME/copilot-instructions.md`, `$COPILOT_HOME/instructions/*.instructions.md` | `.mcp.json` (shared with Claude Code, written in Claude Code's shape), `.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` (`applyTo`); capture also reads `.github/mcp.json` and `.vscode/mcp.json` (`servers`), and `disabledMcpServers` from Copilot's `settings.json` |
 
 How each tool receives `${VAR}` references:
 
@@ -119,6 +122,7 @@ How each tool receives `${VAR}` references:
 | Claude Desktop | resolved value (no interpolation support) | yes, unless `--secrets never` |
 | Antigravity | resolved value (its docs describe no interpolation); remote servers get `serverUrl`, SSE servers are skipped | yes, unless `--secrets never` |
 | opencode | `{env:VAR}` (expanded by opencode; defaults resolved at apply time); SSE servers are skipped | no |
+| GitHub Copilot | `${VAR}` / `${VAR:-default}` (expanded by Copilot); capture also reads `${env:VAR}` from `.vscode/mcp.json` | no |
 
 ## The profile format
 
@@ -177,7 +181,7 @@ releases will refuse newer profiles instead of misreading them.
 don't need it. `targets` lists the only tools a server is applied to; `disabled_on` lists the
 tools it is kept out of. Use one or the other, not both, and give `targets` at least one tool.
 Target names are those of `kitbag list-targets` (`claude-code`, `cursor`, `codex`,
-`gemini-cli`, `claude-desktop`, `antigravity`, `opencode`). An unknown name (a typo, or a tool from a newer
+`gemini-cli`, `claude-desktop`, `antigravity`, `opencode`, `copilot`). An unknown name (a typo, or a tool from a newer
 kitbag) is a warning that lists the valid ones, and the name is ignored: it matches no tool.
 `only` and `except` still load as older names for the same fields (an empty `only` still means
 no restriction, with a warning); set each field under one name, not both. Capture writes the new
@@ -653,7 +657,7 @@ pub trait Adapter: Sync {
 5. **Test** it: add realistic configs under `tests/fixtures/{home,project}`, add capture and apply
    cases in `tests/adapters.rs`, and include it in the round-trip and idempotency tests.
 
-Good next candidates: Windsurf, Zed, VS Code / GitHub Copilot.
+Good next candidates: Windsurf, Zed.
 
 ## Format notes and known limitations
 
@@ -682,6 +686,19 @@ Good next candidates: Windsurf, Zed, VS Code / GitHub Copilot.
   plan notes when the `AGENTS.md` kitbag creates takes its place. Files listed under
   `instructions`, `{file:...}` references and opencode's agents, commands, skills and plugins
   are not carried yet, and its tool permissions are left alone.
+- **GitHub Copilot** and Claude Code both read a project's `.mcp.json`. kitbag writes it in
+  Claude Code's shape for both (no `cwd`, no `tools`; a `cwd` is dropped with a warning), so
+  applying both writes each server once, and a server the profile keeps off one of them stays
+  in the file while the other still gets it. Copilot CLI reads `.mcp.json` as is. VS Code reads
+  an existing workspace `.mcp.json`; the experimental `chat.mcp.workspaceRootConfig.enabled`
+  setting only controls whether its Add Server flow offers that file. VS Code's
+  older `.vscode/mcp.json` is deprecated and Copilot CLI doesn't read it, so kitbag only reads it
+  at capture. In the user file (`~/.copilot/mcp-config.json`)
+  servers get `tools: ["*"]` unless the entry already lists its own tools, which are kept.
+  Rules become `*.instructions.md` files: an always-on rule gets `applyTo: "**"`, an on-demand
+  rule no `applyTo`. A server using VS Code's `${input:...}` or `${command:...}` variables in
+  `.vscode/mcp.json` is skipped at capture. Prompt files, custom agents, chat modes and skills
+  are listed by capture but not carried yet, and Copilot's own MCP trust prompts are left alone.
 - Apply is additive and doesn't delete entries that were removed from the profile (see above).
 - **Not carried yet:** Claude Code subagents (`agents/`), output styles (`output-styles/`),
   plugins and hooks. Capture lists what it found of these and leaves them out. It also drops

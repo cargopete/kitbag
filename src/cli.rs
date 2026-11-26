@@ -45,8 +45,8 @@ Examples:
 #[command(name = "kitbag", version, about = ABOUT, after_help = AFTER_HELP, propagate_version = true)]
 pub struct Cli {
     /// Treat DIR as the home directory, and ignore CODEX_HOME / CLAUDE_CONFIG_DIR /
-    /// XDG_CONFIG_HOME / APPDATA (for sandboxes and testing). State goes under DIR
-    /// too unless KITBAG_STATE_DIR is set
+    /// COPILOT_HOME / XDG_CONFIG_HOME / APPDATA (for sandboxes and testing). State
+    /// goes under DIR too unless KITBAG_STATE_DIR is set
     #[arg(long, global = true, value_name = "DIR", env = "KITBAG_HOME")]
     home: Option<PathBuf>,
 
@@ -71,7 +71,7 @@ enum Cmd {
     /// Capture your current setup into a profile (secrets are redacted)
     Capture {
         /// Targets to read: ids (comma-separated: claude-code (alias: claude), cursor,
-        /// codex, gemini-cli, claude-desktop, antigravity, opencode), 'all' or 'detected'
+        /// codex, gemini-cli, claude-desktop, antigravity, opencode, copilot), 'all' or 'detected'
         #[arg(long, value_name = "IDS", default_value = "detected")]
         from: String,
         #[command(flatten)]
@@ -192,7 +192,7 @@ struct Place {
 #[derive(Args, Debug, Clone)]
 struct TargetArgs {
     /// Targets to write: ids (comma-separated: claude-code (alias: claude), cursor,
-    /// codex, gemini-cli, claude-desktop, antigravity, opencode), 'all' or 'detected'
+    /// codex, gemini-cli, claude-desktop, antigravity, opencode, copilot), 'all' or 'detected'
     #[arg(long, value_name = "IDS", default_value = "detected")]
     to: String,
     #[command(flatten)]
@@ -209,7 +209,7 @@ struct TargetArgs {
 #[derive(Args, Debug, Clone)]
 struct StatusArgs {
     /// Targets to compare: ids (comma-separated: claude-code (alias: claude),
-    /// cursor, codex, gemini-cli, claude-desktop, antigravity, opencode), 'all' or
+    /// cursor, codex, gemini-cli, claude-desktop, antigravity, opencode, copilot), 'all' or
     /// 'detected'
     /// [default: detected; without PROFILE, every target applied to]
     #[arg(long, value_name = "IDS")]
@@ -236,7 +236,7 @@ struct SyncArgs {
     /// Pull this target's edits to the managed instructions and rules back into
     /// the profile (redacted, like capture), then apply them to the others;
     /// ID is a target id (claude-code (alias: claude), cursor, codex, gemini-cli,
-    /// claude-desktop, antigravity, opencode)
+    /// claude-desktop, antigravity, opencode, copilot)
     #[arg(long, value_name = "ID")]
     from: Option<String>,
     /// Replace instructions edited in the tool with the profile's (backed up)

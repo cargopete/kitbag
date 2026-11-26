@@ -524,7 +524,7 @@ fn server_identity(def: &Map<String, Value>) -> (Option<&Value>, Option<&Value>)
 /// references in args (`${A}`, `${env:A}`, `$A`) don't count: `--key=${A}`
 /// matches `--key=${B}`, and an arg that is only a reference matches anything
 /// (it may have been resolved).
-fn same_server(a: &Map<String, Value>, b: &Map<String, Value>) -> bool {
+pub(crate) fn same_server(a: &Map<String, Value>, b: &Map<String, Value>) -> bool {
     use std::sync::LazyLock;
     static REF: LazyLock<regex::Regex> = LazyLock::new(|| {
         regex::Regex::new(r"\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*").expect("valid regex")
@@ -898,6 +898,54 @@ pub fn remove_skipped_server(
     );
     record_server_write(work, target, path, name, None);
     true
+}
+
+/// For a config file that `target` shares with `sharer` (the project
+/// `.mcp.json`: Claude Code and Copilot): a server the profile keeps off
+/// `target` is not removed from the file while the profile still gives it to
+/// `sharer` and `sharer` uses the file, because it is in this plan or kitbag
+/// wrote the entry there for it before. Otherwise the two targets would undo
+/// each other. Call after [`servers_for`] and before [`merge_json_servers`].
+pub fn keep_shared_servers(
+    work: &mut Work,
+    profile: &Profile,
+    opts: &ApplyOptions,
+    target: &str,
+    sharer: &str,
+    sharer_name: &str,
+    path: &Path,
+) {
+    let real = work
+        .fs
+        .real_path(path)
+        .unwrap_or_else(|_| path.to_path_buf());
+    let in_plan = work.targets.iter().any(|t| t == sharer);
+    let keep: Vec<String> = skipped_servers(work, target)
+        .into_iter()
+        .filter(|name| {
+            let Some(s) = profile.mcp_servers.get(name) else {
+                return false;
+            };
+            let recorded = opts.applied_servers.iter().any(|r| {
+                r.target == sharer && r.path == real && &r.name == name && r.hash.is_some()
+            });
+            s.applies_to(sharer) && !s.disabled && (in_plan || recorded)
+        })
+        .collect();
+    if keep.is_empty() {
+        return;
+    }
+    let file = crate::ui::tildify(path, &work.home);
+    for name in &keep {
+        work.info(
+            target,
+            format!(
+                "MCP server '{name}' is kept off {target} in the profile, but {sharer_name} gets it from {file}, which {target} reads too, so it was left there"
+            ),
+        );
+    }
+    work.skipped_servers
+        .retain(|(t, n)| !(t == target && keep.contains(n)));
 }
 
 /// Servers from the profile that apply to `target`, noting disabled ones the tool can't represent.
