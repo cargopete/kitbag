@@ -608,6 +608,7 @@ pub fn merge_json_servers(
     }
     let text = work.fs.read(path)?;
     let mut doc = JsonDoc::parse(text.as_deref(), path)?;
+    doc.check_unique_keys(key_path)?;
     let existing = doc.object(key_path);
     let mut changed = false;
     for (name, def) in servers {
@@ -705,6 +706,9 @@ pub fn merge_json_settings(
     }
     let text = work.fs.read(path)?;
     let mut doc = JsonDoc::parse(text.as_deref(), path)?;
+    for k in settings.keys() {
+        doc.check_unique_keys(&[k])?;
+    }
     let current = doc.value();
     let mut changed = false;
     for (k, v) in settings {

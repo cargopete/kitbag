@@ -152,6 +152,16 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_keys_and_tables_are_parse_errors() {
+        for text in [
+            "[mcp_servers.a]\ncommand = \"x\"\n[mcp_servers.a]\ncommand = \"y\"\n",
+            "[mcp_servers.a]\ncommand = \"x\"\ncommand = \"y\"\n",
+        ] {
+            assert!(parse(Some(text), Path::new("c.toml")).is_err(), "{text}");
+        }
+    }
+
+    #[test]
     fn set_keeps_comments() {
         let mut doc = parse(Some("# head\nmodel = \"a\" # why\n"), Path::new("c.toml")).unwrap();
         set_keep_decor(doc.as_table_mut(), "model", "b".into());

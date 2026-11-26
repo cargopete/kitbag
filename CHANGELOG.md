@@ -17,6 +17,7 @@ All notable changes to this project are documented here. The format follows
 - `capture --force` into a profile with `.mdc` rules no longer fails looking for a `.md` file (#38).
 - `--no-overwrite` now also keeps existing managed instruction blocks and existing skill support files, and reports each one it kept. A profile that no longer has instructions still removes the old managed block (#38).
 - Capture matched secrets it redacted to MCP servers by location, so a server whose name contains a dot (`a.b`) also had its secrets counted under server `a`: they were listed twice and could raise a false "different secret values" warning. Each redaction now records its server (#53).
+- A JSON config with the same key twice in an object kitbag edits (two `mcpServers`, two servers with the same name, a server with two `command` keys) is refused with an error naming the file and the key. kitbag used to edit the first copy while the tools read the last, so `diff --exit-code` reported no change (#38).
 
 ### Security
 

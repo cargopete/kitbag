@@ -8,11 +8,50 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow, bail};
 use jsonc_parser::ParseOptions;
-use jsonc_parser::cst::{CstInputValue, CstObject, CstRootNode};
+use jsonc_parser::cst::{CstInputValue, CstNode, CstObject, CstRootNode};
 use serde_json::{Map, Value};
 
 pub struct JsonDoc {
     root: CstRootNode,
+    path: std::path::PathBuf,
+}
+
+/// The first property name that appears twice in `obj`, if any.
+fn duplicate_key(obj: &CstObject) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    obj.properties()
+        .iter()
+        .filter_map(|p| p.name()?.decoded_value().ok())
+        .find(|name| !seen.insert(name.clone()))
+}
+
+/// The first duplicate key in `node` or anything nested in it, with the keys
+/// leading to the object that holds it.
+fn duplicate_key_deep(node: &CstNode, at: &mut Vec<String>) -> Option<String> {
+    if let Some(obj) = node.as_object() {
+        if let Some(dup) = duplicate_key(&obj) {
+            return Some(dup);
+        }
+        for prop in obj.properties() {
+            let (Some(name), Some(value)) = (prop.name(), prop.value()) else {
+                continue;
+            };
+            at.push(name.decoded_value().unwrap_or_default());
+            if let Some(dup) = duplicate_key_deep(&value, at) {
+                return Some(dup);
+            }
+            at.pop();
+        }
+    } else if let Some(arr) = node.as_array() {
+        for (i, el) in arr.elements().iter().enumerate() {
+            at.push(i.to_string());
+            if let Some(dup) = duplicate_key_deep(el, at) {
+                return Some(dup);
+            }
+            at.pop();
+        }
+    }
+    None
 }
 
 fn to_input(v: &Value) -> CstInputValue {
@@ -49,7 +88,51 @@ impl JsonDoc {
                 path.display()
             ),
         }
-        Ok(JsonDoc { root })
+        Ok(JsonDoc {
+            root,
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// Refuse to edit at `path` when a key appears twice in the same object,
+    /// in any object along `path` or anywhere inside the value at `path`.
+    /// Edits would change the first copy while tools read the last one, so
+    /// kitbag does not guess which one was meant.
+    pub fn check_unique_keys(&self, path: &[&str]) -> Result<()> {
+        let fail = |at: &[String], key: &str| {
+            let place = if at.is_empty() {
+                "at the top level".to_string()
+            } else {
+                format!("in '{}'", at.join("."))
+            };
+            anyhow!(
+                "{}: key '{key}' appears more than once {place}. Tools read the last one and \
+                 kitbag would edit the first, so it changed nothing; remove the duplicate and \
+                 run kitbag again",
+                self.path.display()
+            )
+        };
+        let Some(mut node) = self.root.value() else {
+            return Ok(());
+        };
+        let mut at: Vec<String> = Vec::new();
+        for key in path {
+            let Some(obj) = node.as_object() else {
+                return Ok(());
+            };
+            if let Some(dup) = duplicate_key(&obj) {
+                return Err(fail(&at, &dup));
+            }
+            let Some(next) = obj.get(key).and_then(|p| p.value()) else {
+                return Ok(());
+            };
+            at.push((*key).to_string());
+            node = next;
+        }
+        match duplicate_key_deep(&node, &mut at) {
+            Some(dup) => Err(fail(&at, &dup)),
+            None => Ok(()),
+        }
     }
 
     /// The whole document as a plain value.
@@ -157,6 +240,39 @@ mod tests {
         d.remove(&["b", "c"]);
         d.remove(&["nope", "x"]);
         assert_eq!(d.value(), json!({"a": 5, "b": {}}));
+    }
+
+    #[test]
+    fn duplicate_keys_are_refused_where_kitbag_edits() {
+        let text = "{\"mcpServers\": {\"a\": {}}, \"x\": 1, \"mcpServers\": {\"b\": {}}}";
+        let d = JsonDoc::parse(Some(text), Path::new(P)).unwrap();
+        let err = d
+            .check_unique_keys(&["mcpServers"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("test.json") && err.contains("'mcpServers'"),
+            "{err}"
+        );
+        assert!(err.contains("at the top level"), "{err}");
+
+        let text = "{\"mcpServers\": {\"a\": {\"command\": \"x\", \"command\": \"y\"}}}";
+        let d = JsonDoc::parse(Some(text), Path::new(P)).unwrap();
+        let err = d
+            .check_unique_keys(&["mcpServers"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("'command'") && err.contains("in 'mcpServers.a'"),
+            "{err}"
+        );
+
+        // Duplicates elsewhere in the file are not kitbag's business.
+        let text = "{\"other\": {\"k\": 1, \"k\": 2}, \"mcpServers\": {\"a\": {}}}";
+        let d = JsonDoc::parse(Some(text), Path::new(P)).unwrap();
+        d.check_unique_keys(&["mcpServers"]).unwrap();
+        d.check_unique_keys(&["missing", "deeper"]).unwrap();
+        assert!(d.check_unique_keys(&["other"]).is_err());
     }
 
     #[test]
