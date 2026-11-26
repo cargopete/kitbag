@@ -68,8 +68,8 @@ enum Cmd {
     },
     /// Capture your current setup into a profile (secrets are redacted)
     Capture {
-        /// Targets to read: ids (comma-separated; 'claude' means claude-code), 'all' or
-        /// 'detected'
+        /// Targets to read: ids (comma-separated: claude-code (alias: claude), cursor,
+        /// codex, gemini-cli, claude-desktop, antigravity, opencode), 'all' or 'detected'
         #[arg(long, value_name = "IDS", default_value = "detected")]
         from: String,
         #[command(flatten)]

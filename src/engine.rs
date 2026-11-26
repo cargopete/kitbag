@@ -333,15 +333,24 @@ pub fn plan(
             }
         }
         if !unsupported.is_empty() {
-            work.info(
-                a.id(),
-                format!(
-                    "not supported by {} at {} scope, skipped: {}",
-                    a.name(),
-                    env.scope,
-                    unsupported.join(", ")
-                ),
+            let mut message = format!(
+                "not supported by {} at {} scope, skipped: {}",
+                a.name(),
+                env.scope,
+                unsupported.join(", ")
             );
+            // Gemini CLI folds rules into ~/.gemini/GEMINI.md, which
+            // Antigravity reads too.
+            if a.id() == "antigravity"
+                && env.scope == Scope::User
+                && !profile.rules.is_empty()
+                && targets.iter().any(|t| t.id() == "gemini-cli")
+            {
+                message.push_str(
+                    " (Antigravity still reads Gemini CLI's rules block in the same ~/.gemini/GEMINI.md)",
+                );
+            }
+            work.info(a.id(), message);
         }
         a.apply(profile, env, opts, &mut work)?;
         applied.push(a.id().to_string());

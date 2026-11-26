@@ -626,6 +626,13 @@ fn gemini_and_antigravity_share_one_block_in_gemini_md() {
     assert_eq!(count(&text), 1, "{text}");
     assert_eq!(text.matches("Use British English.").count(), 1, "{text}");
     assert!(text.starts_with("My own notes.") && text.contains("kitbag:begin team:rules"));
+    let reads_gemini_rules = |p: &kitbag::engine::Plan| {
+        p.notes
+            .iter()
+            .any(|n| n.message.contains("reads Gemini CLI's rules block"))
+    };
+    assert!(reads_gemini_rules(&p), "{:?}", p.notes);
+    assert!(!reads_gemini_rules(&plan(&prof, &["antigravity"], &env)));
     for ids in [
         &["antigravity"][..],
         &["gemini-cli"],
@@ -646,12 +653,16 @@ fn gemini_and_antigravity_share_one_block_in_gemini_md() {
         let sb = Sandbox::empty();
         let env = sb.env(Scope::User);
         apply(&sb, &prof, &[order[0]], &env);
+        let earlier = sb.read("home/.gemini/GEMINI.md");
         apply(&sb, &prof, &[order[1]], &env);
         let text = sb.read("home/.gemini/GEMINI.md");
         assert_eq!(count(&text), 1, "{order:?}: {text}");
         assert_eq!(text.matches("Use British English.").count(), 1, "{order:?}");
         let again = plan(&prof, &order, &env);
         assert!(again.changes.is_empty(), "{order:?}: {:?}", again.changes);
+        // Undoing the later apply leaves the earlier target's block as it was.
+        Store::new(sb.state()).undo(None, false).unwrap();
+        assert_eq!(sb.read("home/.gemini/GEMINI.md"), earlier, "{order:?}");
     }
 }
 
