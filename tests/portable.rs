@@ -128,10 +128,12 @@ fn codex_project_trust_entries_stay_out_of_the_profile() {
     let sb = Sandbox::empty();
     let home = sb.home().display().to_string();
     fs::create_dir_all(sb.home().join(".codex")).unwrap();
+    // A literal string ('...'): Windows paths have backslashes, which a basic
+    // string ("...") would read as escapes (`\U` for C:\Users).
     fs::write(
         sb.home().join(".codex/config.toml"),
         format!(
-            "model = \"o3\"\n\n[projects.\"{home}/src/app\"]\ntrust_level = \"trusted\"\n\n[mcp_servers.docs]\ncommand = \"npx\"\nargs = [\"-y\", \"docs-mcp\"]\n"
+            "model = \"o3\"\n\n[projects.'{home}/src/app']\ntrust_level = \"trusted\"\n\n[mcp_servers.docs]\ncommand = \"npx\"\nargs = [\"-y\", \"docs-mcp\"]\n"
         ),
     )
     .unwrap();
