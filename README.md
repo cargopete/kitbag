@@ -358,9 +358,14 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
 4. **Resolution is a last resort, and visible.** Some values have nowhere to go but the file,
    such as anything for Claude Desktop, or a Codex env var whose name differs from its source.
    kitbag resolves those from your environment at apply time and warns per field. The value is
-   masked as `••••••••` in every diff. Diffs also mask anything that already looks like a
-   credential in your existing files, including private keys that span several lines, and
-   anything capture would redact. New files containing resolved values are created `0600`.
+   masked as `••••••••` in every diff. Diffs also mask what already looks like a credential
+   in your existing files, line by line: known token formats, private keys that span several
+   lines, passwords in URLs, `Bearer …`, double-quoted JSON and TOML values under a
+   secret-sounding name, a `"--token", "…"` or `"--token=…"` pair on one line, and whatever
+   capture would redact from free text. It is not as thorough as capture: a random-looking
+   value under an ordinary name, a flag whose value sits on the next line (as in a
+   pretty-printed `args` array) and single-quoted TOML values are shown as they are. New
+   files containing resolved values are created `0600`.
    `--secrets never` keeps the `${VAR}` placeholder instead. It is the default for profiles
    from git sources, so your environment is never resolved into servers someone else defined
    unless you pass `--secrets resolve` (or `--trust-source`). Unset variables are reported and
@@ -371,8 +376,10 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
    managed block, because kitbag markers inside content are neutralised. It rejects path
    tricks in names and sub-directories, applies only allow-listed settings, and lists every
    MCP server it adds or changes before you confirm: the command and arguments it runs, or
-   the URL it connects to, and the names of the env vars and headers it sets. From a git
-   source, those servers are only applied when you opt in with `--allow-git-mcp`.
+   the URL it connects to, and the names of the env vars and headers it sets, with anything
+   in them that looks like a secret masked. Servers already in place and unchanged are not
+   listed. From a git source, those servers are only applied when you opt in with
+   `--allow-git-mcp`.
 
 ## Safe apply
 
@@ -414,6 +421,10 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
   An apply that is killed part-way through (power loss, `kill -9`) stays `pending` in
   `kitbag history`; `kitbag doctor` reports it, and `kitbag undo <id>` puts back the files it
   had written and leaves the rest alone.
+  Backups are kept until you delete them: there is no command that prunes old ones. On
+  Unix they are written `0600` in `0700` directories, but a backup of a file that held
+  resolved secrets holds them too. Each apply is one `backups/<id>/` directory in the state
+  directory; deleting it removes that apply from `kitbag history` and from `kitbag undo`.
 - **Profile directories.** `init --force` and `capture --force` replace a symbolic link inside
   the profile directory (a file or a sub-directory) with a regular file or directory; they
   never write through it.
@@ -596,6 +607,9 @@ Common options:
 - `https://github.com/owner/repo/tree/<ref>/<dir>`;
 - any `https://…/repo.git`, `git@host:owner/repo.git`, `ssh://` or `file://` URL, with
   `//sub/dir` to pick a sub-directory and `#ref` for a branch or tag.
+
+A ref must be a branch or tag name, since it is passed to `git clone --branch`; a source
+can't be pinned to a commit SHA. To pin a profile, tag the commit in your repository.
 
 kitbag clones with your own `git` (shallow, no prompts) into a temporary directory that is
 removed afterwards. Cleartext `http://` and `git://` sources are refused, because anyone on the

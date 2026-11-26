@@ -19,6 +19,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- The refusal to save a profile with secrets, and `kitbag doctor`, name what they found as `looks like a secret (openai-key)` instead of `looks like a openai-key` / `looks like a aws-access-key` (#38).
+- README: the security model no longer says diffs mask everything capture would redact. Diffs mask existing secrets line by line, and still show a random-looking value under an ordinary name, a flag whose value is on the next line of a pretty-printed `args` array, and single-quoted TOML values; the README now says so. It also says the MCP server review before confirming masks secrets in what it shows and leaves out servers already in place, that `#ref` on a git source must be a branch or tag (it is passed to `git clone --branch`, so a source can't be pinned to a commit), and that backups, which can hold resolved secrets, are kept until you delete them, as there is no prune command (#38).
 - A skill script that lost its executable bit (`chmod 644` on `~/.agents/skills/s/run.sh`) is no longer "Up to date" when its content matches: on Unix, `apply` and `diff` list it as modified (`+x`, with a note that the bit is set again), and `apply` sets the bit again in the usual undoable apply, so `undo` puts the old mode back. A script that is already executable stays up to date; Windows has no executable bit and is unchanged (#52).
 
 ### Security
