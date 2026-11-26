@@ -569,6 +569,9 @@ without them.
   and installs to `~/.local/bin`. Set `KITBAG_VERSION` or
   `KITBAG_INSTALL_DIR` to change either. On Windows, use
   `irm https://raw.githubusercontent.com/cargopete/kitbag/main/install.ps1 | iex`.
+  The same scripts are attached to each [GitHub Release](https://github.com/cargopete/kitbag/releases),
+  so you can pin the installer to a tag:
+  `curl -fsSL https://github.com/cargopete/kitbag/releases/download/vX.Y.Z/install.sh | sh`.
 
 Building needs Rust 1.88 or newer.
 

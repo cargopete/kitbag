@@ -2,6 +2,7 @@
 # checksums, to a GitHub Release when a version tag (v*) is pushed.
 # Asset names match what install.sh / install.ps1 download:
 #   kitbag-<target>.tar.gz (.zip on Windows) and kitbag-<target>.sha256
+# Each release also attaches install.sh and install.ps1.
 # Each archive also gets a signed build provenance attestation; check one with
 #   gh attestation verify kitbag-<target>.tar.gz -R cargopete/kitbag
 #
@@ -91,3 +92,17 @@ jobs:
         with:
           # The archive the step above built and uploaded (.tar.gz, or .zip on Windows).
           subject-path: ${{ steps.upload.outputs.tar || steps.upload.outputs.zip }}
+
+  install-scripts:
+    needs: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # attach install.sh and install.ps1 to the release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Upload install scripts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF_NAME}" install.sh install.ps1 --clobber
