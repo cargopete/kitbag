@@ -1231,6 +1231,191 @@ fn copilot_apply_project_writes_claude_codes_shape() {
     );
 }
 
+fn skill(name: &str, main: &str) -> kitbag::model::Skill {
+    kitbag::model::Skill {
+        name: name.into(),
+        description: None,
+        files: vec![kitbag::model::SkillFile {
+            path: "SKILL.md".into(),
+            content: main.as_bytes().to_vec(),
+            executable: false,
+        }],
+    }
+}
+
+#[test]
+fn copilot_capture_reads_prompt_files_and_skills() {
+    let sb = Sandbox::fixtures();
+    let user = capture(&["copilot"], &sb.env(Scope::User)).profile;
+    assert_eq!(user.skills.len(), 1);
+    assert_eq!(user.skills[0].name, "pr-notes");
+    assert_eq!(
+        user.skills[0].description.as_deref(),
+        Some("Write pull request notes from the staged diff")
+    );
+    // VS Code keeps user prompt files in its own storage: none at user scope.
+    assert!(user.commands.is_empty());
+
+    let r = capture(&["copilot"], &sb.env(Scope::Project));
+    let p = &r.profile;
+    let release = p.commands.iter().find(|c| c.name == "release").unwrap();
+    assert_eq!(release.description.as_deref(), Some("Draft release notes"));
+    assert_eq!(release.extra["agent"], json!("agent"));
+    assert_eq!(release.extra["tools"], json!(["search", "fetch"]));
+    assert!(
+        release
+            .body
+            .contains("${input:version:the version to release}")
+    );
+    assert_eq!(p.skills.len(), 1);
+    assert_eq!(p.skills[0].name, "db-migrate");
+    assert!(
+        !r.notes
+            .iter()
+            .any(|n| n.message.contains("prompt files") || n.message.contains("skills (")),
+        "prompt files and skills are carried now: {:?}",
+        r.notes
+    );
+}
+
+#[test]
+fn copilot_capture_lists_custom_agents_it_leaves_behind() {
+    let sb = Sandbox::empty();
+    let agent = sb.project().join(".github/agents/reviewer.agent.md");
+    std::fs::create_dir_all(agent.parent().unwrap()).unwrap();
+    std::fs::write(&agent, "---\ndescription: Reviews\n---\nReview.\n").unwrap();
+    let r = capture(&["copilot"], &sb.env(Scope::Project));
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n.message.contains("not carried") && n.message.contains("custom agents")),
+        "{:?}",
+        r.notes
+    );
+}
+
+#[test]
+fn copilot_apply_project_writes_prompt_files_and_skills() {
+    let sb = Sandbox::empty();
+    let mut prof = sample();
+    let mut extra = serde_json::Map::new();
+    extra.insert("agent".into(), json!("agent"));
+    extra.insert("allowed-tools".into(), json!("Bash(git:*)"));
+    prof.commands.push(kitbag::model::Command {
+        name: "ship".into(),
+        description: Some("Ship it".into()),
+        argument_hint: Some("[version]".into()),
+        extra,
+        body: "Ship the release.".into(),
+    });
+    prof.skills
+        .push(skill("db-migrate", "Write a reversible migration.\n"));
+    let p = plan(&prof, &["copilot"], &sb.env(Scope::Project));
+    let prompts = sb.project().join(".github/prompts");
+    assert_eq!(
+        planned(&p, &prompts.join("ship.prompt.md")).unwrap(),
+        "---\ndescription: Ship it\nargument-hint: \"[version]\"\nagent: agent\n---\n\nShip the release.\n"
+    );
+    assert!(
+        p.notes.iter().any(|n| n.target == "copilot"
+            && n.message.contains("command 'ship': allowed-tools left out"))
+    );
+    assert!(planned(&p, &prompts.join("review.prompt.md")).is_some());
+    assert!(
+        p.notes.iter().any(
+            |n| n.target == "copilot" && n.message.contains("command 'review' uses $ARGUMENTS")
+        )
+    );
+    // name and description are required in SKILL.md, so they are filled in.
+    let md = planned(&p, &sb.project().join(".github/skills/db-migrate/SKILL.md")).unwrap();
+    assert!(
+        md.starts_with("---\nname: db-migrate\ndescription: db-migrate skill\n---"),
+        "{md}"
+    );
+    assert!(
+        !p.notes
+            .iter()
+            .any(|n| n.message.contains("not supported") && n.target == "copilot"),
+        "{:?}",
+        p.notes
+    );
+}
+
+#[test]
+fn copilot_apply_user_writes_skills_under_copilot_home() {
+    let sb = Sandbox::empty();
+    let mut env = sb.env(Scope::User);
+    let dir = sb.path("elsewhere/copilot");
+    env.locations
+        .insert("COPILOT_HOME".into(), dir.to_string_lossy().into_owned());
+    let mut prof = sample();
+    prof.skills.push(skill(
+        "Notes_Tool",
+        "---\nname: Notes_Tool\ndescription: Notes\n---\nTake notes.\n",
+    ));
+    let p = plan(&prof, &["copilot"], &env);
+    assert!(planned(&p, &dir.join("skills/Notes_Tool/SKILL.md")).is_some());
+    // No user prompt files: commands stay unsupported there.
+    assert!(
+        !p.changes
+            .iter()
+            .any(|c| c.path.to_string_lossy().contains("prompt"))
+    );
+    assert!(p.notes.iter().any(|n| {
+        n.target == "copilot"
+            && n.message
+                .contains("skill 'Notes_Tool': VS Code only loads skills named with lowercase")
+    }));
+}
+
+#[test]
+fn copilot_project_capture_takes_a_bare_dollar_as_a_reference() {
+    let sb = Sandbox::empty();
+    std::fs::write(
+        sb.project().join(".mcp.json"),
+        r#"{"mcpServers": {"gh": {"command": "gh-mcp", "env": {"GITHUB_TOKEN": "$GITHUB_TOKEN"}}}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(sb.project().join(".github/copilot")).unwrap();
+    let p = capture(&["copilot"], &sb.env(Scope::Project)).profile;
+    assert_eq!(p.mcp_servers["gh"].env["GITHUB_TOKEN"], "${GITHUB_TOKEN}");
+}
+
+#[test]
+fn copilot_warns_about_references_in_url_and_cwd() {
+    let sb = Sandbox::empty();
+    let mut prof = Profile::new("t");
+    prof.mcp_servers.insert(
+        "api".into(),
+        McpServer {
+            url: Some("https://${API_HOST}/mcp".into()),
+            ..Default::default()
+        },
+    );
+    prof.mcp_servers.insert(
+        "local".into(),
+        McpServer {
+            command: Some("local-mcp".into()),
+            cwd: Some("${WORK_DIR}".into()),
+            ..Default::default()
+        },
+    );
+    let p = plan(&prof, &["copilot"], &sb.env(Scope::User));
+    for (name, field) in [("api", "url"), ("local", "cwd")] {
+        assert!(
+            p.notes.iter().any(|n| n.message.contains(&format!(
+                "MCP server '{name}': env reference in {field}; Copilot's docs only say"
+            ))),
+            "{name}: {:?}",
+            p.notes
+        );
+    }
+    let cfg: serde_json::Value =
+        serde_json::from_str(&planned(&p, &sb.home().join(".copilot/mcp-config.json")).unwrap())
+            .unwrap();
+    assert_eq!(cfg["mcpServers"]["api"]["url"], "https://${API_HOST}/mcp");
+}
+
 #[test]
 fn copilot_leaves_a_bare_format_mcp_json_alone() {
     let sb = Sandbox::empty();

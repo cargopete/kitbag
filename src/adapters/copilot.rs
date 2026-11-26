@@ -1,5 +1,6 @@
 //! GitHub Copilot (Copilot CLI, and the Copilot agent in VS Code): MCP servers,
-//! instructions and path-specific instructions (rules).
+//! instructions, path-specific instructions (rules), prompt files (commands)
+//! and skills.
 //!
 //! * MCP: Copilot's native files use a top-level `mcpServers` object:
 //!   `$COPILOT_HOME/mcp-config.json` (default `~/.copilot/mcp-config.json`) for
@@ -7,11 +8,15 @@
 //!   reads both; VS Code reads the user file and an existing workspace
 //!   `.mcp.json` (the experimental `chat.mcp.workspaceRootConfig.enabled`
 //!   setting only controls whether Add Server offers that file).
-//!   Local servers take `type` (`stdio`; Copilot CLI's examples use `local`),
+//!   Local servers take `type` (`local` or `stdio`, default `local`),
 //!   `command`, `args`, `env` and `cwd`;
-//!   remote servers `type` (`http` or `sse`), `url` and `headers`; `tools`
-//!   selects tools (`["*"]` for all). References are written as `${VAR}` and
-//!   `${VAR:-default}`, which Copilot expands itself, so no secret reaches disk.
+//!   remote servers `type` (`http` or `sse`), `url` and `headers`. Copilot
+//!   CLI's reference marks `tools` required (`["*"]` for all), so the user file
+//!   always gets one. References are written as `${VAR}` and `${VAR:-default}`,
+//!   which Copilot expands itself, so no secret reaches disk. The CLI reference
+//!   documents `$VAR`, `${VAR}` and `${VAR:-default}` in `env` and expansion in
+//!   `headers`; VS Code's lists `command`, `args`, `env` and `headers`. Neither
+//!   says references expand in `url` or `cwd`, so kitbag warns there.
 //!   The project `.mcp.json` is the same file Claude Code reads, so kitbag writes
 //!   it with Claude Code's server shape (no `tools`, no `cwd`), and neither
 //!   target removes a server there that the other still gets.
@@ -25,12 +30,24 @@
 //! * Rules: `*.instructions.md` files with `applyTo` globs, in
 //!   `$COPILOT_HOME/instructions/` and `.github/instructions/`. A rule that is
 //!   always on gets `applyTo: "**"`; an on-demand rule gets no `applyTo`.
-//! * Prompt files, custom agents, chat modes and skills are not supported yet.
+//! * Commands: VS Code prompt files, `.github/prompts/<name>.prompt.md`, at
+//!   project scope only (VS Code keeps user prompt files in its profile
+//!   storage, whose path its docs don't give, and Copilot CLI doesn't read
+//!   prompt files).
+//! * Skills: `$COPILOT_HOME/skills/<name>/SKILL.md` and
+//!   `.github/skills/<name>/SKILL.md`, the locations both Copilot CLI and
+//!   VS Code list for Copilot.
+//! * Custom agents (`.agent.md`; chat modes are their old name) are not carried:
+//!   the profile has no place for agents yet. Capture lists them.
 //!
 //! Docs: <https://code.visualstudio.com/docs/agents/reference/mcp-configuration>,
+//! <https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference>,
 //! <https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers>,
 //! <https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-custom-instructions>,
-//! <https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference>.
+//! <https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference>,
+//! <https://code.visualstudio.com/docs/agent-customization/prompt-files>,
+//! <https://code.visualstudio.com/docs/agent-customization/agent-skills>,
+//! <https://code.visualstudio.com/docs/agents/reference/custom-agent-file-reference>.
 
 use std::path::{Path, PathBuf};
 
@@ -39,14 +56,16 @@ use serde_json::{Map, Value, json};
 
 use super::claude_code;
 use super::common::{
-    add_rule, capture_instructions, claim_name, import_server, keep_shared_servers,
-    merge_json_servers, name_from_rel, read_text_item, render_server, same_server, server_entries,
-    server_from_json, servers_for, string_list, write_instructions, write_rule,
+    MdKind, add_rule, capture_instructions, capture_markdown_dir, capture_skills_dir, claim_name,
+    import_server, keep_shared_servers, merge_json_servers, name_from_rel, read_text_item,
+    render_server, same_server, server_entries, server_from_json, servers_for,
+    skill_with_required_frontmatter, string_list, write_command, write_instructions, write_rule,
+    write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
 use crate::frontmatter::{self, opt};
-use crate::model::{Profile, Rule, RuleMode, Transport, is_valid_name};
+use crate::model::{Command, Profile, Rule, RuleMode, Skill, Transport, is_valid_name};
 use crate::plan_fs::{join_rel, walk_files};
 use crate::profile_io::rule_from_markdown;
 use crate::secrets::{RefStyle, has_ref};
@@ -56,6 +75,11 @@ const ID: &str = "copilot";
 /// tool list you chose is kept, and `["*"]` is only added when there is none.
 const MANAGED_KEYS: &[&str] = &["type", "command", "args", "env", "cwd", "url", "headers"];
 const RULE_EXT: &str = ".instructions.md";
+const PROMPT_EXT: &str = ".prompt.md";
+/// Prompt-file frontmatter keys VS Code lists besides `description` and
+/// `argument-hint`; other keys a command carries (Claude Code's
+/// `allowed-tools` ...) mean nothing in a prompt file and are left out.
+const PROMPT_KEYS: &[&str] = &["name", "agent", "model", "tools"];
 
 pub struct Copilot;
 
@@ -63,6 +87,9 @@ struct Paths {
     mcp: PathBuf,
     instructions: PathBuf,
     rules: PathBuf,
+    skills: PathBuf,
+    /// VS Code prompt files; project scope only.
+    prompts: Option<PathBuf>,
     /// Copilot CLI settings, for `disabledMcpServers`.
     settings: PathBuf,
 }
@@ -80,6 +107,8 @@ fn paths(env: &Env) -> Paths {
                 mcp: d.join("mcp-config.json"),
                 instructions: d.join("copilot-instructions.md"),
                 rules: d.join("instructions"),
+                skills: d.join("skills"),
+                prompts: None,
                 settings: d.join("settings.json"),
             }
         }
@@ -89,6 +118,8 @@ fn paths(env: &Env) -> Paths {
                 mcp: env.project.join(".mcp.json"),
                 instructions: g.join("copilot-instructions.md"),
                 rules: g.join("instructions"),
+                skills: g.join("skills"),
+                prompts: Some(g.join("prompts")),
                 settings: g.join("copilot").join("settings.json"),
             }
         }
@@ -121,6 +152,51 @@ pub fn rule_from_instructions(name: &str, text: &str) -> Rule {
         r.always_apply = Some(false);
     }
     r
+}
+
+/// A command as a VS Code prompt file: `description`, `argument-hint`, and
+/// the prompt-file keys among the command's own (`name`, `agent`, `model`,
+/// `tools`). Returns the file and the keys left out.
+pub fn prompt_file(c: &Command) -> (String, Vec<String>) {
+    let mut entries: Vec<(&str, Value)> = vec![
+        ("description", opt(&c.description)),
+        ("argument-hint", opt(&c.argument_hint)),
+    ];
+    let mut dropped = Vec::new();
+    for (k, v) in &c.extra {
+        if PROMPT_KEYS.contains(&k.as_str()) {
+            entries.push((k.as_str(), v.clone()));
+        } else {
+            dropped.push(k.clone());
+        }
+    }
+    (frontmatter::render(&entries, &c.body), dropped)
+}
+
+/// Why VS Code would skip a skill: its docs want a `name` of lowercase
+/// letters, digits and hyphens (at most 64), the same as its directory.
+fn skill_name_issue(s: &Skill) -> Option<String> {
+    let ok = |n: &str| {
+        !n.is_empty()
+            && n.len() <= 64
+            && n.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    };
+    if !ok(&s.name) {
+        return Some(format!(
+            "skill '{}': VS Code only loads skills named with lowercase letters, digits and hyphens (at most 64), so it may skip this one; Copilot CLI accepts it",
+            s.name
+        ));
+    }
+    let main = s.main_file()?;
+    let doc = frontmatter::parse(&String::from_utf8_lossy(&main.content));
+    match doc.data.get("name").and_then(Value::as_str) {
+        Some(n) if n != s.name => Some(format!(
+            "skill '{}': SKILL.md says name '{n}', but VS Code wants the name to match the directory, so it may skip it",
+            s.name
+        )),
+        _ => None,
+    }
 }
 
 /// The servers of a project MCP file: its `mcpServers` object, or, in Copilot
@@ -228,18 +304,13 @@ fn note_not_carried(cap: &mut Captured, env: &Env) {
     let dirs: Vec<(PathBuf, &str)> = match env.scope {
         Scope::User => {
             let d = copilot_home(env);
-            vec![
-                (d.join("agents"), "custom agents"),
-                (d.join("skills"), "skills"),
-            ]
+            vec![(d.join("agents"), "custom agents")]
         }
         Scope::Project => {
             let g = env.project.join(".github");
             vec![
-                (g.join("prompts"), "prompt files"),
                 (g.join("agents"), "custom agents"),
-                (g.join("chatmodes"), "chat modes"),
-                (g.join("skills"), "skills"),
+                (g.join("chatmodes"), "chat modes (now custom agents)"),
             ]
         }
     };
@@ -293,11 +364,17 @@ impl Adapter for Copilot {
     fn scopes(&self) -> &'static [Scope] {
         &[Scope::User, Scope::Project]
     }
-    fn support(&self, _scope: Scope) -> [(Feature, Support); 6] {
+    fn support(&self, scope: Scope) -> [(Feature, Support); 6] {
         Feature::ALL.map(|f| {
+            let native = match f {
+                Feature::Mcp | Feature::Instructions | Feature::Rules | Feature::Skills => true,
+                // VS Code prompt files; user ones live in VS Code's profile storage.
+                Feature::Commands => scope == Scope::Project,
+                Feature::Settings => false,
+            };
             (
                 f,
-                if matches!(f, Feature::Mcp | Feature::Instructions | Feature::Rules) {
+                if native {
                     Support::Native
                 } else {
                     Support::None
@@ -308,11 +385,16 @@ impl Adapter for Copilot {
 
     fn locations(&self, env: &Env) -> Vec<(&'static str, PathBuf)> {
         let p = paths(env);
-        vec![
+        let mut out = vec![
             ("mcp", p.mcp),
             ("instructions", p.instructions),
             ("rules", p.rules),
-        ]
+        ];
+        if let Some(prompts) = p.prompts {
+            out.push(("commands", prompts));
+        }
+        out.push(("skills", p.skills));
+        out
     }
 
     fn detect(&self, env: &Env) -> bool {
@@ -325,6 +407,8 @@ impl Adapter for Copilot {
                     || g.join("instructions").exists()
                     || g.join("mcp.json").exists()
                     || g.join("copilot").exists()
+                    || g.join("prompts").exists()
+                    || g.join("skills").exists()
                     || env.project.join(".vscode").join("mcp.json").exists()
             }
         }
@@ -342,9 +426,9 @@ impl Adapter for Copilot {
                     for (name, def) in
                         server_entries(&mut cap, ID, &p.mcp, "mcpServers", doc.get("mcpServers"))
                     {
-                        // The docs only promise `${VAR}` here (VS Code keeps a
-                        // bare `$VAR` as text), but a bare `$VAR` is still taken
-                        // as a reference so its value is never captured.
+                        // Copilot CLI expands a bare `$VAR` in `env` (VS Code
+                        // keeps it as text), so it is taken as a reference and
+                        // its value never captured.
                         import(&mut cap, name, def, &p.mcp, true);
                     }
                 }
@@ -360,7 +444,9 @@ impl Adapter for Copilot {
                         for (name, def) in
                             server_entries(&mut cap, ID, file, "mcpServers", project_servers(&doc))
                         {
-                            import(&mut cap, name, def, file, false);
+                            // Copilot CLI expands a bare `$VAR` in `env`, so it is
+                            // taken as a reference and its value never captured.
+                            import(&mut cap, name, def, file, true);
                         }
                     }
                 }
@@ -410,6 +496,11 @@ impl Adapter for Copilot {
             }
         }
 
+        if let Some(prompts) = &p.prompts {
+            capture_markdown_dir(&mut cap, prompts, PROMPT_EXT, MdKind::Command, ID)?;
+        }
+        capture_skills_dir(&mut cap, &p.skills, ID)?;
+
         note_not_carried(&mut cap, env);
         Ok(cap)
     }
@@ -453,6 +544,20 @@ impl Adapter for Copilot {
             write_rule(work, &path, copilot_rule(r).as_bytes(), opts, ID, &r.name)?;
         }
 
+        if let Some(prompts) = &p.prompts {
+            for c in &profile.commands {
+                apply_prompt(work, prompts, c, opts)?;
+            }
+        }
+
+        for s in &profile.skills {
+            if let Some(why) = skill_name_issue(s) {
+                work.warn(ID, why);
+            }
+            let s = skill_with_required_frontmatter(s);
+            write_skill(work, &p.skills.join(&s.name), &s, opts, ID)?;
+        }
+
         if profile.settings.contains_key(ID) {
             work.info(
                 ID,
@@ -463,7 +568,34 @@ impl Adapter for Copilot {
     }
 }
 
-/// Warn about references where VS Code's Copilot docs don't list them.
+/// One command as `.github/prompts/<name>.prompt.md`.
+fn apply_prompt(work: &mut Work, dir: &Path, c: &Command, opts: &ApplyOptions) -> Result<()> {
+    let (text, dropped) = prompt_file(c);
+    if !dropped.is_empty() {
+        work.info(
+            ID,
+            format!(
+                "command '{}': {} left out of the prompt file (not a VS Code prompt-file key)",
+                c.name,
+                dropped.join(", ")
+            ),
+        );
+    }
+    if c.body.contains("$ARGUMENTS") || (1..=9).any(|n| c.body.contains(&format!("${n}"))) {
+        work.warn(
+            ID,
+            format!(
+                "command '{}' uses $ARGUMENTS or $N placeholders, which VS Code's prompt-file docs don't list; they are written as is (VS Code documents ${{input:NAME}} instead)",
+                c.name
+            ),
+        );
+    }
+    let path = dir.join(format!("{}{PROMPT_EXT}", c.name));
+    write_command(work, &path, text.as_bytes(), opts, ID, &c.name)
+}
+
+/// Warn about references where neither Copilot CLI's nor VS Code's docs
+/// say they expand.
 fn note_unlisted_refs(work: &mut Work, name: &str, fields: &[(&str, Option<&str>)]) {
     let found: Vec<&str> = fields
         .iter()
@@ -474,7 +606,7 @@ fn note_unlisted_refs(work: &mut Work, name: &str, fields: &[(&str, Option<&str>
         work.warn(
             ID,
             format!(
-                "MCP server '{name}': env reference in {}; Copilot CLI expands it, but VS Code's Copilot docs only list command, args, env and headers",
+                "MCP server '{name}': env reference in {}; Copilot's docs only say references expand in env and headers (Copilot CLI) and command, args, env and headers (VS Code), so check that the server still works",
                 found.join(", ")
             ),
         );
@@ -526,8 +658,8 @@ fn apply_user_servers(
                 }
             }
         }
-        // Copilot's examples always include `tools` (default `*`). Keep the list of an entry for the same
-        // server; anything else gets all tools.
+        // Copilot CLI's reference marks `tools` required. Keep the list of an
+        // entry for the same server; anything else gets all tools.
         let keeps_tools = existing
             .get(name.as_str())
             .and_then(Value::as_object)

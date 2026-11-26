@@ -9,7 +9,7 @@ kitbag captures your MCP servers, instructions, rules, slash commands, skills an
 from the AI coding tools you already use. It stores them as a small, git-friendly **profile** with secrets
 redacted and applies that profile to any other tool in one step. Claude Code, Cursor,
 OpenAI Codex CLI, Gemini CLI, Claude Desktop, Google Antigravity, opencode (the last two
-for MCP servers and instructions) and GitHub Copilot (MCP servers, instructions and rules) are
+for MCP servers and instructions) and GitHub Copilot (MCP servers, instructions, rules, prompt files and skills) are
 supported, at user and project scope.
 
 > [!IMPORTANT]
@@ -87,7 +87,7 @@ Starting from scratch? `kitbag init my-profile` writes a commented starter profi
 | `claude-desktop` | Claude Desktop    | user          | ✓ (local servers) | -  | -          | -            | -      | -        |
 | `antigravity`    | Google Antigravity | user, project | ✓  | ✓            | -          | -            | -      | -        |
 | `opencode`       | opencode          | user, project | ✓   | ✓            | -          | -            | -      | -        |
-| `copilot`        | GitHub Copilot (CLI, VS Code) | user, project | ✓ | ✓    | ✓          | -            | -      | -        |
+| `copilot`        | GitHub Copilot (CLI, VS Code) | user, project | ✓ | ✓    | ✓          | project      | ✓      | -        |
 
 `claude` is accepted as an alias for `claude-code` wherever a target id is given (`--to`,
 `--from`, `targets`, `disabled_on`, and `[settings.claude]`, read as `[settings.claude-code]`;
@@ -109,7 +109,7 @@ Where things go:
 | Claude Desktop | `claude_desktop_config.json` in `~/Library/Application Support/Claude` (macOS), `%APPDATA%\Claude` (Windows), `~/.config/Claude` (Linux) | n/a |
 | Antigravity | `~/.gemini/config/mcp_config.json`, `~/.gemini/GEMINI.md` (the same file and managed block as Gemini CLI); capture also reads `~/.gemini/AGENTS.md` and `~/.gemini/config/{AGENTS,GEMINI}.md` | `.agents/mcp_config.json`, `AGENTS.md` (shared with Codex and Cursor); capture also reads `GEMINI.md` and `.agents/{AGENTS,GEMINI}.md` |
 | opencode | `~/.config/opencode/opencode.json` or `opencode.jsonc` (`mcp.servers`), `~/.config/opencode/AGENTS.md`; honours `XDG_CONFIG_HOME` | `opencode.json(c)` or `.opencode/opencode.json(c)` (the first that exists, else `opencode.json`), `AGENTS.md` (shared with Codex, Cursor and Antigravity); capture reads every config file there is |
-| GitHub Copilot | `$COPILOT_HOME/mcp-config.json` (`mcpServers`, default `~/.copilot`), `$COPILOT_HOME/copilot-instructions.md`, `$COPILOT_HOME/instructions/*.instructions.md` | `.mcp.json` (shared with Claude Code, written in Claude Code's shape), `.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` (`applyTo`); capture also reads `.github/mcp.json` and `.vscode/mcp.json` (`servers`), and `disabledMcpServers` from Copilot's `settings.json` |
+| GitHub Copilot | `$COPILOT_HOME/mcp-config.json` (`mcpServers`, default `~/.copilot`), `$COPILOT_HOME/copilot-instructions.md`, `$COPILOT_HOME/instructions/*.instructions.md`, `$COPILOT_HOME/skills/` | `.mcp.json` (shared with Claude Code, written in Claude Code's shape), `.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` (`applyTo`), `.github/prompts/*.prompt.md`, `.github/skills/`; capture also reads `.github/mcp.json` and `.vscode/mcp.json` (`servers`), and `disabledMcpServers` from Copilot's `settings.json` |
 
 How each tool receives `${VAR}` references:
 
@@ -760,11 +760,26 @@ Good next candidates: Windsurf, Zed.
   setting only controls whether its Add Server flow offers that file. VS Code's
   older `.vscode/mcp.json` is deprecated and Copilot CLI doesn't read it, so kitbag only reads it
   at capture. In the user file (`~/.copilot/mcp-config.json`)
-  servers get `tools: ["*"]` unless the entry already lists its own tools, which are kept.
+  servers get `tools: ["*"]` unless the entry already lists its own tools, which are kept
+  (Copilot CLI's reference marks `tools` required). Copilot CLI documents `$VAR`, `${VAR}` and
+  `${VAR:-default}` in `env` and expansion in `headers`, and VS Code `${env:VAR}` in `command`,
+  `args`, `env` and `headers`; neither says references expand in `url` or `cwd`, so kitbag
+  still writes them as `${VAR}` there but warns. A bare `$VAR` in a Copilot MCP file is captured
+  as a reference.
   Rules become `*.instructions.md` files: an always-on rule gets `applyTo: "**"`, an on-demand
   rule no `applyTo`. A server using VS Code's `${input:...}` or `${command:...}` variables in
-  `.vscode/mcp.json` is skipped at capture. Prompt files, custom agents, chat modes and skills
-  are listed by capture but not carried yet, and Copilot's own MCP trust prompts are left alone.
+  `.vscode/mcp.json` is skipped at capture. Commands become VS Code prompt files
+  (`.github/prompts/<name>.prompt.md`) at project scope only: VS Code keeps user prompt files
+  in its own profile storage, and Copilot CLI doesn't read prompt files (it reads Claude
+  Code's `.claude/commands/`). A prompt file keeps `description`, `argument-hint` and VS Code's
+  `name`, `agent`, `model` and `tools`; other command keys (`allowed-tools` ...) are left out with
+  a note, and `$ARGUMENTS` is written as is with a warning, since VS Code documents
+  `${input:NAME}` instead. Skills go to `$COPILOT_HOME/skills/` and `.github/skills/`, which
+  Copilot CLI and VS Code both read; `name` and `description` are filled in when `SKILL.md`
+  lacks them, and a name VS Code wouldn't load (not lowercase letters, digits and hyphens) is
+  warned about. Custom agents (`.agent.md`; chat modes are their old name) are listed by
+  capture but not carried, since profiles have no agents yet, and Copilot's own MCP and
+  folder trust prompts are left alone.
 - Apply is additive and doesn't delete entries that were removed from the profile (see above).
 - **Not carried yet:** Claude Code subagents (`agents/`), output styles (`output-styles/`),
   plugins and hooks. Capture lists what it found of these and leaves them out. It also drops
