@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A bare `--allow-git-mcp` placed before the source (`kitbag apply --allow-git-mcp github:me/profile`) no longer takes the source as a server name; it means "allow all". A value that looks like a path or URL, or names a profile directory (one with a `kitbag.toml`), is treated as the source. `--allow-git-mcp NAME[,NAME]` and `--allow-git-mcp=NAME` work as before. (#41)
+- `apply` and `sync` no longer say "up to date" about a target they skipped; they print `Skipped: <targets>` and the notes say why. With `--no-overwrite`, an apply that kept existing items says "Nothing written; kept N existing item(s)" instead of "up to date" (#38, #42).
+- `kitbag undo ""` (or only whitespace) is an error instead of matching any transaction (#38).
+- `doctor --to <target>` only checks that target and rejects unknown ones like `apply --to` does, before printing anything (#38).
+- Skill scripts keep their executable bit through capture, the profile and apply on Unix. From a git source the bit is only kept with `--trust-source`, and the plan says so otherwise (#38).
+- Capturing commands or rules whose nested paths flatten to the same name (`team-build.md` and `team/build.md`) now fails naming both files, instead of silently keeping one (#38).
+- `capture --force` into a profile with `.mdc` rules no longer fails looking for a `.md` file (#38).
+- `--no-overwrite` now also keeps existing managed instruction blocks and existing skill support files, and reports each one it kept. A profile that no longer has instructions still removes the old managed block (#38).
+- Capture matched secrets it redacted to MCP servers by location, so a server whose name contains a dot (`a.b`) also had its secrets counted under server `a`: they were listed twice and could raise a false "different secret values" warning. Each redaction now records its server (#53).
+
 ### Security
 
 - Credentials in a git source URL (`https://user:token@host/...`, `https://<token>@host/...`, `file://user:pass@...`) are passed to `git` and nowhere else: the plan, clone errors (including git's own message), `history`, `undo` and the transaction log show the URL without them. `history` and `undo` also hide them in applies recorded by older versions. An SSH URL keeps its username (#37).
@@ -14,10 +26,6 @@ All notable changes to this project are documented here. The format follows
 - Diffs mask private keys that span lines (PEM `-----BEGIN ... PRIVATE KEY-----` blocks) in existing config and instruction files. Each key is shown as one line, `•••••••• (private key, sha256:1a2b3c4d)`, so a changed key still shows up as a change. Diffs and plans also mask whatever capture would redact from text (`export DB_PASSWORD=...`, `Bearer ...`, webhook and query tokens) and, as capture does, a value under a secret-sounding name however short (#37).
 - Capture redacts hex-only tokens in URL paths (32 hex digits or more, such as `https://mcp.example.com/u/3f9a.../sse` or a classic 40-digit GitHub token), which the random-looking-segment check missed because it needs upper and lower case. Numeric ids, short ids and SHAs, and full commit SHAs (40 or 64 hex digits) after `commit`, `blob`, `tree` and the like or on `raw.githubusercontent.com` are kept (#37).
 - Two different secrets captured under the same name no longer end up behind one `${VAR}`. Within one server (an `API_KEY` in `env` and another in a `docker -e` argument, two passwords in two URLs, two tokens in one command) the second gets a numbered variable such as `${API_KEY_2}`, and the same secret repeated keeps its one variable. Across servers the prefixed name gets a number too when it is already taken. The same server captured from two tools with different secret values is now reported, as a server that differs is (#37).
-
-### Fixed
-
-- Capture matched secrets it redacted to MCP servers by location, so a server whose name contains a dot (`a.b`) also had its secrets counted under server `a`: they were listed twice and could raise a false "different secret values" warning. Each redaction now records its server (#53).
 
 ## [0.1.2] - 2026-11-26
 

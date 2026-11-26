@@ -256,7 +256,11 @@ fn read_skill_dir(dir: &Path, prefix: &str, out: &mut Vec<SkillFile>) -> Result<
         if is_dir {
             read_skill_dir(&abs, &rel, out)?;
         } else if let Some(content) = read_profile_file(&abs)? {
-            out.push(SkillFile { path: rel, content });
+            out.push(SkillFile {
+                path: rel,
+                content,
+                executable: crate::adapters::common::skill_file_executable(&abs),
+            });
         }
     }
     Ok(())
@@ -459,11 +463,24 @@ pub fn save(p: &Profile, dir: &Path, force: bool) -> Result<Vec<PathBuf>> {
         let old = load(dir).with_context(|| {
             format!("the existing profile in {} can't be read, so it won't be replaced; fix or remove it first", dir.display())
         })?;
-        for rel in profile_files(&old)
-            .keys()
-            .filter(|k| !new_files.contains_key(*k))
-        {
+        // `profile_files` names every rule `<name>.md`, but a profile may hold it
+        // as `<name>.mdc`: look for that twin too, so it is neither missed when
+        // removing nor left behind next to a rewritten `.md`.
+        let mut stale: Vec<String> = Vec::new();
+        for rel in profile_files(&old).keys() {
+            let is_rule = rel.starts_with("rules/") && rel.ends_with(".md");
+            if !new_files.contains_key(rel) {
+                stale.push(rel.clone());
+            }
+            if is_rule {
+                stale.push(format!("{rel}c"));
+            }
+        }
+        for rel in &stale {
             let abs = crate::plan_fs::join_rel(dir, rel);
+            if abs.symlink_metadata().is_err() {
+                continue;
+            }
             fs::remove_file(&abs).with_context(|| format!("removing {}", abs.display()))?;
             // Tidy now-empty directories up to the profile root.
             let mut d = abs.parent().map(Path::to_path_buf);
@@ -490,11 +507,30 @@ pub fn save(p: &Profile, dir: &Path, force: bool) -> Result<Vec<PathBuf>> {
         )
         .into());
     }
+    // Skill scripts that were executable stay so (Unix).
+    #[cfg(unix)]
+    let exec: std::collections::BTreeSet<String> = p
+        .skills
+        .iter()
+        .flat_map(|s| {
+            s.files
+                .iter()
+                .filter(|f| f.executable)
+                .map(|f| format!("skills/{}/{}", s.name, f.path))
+        })
+        .collect();
     let mut written = Vec::new();
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     for (rel, content) in new_files {
         // Links in the profile are replaced, never written through.
         crate::plan_fs::write_owned_file(dir, &rel, &content)?;
+        #[cfg(unix)]
+        if exec.contains(&rel) {
+            use std::os::unix::fs::PermissionsExt;
+            let path = crate::plan_fs::join_rel(dir, &rel);
+            let mode = fs::metadata(&path)?.permissions().mode();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode | 0o111))?;
+        }
         written.push(crate::plan_fs::join_rel(dir, &rel));
     }
     Ok(written)
@@ -641,10 +677,12 @@ mod tests {
                 SkillFile {
                     path: "SKILL.md".into(),
                     content: b"---\nname: pdf\ndescription: PDFs\n---\nUse it.\n".to_vec(),
+                    executable: false,
                 },
                 SkillFile {
                     path: "bin/blob.bin".into(),
                     content: vec![0, 159, 146, 150],
+                    executable: false,
                 },
             ],
         });
