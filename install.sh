@@ -20,6 +20,7 @@ need() { command -v "$1" >/dev/null 2>&1 || die "'$1' is required"; }
 need uname
 need tar
 need mkdir
+need mktemp
 if command -v curl >/dev/null 2>&1; then
   fetch() { curl --proto '=https' --tlsv1.2 -fsSL "$1" -o "$2"; }
 elif command -v wget >/dev/null 2>&1; then
@@ -57,7 +58,16 @@ fetch "$base/$archive" "$tmp/$archive" || die "download failed: $base/$archive"
 checksum="$BIN-$target.sha256"
 fetch "$base/$checksum" "$tmp/$checksum" || die "checksum download failed: $base/$checksum"
 
-expected="$(cut -d ' ' -f 1 < "$tmp/$checksum")"
+# Fail closed: both sides must be a real SHA-256 (64 hex digits), so an empty or
+# garbled checksum file, or a hasher that fails and prints nothing, can't pass.
+is_sha256() {
+  case "$1" in
+    *[!0-9a-f]*) return 1 ;;
+  esac
+  [ "${#1}" -eq 64 ]
+}
+expected="$(cut -d ' ' -f 1 < "$tmp/$checksum" | tr 'A-F' 'a-f')"
+is_sha256 "$expected" || die "$checksum does not hold a SHA-256 checksum"
 if command -v sha256sum >/dev/null 2>&1; then
   actual="$(sha256sum "$tmp/$archive" | cut -d ' ' -f 1)"
 elif command -v shasum >/dev/null 2>&1; then
@@ -65,6 +75,8 @@ elif command -v shasum >/dev/null 2>&1; then
 else
   die "sha256sum or shasum is required to verify the download"
 fi
+actual="$(printf '%s' "$actual" | tr 'A-F' 'a-f')"
+is_sha256 "$actual" || die "could not compute the SHA-256 of $archive"
 [ "$expected" = "$actual" ] || die "checksum mismatch for $archive (expected $expected, got $actual)"
 
 tar -xzf "$tmp/$archive" -C "$tmp"
@@ -72,9 +84,14 @@ mkdir -p "$INSTALL_DIR"
 src="$tmp/$BIN"
 [ -f "$src" ] || src="$(find "$tmp" -type f -name "$BIN" | head -n 1)"
 [ -n "$src" ] && [ -f "$src" ] || die "archive did not contain $BIN"
-cp "$src" "$INSTALL_DIR/$BIN.tmp"
-chmod 755 "$INSTALL_DIR/$BIN.tmp"
-mv "$INSTALL_DIR/$BIN.tmp" "$INSTALL_DIR/$BIN"
+# Replace atomically: write a fresh temp file next to the target, then rename it
+# over the old binary, so a running kitbag or an interrupted install never sees
+# a half-written file. mktemp creates a new file, so a planted link isn't followed.
+new="$(mktemp "$INSTALL_DIR/.$BIN.XXXXXX")" || die "could not create a temporary file in $INSTALL_DIR"
+trap 'rm -rf "$tmp"; rm -f "$new"' EXIT INT TERM
+cp "$src" "$new"
+chmod 755 "$new"
+mv -f "$new" "$INSTALL_DIR/$BIN"
 
 say "installed $("$INSTALL_DIR/$BIN" --version) to $INSTALL_DIR/$BIN"
 case ":$PATH:" in
