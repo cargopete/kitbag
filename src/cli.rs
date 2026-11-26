@@ -21,6 +21,7 @@ use crate::profile_io::{self, MANIFEST};
 use crate::source;
 use crate::txn::{Status, Store};
 use crate::ui::{self, BOLD, CYAN, DIM, GREEN, RED, YELLOW, paint, tildify, visible, visible_line};
+use crate::why;
 
 const ABOUT: &str = "Pack your AI agent setup once, unpack it into any coding tool.";
 
@@ -37,6 +38,7 @@ Examples:
   kitbag apply ~/dotagents --to gemini-cli,antigravity
   kitbag status ~/dotagents
   kitbag sync ~/dotagents --from claude-code
+  kitbag doctor --why . --to claude,codex
   kitbag undo";
 
 #[derive(Parser, Debug)]
@@ -154,6 +156,18 @@ enum Cmd {
         source: Option<String>,
         #[command(flatten)]
         targets: TargetArgs,
+        /// Instead, show which instruction files each tool loads for DIR
+        /// (default: the current directory), in order, which files it skips
+        /// and why, and known traps. Shows every tool that reads instruction
+        /// files unless --to names some
+        #[arg(
+            long,
+            value_name = "DIR",
+            num_args = 0..=1,
+            default_missing_value = ".",
+            conflicts_with_all = ["source", "scope", "project", "path", "allow_insecure_source"]
+        )]
+        why: Option<PathBuf>,
     },
     /// Show supported tools, what each supports, and which are installed
     ListTargets {
@@ -520,7 +534,14 @@ pub fn run(cli: Cli) -> Result<i32> {
         ),
         Cmd::Undo { id, force } => cmd_undo(&context(home, None)?, id.as_deref(), force),
         Cmd::History { json } => cmd_history(&context(home, None)?, json),
-        Cmd::Doctor { source, targets } => cmd_doctor(
+        Cmd::Doctor {
+            why: Some(dir),
+            targets,
+            ..
+        } => cmd_doctor_why(home, &dir, &targets.to),
+        Cmd::Doctor {
+            source, targets, ..
+        } => cmd_doctor(
             &context(home, Some(&targets.place))?,
             source.as_deref(),
             &targets,
@@ -1940,6 +1961,73 @@ fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
         println!("{}", paint(RED, format!("{problems} problem(s) found.")));
         Ok(1)
     }
+}
+
+fn cmd_doctor_why(home: Option<&Path>, dir: &Path, to: &str) -> Result<i32> {
+    let dir = why::normalize(dir).with_context(|| format!("resolving {}", dir.display()))?;
+    if !dir.is_dir() {
+        bail!("{} is not a directory", dir.display());
+    }
+    let place = Place {
+        scope: Some(Scope::Project),
+        project: Some(dir.clone()),
+    };
+    let ctx = context(home, Some(&place))?;
+    let env = &ctx.env;
+    let ids: Vec<&'static str> = if matches!(to.trim(), "" | "detected") {
+        // Any tool may be started in a project, installed here or not.
+        why::TOOLS.to_vec()
+    } else {
+        select_targets(to, env, "to")?
+            .iter()
+            .map(|a| a.id())
+            .collect()
+    };
+    let place = why::Place {
+        env,
+        dir: dir.clone(),
+        sandboxed: home.is_some(),
+    };
+    println!(
+        "{}",
+        paint(
+            BOLD,
+            format!("Instruction files for {}", tildify(&dir, &env.home))
+        )
+    );
+    println!(
+        "{}",
+        paint(
+            DIM,
+            "What each tool reads when started here, in load order; nothing is run or changed"
+        )
+    );
+    for id in ids {
+        let report = why::explain(id, &place);
+        println!("\n{}", paint(BOLD, report.name));
+        let mut n = 0;
+        for e in &report.entries {
+            let label = match e.status {
+                why::Status::Loaded => {
+                    n += 1;
+                    paint(GREEN, format!("{:<10}", format!("load {n}")))
+                }
+                why::Status::Later => paint(CYAN, format!("{:<10}", e.status.label())),
+                why::Status::Skipped | why::Status::Unverified => {
+                    paint(YELLOW, format!("{:<10}", e.status.label()))
+                }
+                why::Status::Trap => paint(RED, format!("{:<10}", e.status.label())),
+                why::Status::Note => paint(DIM, format!("{:<10}", e.status.label())),
+            };
+            let path = e
+                .path
+                .as_deref()
+                .map(|p| format!("{}  ", tildify(p, &env.home)))
+                .unwrap_or_default();
+            println!("  {label} {path}{}", paint(DIM, visible_line(&e.why)));
+        }
+    }
+    Ok(0)
 }
 
 fn cmd_list_targets(ctx: &Ctx, as_json: bool) -> Result<i32> {
