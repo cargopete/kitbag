@@ -92,6 +92,9 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
         for i in s.validate() {
             issues.push(format!("mcp_servers.{name}: {i}"));
         }
+        for i in s.targeting_issues(&crate::adapters::ids()) {
+            issues.push(format!("mcp_servers.{name}: {i}"));
+        }
     }
     if !issues.is_empty() {
         return Err(ProfileError::new(
@@ -417,6 +420,25 @@ pub fn profile_files(p: &Profile) -> BTreeMap<String, Vec<u8>> {
         }
     }
     out
+}
+
+/// Carry the per-tool targeting (`targets` / `disabled_on`) of `old`'s MCP
+/// servers over to the same-named servers of a fresh capture, which can't
+/// know it. Returns the servers it was kept for.
+pub fn keep_targeting(new: &mut Profile, old: &Profile) -> Vec<String> {
+    let mut kept = Vec::new();
+    for (name, s) in &mut new.mcp_servers {
+        let Some(o) = old.mcp_servers.get(name) else {
+            continue;
+        };
+        if o.targets.is_none() && o.disabled_on.is_empty() {
+            continue;
+        }
+        s.targets.clone_from(&o.targets);
+        s.disabled_on.clone_from(&o.disabled_on);
+        kept.push(name.clone());
+    }
+    kept
 }
 
 /// Write a profile directory. Refuses to replace an existing profile unless `force`,
@@ -801,6 +823,70 @@ mod tests {
         let e = load(dir.path()).unwrap_err();
         assert!(
             e.to_string().contains("symbolic links are not allowed"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn keeps_targeting_on_recapture() {
+        let mut old = sample();
+        let gh = old.mcp_servers.get_mut("github").unwrap();
+        gh.targets = Some(vec!["claude-code".into()]);
+        let mut new = sample();
+        new.mcp_servers.insert(
+            "other".into(),
+            McpServer {
+                command: Some("x".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(keep_targeting(&mut new, &old), vec!["github"]);
+        assert_eq!(
+            new.mcp_servers["github"].targets,
+            Some(vec!["claude-code".to_string()])
+        );
+        assert_eq!(new.mcp_servers["other"].targets, None);
+        // A profile without targeting renders exactly as before.
+        assert!(!manifest_toml(&sample()).contains("targets"));
+    }
+
+    #[test]
+    fn targeting_fields_load_and_save() {
+        let text = "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\ntargets = [\"claude-code\"]\n[mcp_servers.b]\ncommand = \"b\"\ndisabled_on = [\"cursor\"]\n[mcp_servers.c]\ncommand = \"c\"\nonly = [\"codex\"]\n[mcp_servers.d]\ncommand = \"d\"\nexcept = [\"gemini-cli\"]\n";
+        let p = parse_manifest(text, Path::new("k")).unwrap();
+        assert_eq!(p.mcp_servers["a"].targets, Some(vec!["claude-code".into()]));
+        assert_eq!(p.mcp_servers["b"].disabled_on, vec!["cursor".to_string()]);
+        // The older names still load, and are written with the new ones.
+        assert_eq!(p.mcp_servers["c"].targets, Some(vec!["codex".into()]));
+        assert_eq!(
+            p.mcp_servers["d"].disabled_on,
+            vec!["gemini-cli".to_string()]
+        );
+        let out = manifest_toml(&p);
+        assert!(
+            out.contains("[mcp_servers.a]\ncommand = \"a\"\ntargets = [\"claude-code\"]"),
+            "{out}"
+        );
+        assert!(out.contains("disabled_on = [\"cursor\"]"), "{out}");
+        assert_eq!(parse_manifest(&out, Path::new("k")).unwrap(), p);
+    }
+
+    #[test]
+    fn targeting_errors() {
+        let both = "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\ntargets = [\"codex\"]\ndisabled_on = [\"cursor\"]\n";
+        let e = parse_manifest(both, Path::new("k")).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("mcp_servers.a: set either 'targets'"),
+            "{e}"
+        );
+        let unknown =
+            "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\ntargets = [\"claude\"]\n";
+        let e = parse_manifest(unknown, Path::new("k")).unwrap_err();
+        assert!(
+            e.to_string().contains(
+                "unknown target 'claude' in 'targets'; valid targets: claude-code, cursor, codex, gemini-cli, claude-desktop"
+            ),
             "{e}"
         );
     }

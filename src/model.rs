@@ -71,12 +71,14 @@ pub struct McpServer {
     /// HTTP headers for remote servers. Values may contain `${VAR}` references.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
-    /// Only apply this server to these target ids.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub only: Vec<String>,
-    /// Never apply this server to these target ids.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub except: Vec<String>,
+    /// Only apply this server to these target ids (an allow-list).
+    /// `only` is the older name.
+    #[serde(default, alias = "only", skip_serializing_if = "Option::is_none")]
+    pub targets: Option<Vec<String>>,
+    /// Never apply this server to these target ids (a deny-list).
+    /// `except` is the older name.
+    #[serde(default, alias = "except", skip_serializing_if = "Vec::is_empty")]
+    pub disabled_on: Vec<String>,
     /// Keep the definition but mark it disabled where the target supports that.
     #[serde(default, skip_serializing_if = "is_false")]
     pub disabled: bool,
@@ -92,10 +94,52 @@ impl McpServer {
     }
 
     pub fn applies_to(&self, target: &str) -> bool {
-        if !self.only.is_empty() && !self.only.iter().any(|t| t == target) {
-            return false;
+        self.skip_reason(target).is_none()
+    }
+
+    /// Why this server is not applied to `target`, or `None` when it is.
+    pub fn skip_reason(&self, target: &str) -> Option<&'static str> {
+        if let Some(only) = &self.targets
+            && !only.iter().any(|t| t == target)
+        {
+            return Some("not in its 'targets'");
         }
-        !self.except.iter().any(|t| t == target)
+        self.disabled_on
+            .iter()
+            .any(|t| t == target)
+            .then_some("listed in 'disabled_on'")
+    }
+
+    /// Problems with `targets` / `disabled_on`, given the valid target ids.
+    pub fn targeting_issues(&self, valid: &[&str]) -> Vec<String> {
+        let mut issues = Vec::new();
+        if self.targets.is_some() && !self.disabled_on.is_empty() {
+            issues.push(
+                "set either 'targets' (only these tools) or 'disabled_on' (all but these), not both"
+                    .into(),
+            );
+        }
+        if self.targets.as_ref().is_some_and(Vec::is_empty) {
+            issues.push(
+                "'targets' is empty, so the server would apply nowhere; list at least one target, or remove the server"
+                    .into(),
+            );
+        }
+        let lists = [
+            ("targets", self.targets.as_deref().unwrap_or_default()),
+            ("disabled_on", self.disabled_on.as_slice()),
+        ];
+        for (field, ids) in lists {
+            for id in ids {
+                if !valid.contains(&id.as_str()) {
+                    issues.push(format!(
+                        "unknown target '{id}' in '{field}'; valid targets: {}",
+                        valid.join(", ")
+                    ));
+                }
+            }
+        }
+        issues
     }
 
     /// Every string value in the definition, with a human-readable location.
@@ -340,19 +384,49 @@ mod tests {
     }
 
     #[test]
-    fn only_and_except() {
+    fn targets_and_disabled_on() {
         let s = McpServer {
-            only: vec!["codex".into()],
+            targets: Some(vec!["codex".into()]),
             ..Default::default()
         };
         assert!(s.applies_to("codex"));
         assert!(!s.applies_to("cursor"));
+        assert_eq!(s.skip_reason("cursor"), Some("not in its 'targets'"));
         let s = McpServer {
-            except: vec!["codex".into()],
+            disabled_on: vec!["codex".into()],
             ..Default::default()
         };
         assert!(!s.applies_to("codex"));
         assert!(s.applies_to("cursor"));
+        assert_eq!(s.skip_reason("codex"), Some("listed in 'disabled_on'"));
+        assert!(McpServer::default().applies_to("codex"));
+    }
+
+    #[test]
+    fn targeting_issues() {
+        let valid = ["claude-code", "codex"];
+        let both = McpServer {
+            targets: Some(vec!["codex".into()]),
+            disabled_on: vec!["claude-code".into()],
+            ..Default::default()
+        };
+        let issues = both.targeting_issues(&valid);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].contains("not both"));
+        let unknown = McpServer {
+            disabled_on: vec!["vscode".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            unknown.targeting_issues(&valid),
+            vec!["unknown target 'vscode' in 'disabled_on'; valid targets: claude-code, codex"]
+        );
+        let empty = McpServer {
+            targets: Some(Vec::new()),
+            ..Default::default()
+        };
+        assert!(empty.targeting_issues(&valid)[0].contains("'targets' is empty"));
+        assert!(McpServer::default().targeting_issues(&valid).is_empty());
     }
 
     #[test]

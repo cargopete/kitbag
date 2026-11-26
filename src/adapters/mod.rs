@@ -167,6 +167,10 @@ pub struct ApplyOptions {
     pub secrets: SecretsMode,
     /// Id of managed blocks in shared files (CLAUDE.md, AGENTS.md ...).
     pub block_id: String,
+    /// MCP server entries earlier applies wrote that still stand (see
+    /// [`crate::sync::applied_servers`]). A server the profile disables for a
+    /// tool is only removed from it when one of these says kitbag put it there.
+    pub applied_servers: Vec<crate::sync::ServerRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -185,12 +189,32 @@ pub struct Work {
     pub notes: Vec<Note>,
     /// (target, server name) of every MCP server entry the plan adds or changes.
     pub changed_servers: Vec<(String, String)>,
+    /// Name of the profile being applied.
+    pub profile: String,
+    /// (target, server name) of profile servers not applied to that target
+    /// because of `targets` / `disabled_on`.
+    pub skipped_servers: Vec<(String, String)>,
+    /// (target, server name) of MCP server entries the plan removes.
+    pub removed_servers: Vec<(String, String)>,
+    /// MCP server entries the plan writes or removes, for the state records.
+    pub server_writes: Vec<ServerWrite>,
     /// Instruction blocks and rule files kitbag manages, written or not, for
     /// drift detection (`kitbag status`).
     pub tracked: Vec<Tracked>,
     /// (target, `command <name>` / `skill <name>`) of every command and skill
     /// the plan writes.
     pub changed_items: Vec<(String, String)>,
+}
+
+/// One MCP server entry a plan writes (`hash` is its [`crate::sync::entry_hash`])
+/// or removes (`hash` is `None`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerWrite {
+    pub target: String,
+    /// The config file, as the adapter spelled it until the plan resolves it.
+    pub path: PathBuf,
+    pub name: String,
+    pub hash: Option<String>,
 }
 
 /// One instructions item kitbag manages in a tool: a managed block in a

@@ -414,11 +414,11 @@ fn claude_desktop_apply_resolves_and_skips_remote() {
 }
 
 #[test]
-fn only_and_except_filter_servers() {
+fn targets_and_disabled_on_filter_servers() {
     let sb = Sandbox::empty();
     let mut prof = sample();
-    prof.mcp_servers.get_mut("github").unwrap().only = vec!["codex".into()];
-    prof.mcp_servers.get_mut("linear").unwrap().except = vec!["claude-code".into()];
+    prof.mcp_servers.get_mut("github").unwrap().targets = Some(vec!["codex".into()]);
+    prof.mcp_servers.get_mut("linear").unwrap().disabled_on = vec!["claude-code".into()];
     let p = plan(&prof, &["claude-code", "codex"], &sb.env(Scope::User));
     assert!(
         planned(&p, &sb.home().join(".claude.json")).is_none(),

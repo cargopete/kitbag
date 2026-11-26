@@ -1,0 +1,342 @@
+//! Per-tool targeting of MCP servers (`targets` / `disabled_on`): servers are
+//! only applied where the profile enables them, and a server kitbag applied
+//! to a tool earlier is removed from it once the profile disables it there.
+
+mod common;
+
+use std::fs;
+
+use common::*;
+use predicates::prelude::*;
+use predicates::str::contains;
+
+const CURSOR: &str = "home/.cursor/mcp.json";
+const CLAUDE: &str = "home/.claude.json";
+const CODEX: &str = "home/.codex/config.toml";
+
+fn profile(name: &str, heavy_extra: &str) -> String {
+    format!(
+        "kitbag = 1\nname = \"{name}\"\n\n[mcp_servers.heavy]\ncommand = \"heavy-mcp\"\nargs = [\"--big\"]\n{heavy_extra}\n[mcp_servers.light]\ncommand = \"light-mcp\"\n"
+    )
+}
+
+fn write_profile(sb: &Sandbox, dir: &str, text: &str) {
+    fs::create_dir_all(sb.path(dir)).unwrap();
+    fs::write(sb.path(&format!("{dir}/kitbag.toml")), text).unwrap();
+}
+
+fn apply(sb: &Sandbox, src: &str, to: &str) -> String {
+    let out = sb
+        .cli()
+        .args(["apply", src, "--to", to, "--yes"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    stdout
+}
+
+fn cursor_has(sb: &Sandbox, name: &str) -> bool {
+    sb.json(CURSOR)["mcpServers"].get(name).is_some()
+}
+
+#[test]
+fn servers_are_only_applied_where_enabled() {
+    let sb = Sandbox::empty();
+    write_profile(
+        &sb,
+        "p",
+        &profile("shared", "targets = [\"claude-code\"]\n"),
+    );
+    sb.cli()
+        .args(["diff", "p", "--to", "claude-code,cursor"])
+        .assert()
+        .success()
+        .stdout(contains(
+            "MCP server 'heavy' skipped on cursor: disabled in profile (not in its 'targets')",
+        ));
+    let out = apply(&sb, "p", "claude-code,cursor");
+    assert!(
+        out.contains("skipped on cursor: disabled in profile"),
+        "{out}"
+    );
+    let claude = sb.json(CLAUDE);
+    assert!(claude["mcpServers"].get("heavy").is_some());
+    assert!(claude["mcpServers"].get("light").is_some());
+    assert!(!cursor_has(&sb, "heavy"));
+    assert!(cursor_has(&sb, "light"));
+
+    // The deny-list form.
+    let sb = Sandbox::empty();
+    write_profile(&sb, "p", &profile("shared", "disabled_on = [\"codex\"]\n"));
+    let out = apply(&sb, "p", "cursor,codex");
+    assert!(
+        out.contains(
+            "MCP server 'heavy' skipped on codex: disabled in profile (listed in 'disabled_on')"
+        ),
+        "{out}"
+    );
+    assert!(cursor_has(&sb, "heavy"));
+    let codex = sb.read(CODEX);
+    assert!(!codex.contains("heavy"), "{codex}");
+    assert!(codex.contains("[mcp_servers.light]"), "{codex}");
+}
+
+#[test]
+fn bad_targeting_is_an_error() {
+    let sb = Sandbox::empty();
+    write_profile(&sb, "p", &profile("shared", "targets = [\"vscode\"]\n"));
+    sb.cli()
+        .args(["diff", "p", "--to", "cursor"])
+        .assert()
+        .failure()
+        .stderr(contains(
+            "mcp_servers.heavy: unknown target 'vscode' in 'targets'; valid targets: claude-code, cursor, codex, gemini-cli, claude-desktop",
+        ));
+    write_profile(
+        &sb,
+        "p",
+        &profile(
+            "shared",
+            "targets = [\"cursor\"]\ndisabled_on = [\"codex\"]\n",
+        ),
+    );
+    sb.cli()
+        .args(["diff", "p", "--to", "cursor"])
+        .assert()
+        .failure()
+        .stderr(contains("set either 'targets'").and(contains("not both")));
+}
+
+#[test]
+fn disabling_removes_what_kitbag_applied_and_undo_restores_it() {
+    let sb = Sandbox::empty();
+    write_profile(&sb, "p", &profile("shared", ""));
+    apply(&sb, "p", "claude-code,cursor,codex");
+    assert!(cursor_has(&sb, "heavy"));
+    assert!(sb.read(CODEX).contains("[mcp_servers.heavy]"));
+    let codex_before = sb.read(CODEX);
+    let cursor_before = sb.read(CURSOR);
+
+    write_profile(
+        &sb,
+        "p",
+        &profile("shared", "disabled_on = [\"cursor\", \"codex\"]\n"),
+    );
+    sb.cli()
+        .args(["diff", "p", "--to", "claude-code,cursor,codex"])
+        .assert()
+        .success()
+        .stdout(
+            contains("MCP servers removed (disabled for these tools in the profile")
+                .and(contains("heavy  (cursor, codex)")),
+        );
+    sb.cli()
+        .args(["status", "p", "--to", "cursor"])
+        .assert()
+        .success()
+        .stdout(contains("mcp heavy").and(contains("apply removes it")));
+
+    let out = apply(&sb, "p", "claude-code,cursor,codex");
+    assert!(out.contains("MCP server 'heavy' removed from"), "{out}");
+    assert!(!cursor_has(&sb, "heavy"));
+    assert!(cursor_has(&sb, "light"));
+    let codex = sb.read(CODEX);
+    assert!(!codex.contains("heavy"), "{codex}");
+    assert!(codex.contains("[mcp_servers.light]"), "{codex}");
+    assert!(sb.json(CLAUDE)["mcpServers"].get("heavy").is_some());
+
+    // Applying again has nothing left to do.
+    let out = apply(&sb, "p", "claude-code,cursor,codex");
+    assert!(out.contains("Up to date"), "{out}");
+
+    // Undo puts the removed servers back, byte for byte.
+    sb.cli().arg("undo").assert().success();
+    assert_eq!(sb.read(CURSOR), cursor_before);
+    assert_eq!(sb.read(CODEX), codex_before);
+
+    // After the undo the earlier record stands again, so a re-apply removes them again.
+    apply(&sb, "p", "claude-code,cursor,codex");
+    assert!(!cursor_has(&sb, "heavy"));
+    assert!(!sb.read(CODEX).contains("heavy"));
+
+    // Enabling it again is an ordinary addition.
+    write_profile(&sb, "p", &profile("shared", ""));
+    let out = apply(&sb, "p", "cursor");
+    assert!(out.contains("MCP servers added or changed"), "{out}");
+    assert!(cursor_has(&sb, "heavy"));
+}
+
+#[test]
+fn hand_added_servers_are_never_removed() {
+    let sb = Sandbox::empty();
+    let mine = "{\n  \"mcpServers\": {\n    \"heavy\": { \"command\": \"heavy-mcp\", \"args\": [\"--big\"] }\n  }\n}\n";
+    fs::create_dir_all(sb.path("home/.cursor")).unwrap();
+    fs::write(sb.path(CURSOR), mine).unwrap();
+    write_profile(&sb, "p", &profile("shared", "disabled_on = [\"cursor\"]\n"));
+    let out = apply(&sb, "p", "cursor");
+    assert!(
+        out.contains("kitbag has no record of adding it to"),
+        "{out}"
+    );
+    assert!(cursor_has(&sb, "heavy"));
+    assert!(cursor_has(&sb, "light"));
+    sb.cli()
+        .args(["status", "p", "--to", "cursor"])
+        .assert()
+        .success()
+        .stdout(contains("apply leaves it"));
+}
+
+#[test]
+fn edited_servers_and_other_profiles_servers_are_left_alone() {
+    let sb = Sandbox::empty();
+    write_profile(&sb, "p", &profile("shared", ""));
+    apply(&sb, "p", "cursor,codex");
+
+    // Edited in Cursor since kitbag wrote it.
+    let edited = sb
+        .read(CURSOR)
+        .replace("\"--big\"", "\"--big\", \"--mine\"");
+    fs::write(sb.path(CURSOR), &edited).unwrap();
+    write_profile(
+        &sb,
+        "p",
+        &profile("shared", "disabled_on = [\"cursor\", \"codex\"]\n"),
+    );
+    let out = apply(&sb, "p", "cursor,codex");
+    assert!(
+        out.contains("it was edited in") && out.contains("since kitbag added it"),
+        "{out}"
+    );
+    assert!(cursor_has(&sb, "heavy"));
+    assert!(
+        !sb.read(CODEX).contains("heavy"),
+        "codex was unchanged, so it goes"
+    );
+
+    // A different profile that disables it doesn't remove what "shared" applied.
+    let sb = Sandbox::empty();
+    write_profile(&sb, "p", &profile("shared", ""));
+    apply(&sb, "p", "cursor");
+    write_profile(&sb, "q", &profile("other", "disabled_on = [\"cursor\"]\n"));
+    let out = apply(&sb, "q", "cursor");
+    assert!(out.contains("profile 'shared' added it"), "{out}");
+    assert!(cursor_has(&sb, "heavy"));
+}
+
+#[test]
+fn no_overwrite_keeps_disabled_servers() {
+    let sb = Sandbox::empty();
+    write_profile(&sb, "p", &profile("shared", ""));
+    apply(&sb, "p", "cursor");
+    write_profile(&sb, "p", &profile("shared", "disabled_on = [\"cursor\"]\n"));
+    sb.cli()
+        .args(["apply", "p", "--to", "cursor", "--yes", "--no-overwrite"])
+        .assert()
+        .success()
+        .stdout(contains("because --no-overwrite was given"));
+    assert!(cursor_has(&sb, "heavy"));
+}
+
+#[test]
+fn a_remote_profile_cannot_silently_re_enable_a_server() {
+    if !has_git() {
+        return;
+    }
+    let sb = Sandbox::empty();
+    let v1 = sb.git_profile("v1", &[("kitbag.toml", &profile("shared", ""))]);
+    let out = apply_remote(&sb, &v1, &["--allow-git-mcp", "heavy,light"]);
+    assert!(out.contains("Wrote"), "{out}");
+    assert!(cursor_has(&sb, "heavy"));
+
+    // The repository now disables it for Cursor: removing it needs no opt-in.
+    let v2 = sb.git_profile(
+        "v2",
+        &[(
+            "kitbag.toml",
+            &profile("shared", "disabled_on = [\"cursor\"]\n"),
+        )],
+    );
+    let out = apply_remote(&sb, &v2, &[]);
+    assert!(out.contains("MCP server 'heavy' removed from"), "{out}");
+    assert!(!cursor_has(&sb, "heavy"));
+
+    // Enabling it again is an addition, held back like any other.
+    let v3 = sb.git_profile("v3", &[("kitbag.toml", &profile("shared", ""))]);
+    let out = apply_remote(&sb, &v3, &[]);
+    assert!(
+        out.contains("MCP servers not applied (from a git source)") && out.contains("heavy"),
+        "{out}"
+    );
+    assert!(!cursor_has(&sb, "heavy"));
+    let out = apply_remote(&sb, &v3, &["--allow-git-mcp", "heavy"]);
+    assert!(
+        out.contains("Review the MCP servers it adds or changes"),
+        "{out}"
+    );
+    assert!(cursor_has(&sb, "heavy"));
+}
+
+fn apply_remote(sb: &Sandbox, url: &str, extra: &[&str]) -> String {
+    let out = sb
+        .cli()
+        .args(["apply", url, "--to", "cursor", "--yes"])
+        .args(extra)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    stdout
+}
+
+#[test]
+fn recapture_keeps_targeting() {
+    let sb = Sandbox::empty();
+    write_profile(
+        &sb,
+        "p",
+        &profile("shared", "targets = [\"claude-code\", \"cursor\"]\n"),
+    );
+    apply(&sb, "p", "claude-code");
+    sb.cli()
+        .args(["capture", "--from", "claude-code", "-o", "p", "--force"])
+        .assert()
+        .success()
+        .stdout(contains("kept 'targets' / 'disabled_on'").and(contains("heavy")));
+    let text = sb.read("p/kitbag.toml");
+    assert!(
+        text.contains("targets = [\"claude-code\", \"cursor\"]"),
+        "{text}"
+    );
+    // Servers without targeting are written as before.
+    let light = text.split("[mcp_servers.light]").nth(1).unwrap();
+    assert!(!light.contains("targets"), "{text}");
+}
+
+#[test]
+fn sync_removes_disabled_servers_too() {
+    let sb = Sandbox::empty();
+    write_profile(&sb, "p", &profile("shared", ""));
+    apply(&sb, "p", "claude-code,cursor");
+    write_profile(
+        &sb,
+        "p",
+        &profile("shared", "targets = [\"claude-code\"]\n"),
+    );
+    sb.cli()
+        .args(["sync", "p", "--to", "claude-code,cursor", "--yes"])
+        .assert()
+        .success()
+        .stdout(contains("MCP server 'heavy' removed from"));
+    assert!(!cursor_has(&sb, "heavy"));
+    assert!(sb.json(CLAUDE)["mcpServers"].get("heavy").is_some());
+}
