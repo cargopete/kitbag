@@ -75,8 +75,7 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
         for (n, s) in c.profile.mcp_servers {
             match merged.mcp_servers.get(&n) {
                 None => {
-                    let prefix = format!("mcp_servers.{n}.");
-                    out.redactions.extend(c.redactions.iter().filter(|r| r.location.starts_with(&prefix)).cloned());
+                    out.redactions.extend(c.redactions.iter().filter(|r| r.server.as_ref() == Some(&n)).cloned());
                     merged.mcp_servers.insert(n, s);
                 }
                 Some(prev) if *prev != s => out.notes.push(note(
@@ -87,10 +86,9 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
                 // Alike once redacted, but holding other secrets: the profile's
                 // variables stand for the first tool's values.
                 Some(_) if {
-                    let prefix = format!("mcp_servers.{n}.");
                     let fps = |list: &[Redaction]| -> Vec<(String, Option<String>)> {
                         list.iter()
-                            .filter(|r| r.location.starts_with(&prefix))
+                            .filter(|r| r.server.as_ref() == Some(&n))
                             .map(|r| (r.location.clone(), r.fingerprint.clone()))
                             .collect()
                     };
@@ -157,15 +155,6 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
 /// servers with different secrets under the same key would end up sharing one
 /// variable. Give later servers their own, prefixed variable instead.
 fn dedupe_env_vars(out: &mut CaptureResult) {
-    let server_of = |loc: &str, names: &[String]| -> Option<String> {
-        let rest = loc.strip_prefix("mcp_servers.")?;
-        names
-            .iter()
-            .filter(|n| rest.starts_with(&format!("{n}.")))
-            .max_by_key(|n| n.len())
-            .cloned()
-    };
-    let names: Vec<String> = out.profile.mcp_servers.keys().cloned().collect();
     let redacted: BTreeSet<&str> = out.redactions.iter().map(|r| r.location.as_str()).collect();
     // Variables the configs already referenced themselves: (server, no fingerprint).
     let mut owner: BTreeMap<String, (String, Option<String>)> = BTreeMap::new();
@@ -180,7 +169,7 @@ fn dedupe_env_vars(out: &mut CaptureResult) {
         }
     }
     for r in &mut out.redactions {
-        let Some(server) = server_of(&r.location, &names) else {
+        let Some(server) = r.server.clone() else {
             continue;
         };
         match owner.get(&r.env_var) {

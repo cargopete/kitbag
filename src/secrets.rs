@@ -553,6 +553,9 @@ pub struct Redaction {
     /// SHA-256 of the redacted value (set during capture), so identical secrets
     /// can share one variable while different ones never do.
     pub fingerprint: Option<String>,
+    /// The MCP server the value came from. Server names may contain dots
+    /// (`a.b`), so the server can't be read back from `location` reliably.
+    pub server: Option<String>,
 }
 
 /// `ENV_VAR_NAME` built from parts (`"github", "apiKey"` -> `GITHUB_API_KEY`).
@@ -627,6 +630,7 @@ impl Found {
             env_var: name.clone(),
             reason,
             fingerprint: Some(fp),
+            server: None,
         });
         name
     }
@@ -653,6 +657,7 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
                             env_var: c[1].to_string(),
                             reason: "secret-fallback",
                             fingerprint: Some(fp),
+                            server: None,
                         });
                         reference(&c[1])
                     }
@@ -805,6 +810,9 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
         s.command = Some(replaced);
     }
 
+    for r in &mut found.redactions {
+        r.server = Some(server_name.to_string());
+    }
     (s, found.redactions)
 }
 

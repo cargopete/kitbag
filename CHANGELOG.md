@@ -15,6 +15,10 @@ All notable changes to this project are documented here. The format follows
 - Capture redacts hex-only tokens in URL paths (32 hex digits or more, such as `https://mcp.example.com/u/3f9a.../sse` or a classic 40-digit GitHub token), which the random-looking-segment check missed because it needs upper and lower case. Numeric ids, short ids and SHAs, and full commit SHAs (40 or 64 hex digits) after `commit`, `blob`, `tree` and the like or on `raw.githubusercontent.com` are kept (#37).
 - Two different secrets captured under the same name no longer end up behind one `${VAR}`. Within one server (an `API_KEY` in `env` and another in a `docker -e` argument, two passwords in two URLs, two tokens in one command) the second gets a numbered variable such as `${API_KEY_2}`, and the same secret repeated keeps its one variable. Across servers the prefixed name gets a number too when it is already taken. The same server captured from two tools with different secret values is now reported, as a server that differs is (#37).
 
+### Fixed
+
+- Capture matched secrets it redacted to MCP servers by location, so a server whose name contains a dot (`a.b`) also had its secrets counted under server `a`: they were listed twice and could raise a false "different secret values" warning. Each redaction now records its server (#53).
+
 ## [0.1.2] - 2026-11-26
 
 ### Added

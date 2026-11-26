@@ -514,6 +514,52 @@ fn a_server_with_other_secrets_in_a_second_tool_is_reported() {
     );
 }
 
+/// Server names may contain dots: redactions of `a.b` belong to `a.b`, not
+/// to `a`, so each is reported once and none trips the "different secret
+/// values" warning (#53).
+#[test]
+fn redactions_stay_with_servers_whose_names_contain_a_dot() {
+    let sb = Sandbox::empty();
+    fs::create_dir_all(sb.home().join(".cursor")).unwrap();
+    fs::write(
+        sb.home().join(".claude.json"),
+        r#"{"mcpServers": {
+            "a": {"command": "a", "env": {"TOKEN": "FakeSecretOne1"}},
+            "a.b": {"command": "b", "env": {"TOKEN": "FakeSecretTwo2"}}
+        }}"#,
+    )
+    .unwrap();
+    fs::write(
+        sb.home().join(".cursor/mcp.json"),
+        r#"{"mcpServers": {"a": {"command": "a", "env": {"TOKEN": "FakeSecretOne1"}}}}"#,
+    )
+    .unwrap();
+    let r = capture(&["claude-code", "cursor"], &sb.env(Scope::User));
+    let p = &r.profile;
+    assert_eq!(p.mcp_servers["a"].env["TOKEN"], "${TOKEN}");
+    assert_eq!(p.mcp_servers["a.b"].env["TOKEN"], "${A_B_TOKEN}");
+    let mut found: Vec<(Option<&str>, &str, &str)> = r
+        .redactions
+        .iter()
+        .map(|red| (red.server.as_deref(), red.location.as_str(), red.env_var.as_str()))
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        vec![
+            (Some("a"), "mcp_servers.a.env.TOKEN", "TOKEN"),
+            (Some("a.b"), "mcp_servers.a.b.env.TOKEN", "A_B_TOKEN"),
+        ]
+    );
+    assert!(
+        !r.notes
+            .iter()
+            .any(|n| n.message.contains("different secret values")),
+        "{:?}",
+        r.notes
+    );
+}
+
 #[test]
 fn header_args_without_a_space_are_redacted_and_captured() {
     let sb = Sandbox::empty();
