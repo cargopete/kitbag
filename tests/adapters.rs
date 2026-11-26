@@ -1279,19 +1279,125 @@ fn copilot_capture_reads_prompt_files_and_skills() {
 }
 
 #[test]
-fn copilot_capture_lists_custom_agents_it_leaves_behind() {
+fn copilot_captures_custom_agents_and_legacy_chat_modes() {
     let sb = Sandbox::empty();
-    let agent = sb.project().join(".github/agents/reviewer.agent.md");
-    std::fs::create_dir_all(agent.parent().unwrap()).unwrap();
-    std::fs::write(&agent, "---\ndescription: Reviews\n---\nReview.\n").unwrap();
+    let write = |rel: &str, text: &str| {
+        let p = sb.project().join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    };
+    write(
+        ".github/agents/reviewer.agent.md",
+        "---\ndescription: Reviews\ntools: ['read', 'search']\nmodel: GPT-5\nhandoffs:\n  - label: Fix\n    agent: fixer\n---\nReview.\n",
+    );
+    // A plain `.md` is an agent too; the `.agent.md` of the same name wins.
+    write(
+        ".github/agents/fixer.md",
+        "---\ndescription: Fixes\n---\nFix.\n",
+    );
+    write(".github/agents/reviewer.md", "Not this one.\n");
+    // Chat modes are the old name; the agent of the same name wins.
+    write(
+        ".github/chatmodes/planner.chatmode.md",
+        "---\ndescription: Plans\ntools: ['search']\n---\nPlan.\n",
+    );
+    write(".github/chatmodes/fixer.chatmode.md", "Old fixer.\n");
     let r = capture(&["copilot"], &sb.env(Scope::Project));
+    let names: Vec<&str> = r.profile.agents.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, ["fixer", "planner", "reviewer"]);
+    let reviewer = r
+        .profile
+        .agents
+        .iter()
+        .find(|a| a.name == "reviewer")
+        .unwrap();
+    assert_eq!(reviewer.description.as_deref(), Some("Reviews"));
+    assert_eq!(reviewer.body, "Review.");
+    assert_eq!(reviewer.extra["tools"], json!(["read", "search"]));
+    assert_eq!(reviewer.extra["model"], json!("GPT-5"));
+    assert_eq!(reviewer.extra["handoffs"][0]["agent"], json!("fixer"));
+    let fixer = r.profile.agents.iter().find(|a| a.name == "fixer").unwrap();
+    assert_eq!(fixer.body, "Fix.");
     assert!(
-        r.notes
-            .iter()
-            .any(|n| n.message.contains("not carried") && n.message.contains("custom agents")),
+        r.notes.iter().any(|n| n
+            .message
+            .contains("captured chat modes as agents (planner)")
+            && n.message.contains("old name")),
         "{:?}",
         r.notes
     );
+    assert!(!r.notes.iter().any(|n| n.message.contains("not carried")));
+}
+
+#[test]
+fn copilot_agents_that_flatten_to_the_same_name_fail_the_capture() {
+    let sb = Sandbox::empty();
+    let dir = sb.project().join(".github/agents");
+    std::fs::create_dir_all(dir.join("team")).unwrap();
+    std::fs::write(dir.join("team/x.agent.md"), "One.\n").unwrap();
+    std::fs::write(dir.join("team-x.agent.md"), "Two.\n").unwrap();
+    let err = kitbag::engine::capture(&targets(&["copilot"]), &sb.env(Scope::Project), "test")
+        .map(|_| ())
+        .expect_err("a flattened name clash is an error");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("both flatten to the name 'team-x'"), "{msg}");
+    assert!(msg.contains("team-x.agent.md"), "{msg}");
+
+    // The same clash across extensions is an error too, while `x.agent.md`
+    // and `x.md` (one path, two extensions) are still one agent.
+    std::fs::remove_file(dir.join("team-x.agent.md")).unwrap();
+    std::fs::write(dir.join("team-x.md"), "Three.\n").unwrap();
+    assert!(
+        kitbag::engine::capture(&targets(&["copilot"]), &sb.env(Scope::Project), "test").is_err()
+    );
+    std::fs::remove_file(dir.join("team-x.md")).unwrap();
+    std::fs::write(dir.join("team/x.md"), "Plain.\n").unwrap();
+    let r = capture(&["copilot"], &sb.env(Scope::Project));
+    assert_eq!(r.profile.agents.len(), 1);
+    assert_eq!(r.profile.agents[0].body, "One.");
+}
+
+#[test]
+fn copilot_skips_prompt_instructions_and_readme_files_among_agents() {
+    let sb = Sandbox::empty();
+    let dir = sb.project().join(".github/agents");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("writer.agent.md"), "Write.\n").unwrap();
+    std::fs::write(dir.join("helper.md"), "Help.\n").unwrap();
+    std::fs::write(dir.join("ship.prompt.md"), "Ship.\n").unwrap();
+    std::fs::write(dir.join("style.instructions.md"), "Style.\n").unwrap();
+    std::fs::write(dir.join("README.md"), "About these agents.\n").unwrap();
+    let r = capture(&["copilot"], &sb.env(Scope::Project));
+    let names: Vec<&str> = r.profile.agents.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, ["helper", "writer"]);
+    for (file, why) in [
+        ("ship.prompt.md", "a prompt file"),
+        ("style.instructions.md", "an instructions file"),
+        ("README.md", "a README"),
+    ] {
+        assert!(
+            r.notes
+                .iter()
+                .any(|n| n.message.contains(file) && n.message.contains(why)),
+            "{file}: {:?}",
+            r.notes
+        );
+    }
+}
+
+#[test]
+fn copilot_captures_user_agents_from_copilot_home() {
+    let sb = Sandbox::empty();
+    let dir = sb.home().join(".copilot/agents");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("writer.agent.md"),
+        "---\ndescription: Writes docs\n---\nWrite.\n",
+    )
+    .unwrap();
+    let r = capture(&["copilot"], &sb.env(Scope::User));
+    assert_eq!(r.profile.agents.len(), 1);
+    assert_eq!(r.profile.agents[0].name, "writer");
 }
 
 #[test]

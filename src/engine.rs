@@ -135,6 +135,7 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
         merge_named!(rules, "rule");
         merge_named!(commands, "command");
         merge_named!(skills, "skill");
+        merge_named!(agents, "agent");
         for (t, s) in c.profile.settings {
             merged.settings.entry(t).or_insert(s);
         }
@@ -253,7 +254,8 @@ pub struct Plan {
     /// [`ApplyOptions::hold`] (`sync` holds back hand edits). They are not in
     /// `items`, so the apply doesn't record them and they still show as edited.
     pub held_back: Vec<Item>,
-    /// (target, `command <name>` / `skill <name>`) of commands and skills the plan writes.
+    /// (target, `command <name>` / `skill <name>` / `agent <name>`) of
+    /// commands, skills and agents the plan writes.
     pub changed_items: Vec<(String, String)>,
     /// MCP servers the plan removes from a tool, because the profile now
     /// disables them there (`targets` / `disabled_on`).
@@ -333,6 +335,7 @@ pub fn plan(
             (Feature::Rules, profile.rules.len()),
             (Feature::Commands, profile.commands.len()),
             (Feature::Skills, profile.skills.len()),
+            (Feature::Agents, profile.agents.len()),
         ];
         for (f, n) in items {
             if n > 0 && a.supports(env.scope, f) == Support::None {
