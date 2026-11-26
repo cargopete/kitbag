@@ -251,8 +251,15 @@ pub fn entry_hash(v: &serde_json::Value) -> String {
     sha256(Some(sorted(v).to_string().as_bytes())).unwrap_or_default()
 }
 
+/// Where the next apply copies an unreadable `applied-servers.json` before
+/// starting it afresh.
+fn servers_backup(state_dir: &Path) -> PathBuf {
+    state_dir.join(format!("{SERVERS_FILE}.bak"))
+}
+
 /// The server records, and a warning when the file can't be parsed (it is
-/// then treated as empty, so nothing is removed, and the next apply replaces it).
+/// then treated as empty, so nothing is removed, and the next apply that
+/// writes a server copies it to `.bak` and replaces it).
 fn load_servers(state_dir: &Path) -> Result<(Vec<ServerRecord>, Option<String>)> {
     let path = state_dir.join(SERVERS_FILE);
     match fs::read_to_string(&path) {
@@ -261,8 +268,9 @@ fn load_servers(state_dir: &Path) -> Result<(Vec<ServerRecord>, Option<String>)>
             Err(e) => (
                 Vec::new(),
                 Some(format!(
-                    "could not read {} ({e}), so no MCP server is removed for being disabled in the profile; the next apply starts the file afresh",
-                    path.display()
+                    "could not read {} ({e}), so no MCP server is removed for being disabled in the profile; the next apply starts the file afresh and keeps the old one as {}",
+                    path.display(),
+                    servers_backup(state_dir).display()
                 )),
             ),
         }),
@@ -310,7 +318,14 @@ fn record_servers(
         return Ok(());
     }
     let now = now_ms();
-    let mut all = load_servers(state_dir)?.0;
+    let (mut all, unreadable) = load_servers(state_dir)?;
+    if unreadable.is_some() {
+        // The file is about to be started afresh; keep what was there so the
+        // records can still be recovered by hand.
+        let path = state_dir.join(SERVERS_FILE);
+        let data = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        write_atomic(&servers_backup(state_dir), &data, Some(0o600))?;
+    }
     for w in &plan.server_writes {
         all.push(ServerRecord {
             target: w.target.clone(),

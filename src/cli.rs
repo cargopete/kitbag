@@ -1160,6 +1160,22 @@ fn plan_apply(
     Ok((profile, plan))
 }
 
+/// The end of an "Up to date" line when the plan left in place MCP servers the
+/// profile disables (added by hand, by another profile or source, or edited),
+/// so the line doesn't read as if the tools matched the profile exactly.
+fn left_in_place(plan: &Plan) -> &'static str {
+    let kept = plan.notes.iter().any(|n| {
+        n.level == adapters::Level::Warn
+            && n.message.starts_with("MCP server '")
+            && n.message.contains("so it was left in place")
+    });
+    if kept {
+        ", except for MCP servers it disables that were left in place (see below)"
+    } else {
+        ""
+    }
+}
+
 fn print_skipped(plan: &Plan) {
     if !plan.skipped.is_empty() {
         println!(
@@ -1239,15 +1255,17 @@ fn present(
                 print_skipped(plan);
             } else if !plan.skipped.is_empty() {
                 println!(
-                    "{} {} already matches the profile.",
+                    "{} {} already matches the profile{}.",
                     paint(GREEN, "Up to date:"),
-                    plan.targets.join(", ")
+                    plan.targets.join(", "),
+                    left_in_place(plan)
                 );
                 print_skipped(plan);
             } else {
                 println!(
-                    "{} every target already matches the profile.",
-                    paint(GREEN, "Up to date:")
+                    "{} every target already matches the profile{}.",
+                    paint(GREEN, "Up to date:"),
+                    left_in_place(plan)
                 );
             }
         } else {
