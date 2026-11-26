@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Per-tool MCP servers: a server in the profile can list the only tools it applies to (`targets = ["claude-code"]`) or the tools it is kept out of (`disabled_on = ["cursor"]`), so one shared profile can keep a heavy server out of the tools that don't need it. Setting both, an empty `targets` or an unknown target name is an error that lists the valid targets; `only` and `except` still load as older names. `apply`, `diff` and `sync` note each server they skip (`skipped on cursor: disabled in profile`). A server kitbag applied to a tool before and the profile now disables there is removed from it in the same undoable apply, but only when kitbag's records (new `applied-servers.json` in the state directory) show the same profile wrote that entry and it is unchanged since; servers added by hand, by another profile or edited are left, and the plan says why. `status` shows such servers per tool. From a git source, a server enabled for a tool again is an addition and needs `--allow-git-mcp`. `capture --force` into an existing profile keeps `targets` / `disabled_on` (#33).
+
 ### Fixed
 
 - A bare `--allow-git-mcp` placed before the source (`kitbag apply --allow-git-mcp github:me/profile`) no longer takes the source as a server name; it means "allow all". A value that looks like a path or URL, or names a profile directory (one with a `kitbag.toml`), is treated as the source. `--allow-git-mcp NAME[,NAME]` and `--allow-git-mcp=NAME` work as before. (#41)

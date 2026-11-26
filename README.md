@@ -144,8 +144,8 @@ env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_PERSONAL_ACCESS_TOKEN}" }
 url = "https://mcp.linear.app/mcp"
 headers = { Authorization = "Bearer ${LINEAR_API_KEY}" }
 # transport = "sse"           # stdio | http | sse (only needed for legacy SSE)
-# only = ["claude-code"]      # restrict to these targets
-# except = ["claude-desktop"] # or exclude some
+# targets = ["claude-code"]   # only these tools (see "Per-tool MCP servers")
+# disabled_on = ["cursor"]    # or every tool except these
 # disabled = true             # keep the definition; Codex writes enabled = false, others skip it
 
 [settings.claude-code]        # per-tool settings, allow-listed keys only
@@ -159,6 +159,35 @@ model_reasoning_effort = "high"
 Unknown keys are rejected with a precise error rather than silently ignored. The format is
 versioned (`kitbag = 1`). Future incompatible changes will bump the number, and older kitbag
 releases will refuse newer profiles instead of misreading them.
+
+**Per-tool MCP servers.** One shared profile can keep a heavy server out of the tools that
+don't need it. `targets` lists the only tools a server is applied to; `disabled_on` lists the
+tools it is kept out of. Use one or the other, not both. Target names are those of
+`kitbag list-targets` (`claude-code`, `cursor`, `codex`, `gemini-cli`, `claude-desktop`); an
+unknown name is an error that lists the valid ones. `only` and `except` are accepted as older
+names for the same fields.
+
+```toml
+[mcp_servers.playwright]       # browser work in Claude Code only
+command = "npx"
+args = ["@playwright/mcp@latest"]
+targets = ["claude-code"]
+
+[mcp_servers.context7]         # everywhere but Cursor
+command = "npx"
+args = ["-y", "@upstash/context7-mcp"]
+disabled_on = ["cursor"]
+```
+
+The plan notes each server it skips (`MCP server 'playwright' skipped on cursor: disabled in
+profile`). If kitbag applied a server to a tool earlier and the profile now disables it there,
+apply removes it from that tool, with a backup, so `kitbag undo` puts it back. It only does so
+when kitbag's own records (`applied-servers.json` in the state directory) show that an apply of
+the same profile wrote that entry and it hasn't been edited since. A server you added by hand,
+one another profile added, or one you edited stays, and the plan says why. From a git source,
+a server that becomes enabled for a tool again is an addition like any other, so it needs
+`--allow-git-mcp`. `capture --force` into an existing profile keeps the `targets` and
+`disabled_on` of the servers it captures again.
 
 **Env references.** `${NAME}` takes its value from the environment. `${NAME:-fallback}`
 falls back to a non-secret default (it is written to disk wherever the variable is unset, so
@@ -350,7 +379,9 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
   `~/.local/state/kitbag` (`%LOCALAPPDATA%\kitbag` on Windows).
 
 Apply is additive: removing a server from the profile does not remove it from tools you
-already applied to. Use `kitbag undo`, or remove it in the tool.
+already applied to. Use `kitbag undo`, or remove it in the tool. (Disabling a server for a
+tool with `targets` / `disabled_on` does remove it there, if kitbag added it; see
+"Per-tool MCP servers".)
 
 ## Keeping instructions in sync
 
