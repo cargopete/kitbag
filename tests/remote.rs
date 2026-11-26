@@ -734,3 +734,42 @@ fn https_sources_that_end_up_on_cleartext_are_refused() {
             .stderr(contains("could not clone").and(contains("not allowed").not()));
     }
 }
+
+#[test]
+fn remote_servers_reach_opencode_only_with_the_opt_in() {
+    if !has_git() {
+        return;
+    }
+    let sb = Sandbox::empty();
+    let url = sb.git_profile(
+        "oc",
+        &[(
+            "kitbag.toml",
+            "kitbag = 1\nname = \"oc\"\n\n[mcp_servers.docs]\ncommand = \"npx\"\nargs = [\"-y\", \"docs-mcp\"]\n",
+        )],
+    );
+    let cfg = "home/.config/opencode/opencode.json";
+    sb.cli()
+        .args(["apply", &url, "--to", "opencode", "--yes"])
+        .assert()
+        .success();
+    assert!(
+        !sb.path(cfg).exists() || !sb.read(cfg).contains("docs-mcp"),
+        "held back without --allow-git-mcp"
+    );
+    sb.cli()
+        .args([
+            "apply",
+            &url,
+            "--to",
+            "opencode",
+            "--yes",
+            "--allow-git-mcp",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        sb.json(cfg)["mcp"]["servers"]["docs"]["command"],
+        serde_json::json!(["npx", "-y", "docs-mcp"])
+    );
+}

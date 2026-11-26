@@ -1,0 +1,10 @@
+{
+  "mcp": {
+    "playwright": {
+      "type": "local",
+      "command": ["npx", "@playwright/mcp@latest"],
+      "environment": { "PLAYWRIGHT_BROWSERS_PATH": "{env:HOME}/.cache/ms-playwright" },
+      "cwd": "web"
+    }
+  }
+}

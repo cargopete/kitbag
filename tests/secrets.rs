@@ -26,6 +26,7 @@ const ALL: &[&str] = &[
     "gemini-cli",
     "claude-desktop",
     "antigravity",
+    "opencode",
 ];
 
 #[test]
@@ -98,7 +99,7 @@ fn tools_with_interpolation_get_references_not_values() {
     let env = sb.env_with(Scope::User, &[("MY_TOKEN", "the-real-secret")]);
     let p = plan(
         &secret_profile(),
-        &["claude-code", "cursor", "gemini-cli"],
+        &["claude-code", "cursor", "gemini-cli", "opencode"],
         &env,
     );
     assert!(!p.changes.is_empty());

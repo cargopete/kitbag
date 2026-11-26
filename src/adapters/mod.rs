@@ -22,6 +22,7 @@ pub mod codex;
 pub mod common;
 pub mod cursor;
 pub mod gemini;
+pub mod opencode;
 
 /// Global (per-user) configuration or one project's configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -401,6 +402,7 @@ pub fn all() -> &'static [&'static dyn Adapter] {
         &gemini::GeminiCli,
         &claude_desktop::ClaudeDesktop,
         &antigravity::Antigravity,
+        &opencode::OpenCode,
     ]
 }
 

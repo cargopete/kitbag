@@ -22,6 +22,8 @@ static SOLE_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static ENV_COLON_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}").expect("valid regex"));
+static ENV_BRACE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(\$?)\{env:([A-Za-z_][A-Za-z0-9_]*)\}").expect("valid regex"));
 
 /// A `${NAME}` / `${NAME:-fallback}` reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +102,20 @@ pub fn normalize_refs(value: &str, bare_dollar: bool) -> String {
     out
 }
 
+/// Convert opencode's `{env:VAR}` references into canonical `${VAR}`.
+/// `${env:VAR}` is left for [`normalize_refs`].
+pub fn normalize_brace_refs(value: &str) -> String {
+    ENV_BRACE_RE
+        .replace_all(value, |c: &Captures| {
+            if c[1].is_empty() {
+                reference(&c[2])
+            } else {
+                c[0].to_string()
+            }
+        })
+        .into_owned()
+}
+
 /// How references are written for a target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefStyle {
@@ -109,6 +125,8 @@ pub enum RefStyle {
     DollarPlain,
     /// `${env:VAR}`; defaults are resolved now (Cursor, VS Code).
     EnvColon,
+    /// `{env:VAR}`; defaults are resolved now (opencode).
+    EnvBrace,
     /// Substitute values from the environment now.
     Resolve,
 }
@@ -151,11 +169,14 @@ pub fn render_refs(
                 fb.to_string()
             };
             match style {
-                RefStyle::EnvColon | RefStyle::DollarPlain => match (fallback, set) {
-                    (Some(fb), None) => use_fallback(fb),
-                    _ if style == RefStyle::EnvColon => format!("${{env:{name}}}"),
-                    _ => reference(name),
-                },
+                RefStyle::EnvColon | RefStyle::EnvBrace | RefStyle::DollarPlain => {
+                    match (fallback, set) {
+                        (Some(fb), None) => use_fallback(fb),
+                        _ if style == RefStyle::EnvColon => format!("${{env:{name}}}"),
+                        _ if style == RefStyle::EnvBrace => format!("{{env:{name}}}"),
+                        _ => reference(name),
+                    }
+                }
                 _ => match (set, fallback) {
                     (Some(v), _) => {
                         if v.len() >= 4 {
@@ -1711,6 +1732,14 @@ mod tests {
         assert_eq!(normalize_refs("$API_KEY", false), "$API_KEY");
         assert_eq!(normalize_refs("$A-$B ${C}", true), "${A}-${B} ${C}");
         assert_eq!(normalize_refs("cost: \\$5", true), "cost: \\$5");
+        assert_eq!(
+            normalize_brace_refs("Bearer {env:API_KEY} {env:B}"),
+            "Bearer ${API_KEY} ${B}"
+        );
+        assert_eq!(
+            normalize_brace_refs("${env:A} {file:~/k}"),
+            "${env:A} {file:~/k}"
+        );
     }
 
     #[test]
@@ -1726,6 +1755,10 @@ mod tests {
         assert_eq!(
             render_refs(v, RefStyle::DollarPlain, &e, &mut st),
             "${SET} fb ${MISSING}"
+        );
+        assert_eq!(
+            render_refs(v, RefStyle::EnvBrace, &e, &mut st),
+            "{env:SET} fb {env:MISSING}"
         );
         assert!(st.missing.is_empty() && st.resolved.is_empty());
         assert_eq!(

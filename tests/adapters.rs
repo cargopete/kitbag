@@ -670,3 +670,320 @@ fn antigravity_codex_and_cursor_share_agents_md() {
     );
     assert!(plan(&prof, &["antigravity"], &env).changes.is_empty());
 }
+
+// ---------------------------------------------------------------- opencode
+
+#[test]
+fn opencode_capture() {
+    let sb = Sandbox::fixtures();
+    let r = capture(&["opencode"], &sb.env(Scope::User));
+    let p = &r.profile;
+    // `{env:VAR}` comes back as ${VAR}; opencode-only keys (oauth, codemode) stay behind.
+    let c7 = &p.mcp_servers["context7"];
+    assert_eq!(c7.url.as_deref(), Some("https://mcp.context7.com/mcp"));
+    assert_eq!(c7.transport(), Transport::Http);
+    assert_eq!(c7.headers["CONTEXT7_API_KEY"], "${CONTEXT7_API_KEY}");
+    // The command array splits into command and args; the literal token is redacted.
+    let sentry = &p.mcp_servers["sentry"];
+    assert_eq!(sentry.command.as_deref(), Some("npx"));
+    assert_eq!(sentry.args, vec!["-y", "@sentry/mcp-server"]);
+    assert_eq!(sentry.env["SENTRY_ACCESS_TOKEN"], "${SENTRY_ACCESS_TOKEN}");
+    assert!(p.mcp_servers["time"].disabled);
+    assert!(!p.mcp_servers.contains_key("timeout"));
+    assert_eq!(p.instructions.as_deref(), Some("Keep commits small."));
+
+    // The project uses opencode 1's layout, in .opencode/opencode.json.
+    let p = capture(&["opencode"], &sb.env(Scope::Project)).profile;
+    let pw = &p.mcp_servers["playwright"];
+    assert_eq!(pw.command.as_deref(), Some("npx"));
+    assert_eq!(pw.args, vec!["@playwright/mcp@latest"]);
+    assert_eq!(pw.cwd.as_deref(), Some("web"));
+    assert_eq!(
+        pw.env["PLAYWRIGHT_BROWSERS_PATH"],
+        "${HOME}/.cache/ms-playwright"
+    );
+    assert!(p.instructions.as_deref().unwrap().contains("pnpm test"));
+}
+
+#[test]
+fn opencode_capture_reads_both_layouts_and_warns_about_bad_entries() {
+    let sb = Sandbox::empty();
+    let dir = sb.home().join(".config/opencode");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("opencode.json"),
+        r#"{
+  "mcp": {
+    "servers": { "a": { "type": "remote", "url": "https://a.example.com/mcp" } },
+    "old": { "type": "local", "command": ["old-mcp"], "enabled": false },
+    "odd": { "type": "websocket", "url": "wss://x" },
+    "keyfile": { "type": "local", "command": ["k"], "environment": { "KEY": "{file:~/.secrets/k}" } }
+  },
+  "instructions": ["CONTRIBUTING.md"]
+}
+"#,
+    )
+    .unwrap();
+    let r = capture(&["opencode"], &sb.env(Scope::User));
+    let s = &r.profile.mcp_servers;
+    assert!(s.contains_key("a"));
+    assert!(s["old"].disabled);
+    assert!(!s.contains_key("odd"));
+    let msgs: Vec<&str> = r.notes.iter().map(|n| n.message.as_str()).collect();
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("'odd'") && m.contains("type 'websocket'")),
+        "{msgs:?}"
+    );
+    assert!(msgs.iter().any(|m| m.contains("{file:...}")), "{msgs:?}");
+    assert!(
+        msgs.iter().any(|m| m.contains("under 'instructions'")),
+        "{msgs:?}"
+    );
+}
+
+#[test]
+fn opencode_apply_user() {
+    let sb = Sandbox::empty();
+    let env = sb.env_with(Scope::User, &[("GITHUB_TOKEN", "ghp_FAKEvalue123")]);
+    let p = plan(&sample(), &["opencode"], &env);
+    let cfg_path = sb.home().join(".config/opencode/opencode.json");
+    let cfg: serde_json::Value = serde_json::from_str(&planned(&p, &cfg_path).unwrap()).unwrap();
+    // opencode expands {env:VAR}: the secret is never written.
+    assert_eq!(
+        cfg["mcp"]["servers"]["github"],
+        json!({"type": "local", "command": ["npx", "-y", "@modelcontextprotocol/server-github"], "environment": {"GITHUB_TOKEN": "{env:GITHUB_TOKEN}"}})
+    );
+    assert_eq!(
+        cfg["mcp"]["servers"]["linear"],
+        json!({"type": "remote", "url": "https://mcp.linear.app/mcp", "headers": {"Authorization": "Bearer {env:LINEAR_API_KEY}"}})
+    );
+    assert!(p.sensitive.is_empty());
+    let md = planned(&p, &sb.home().join(".config/opencode/AGENTS.md")).unwrap();
+    assert!(md.contains("<!-- kitbag:begin team -->") && md.contains("Use British English."));
+    assert!(!md.contains("kitbag:rule"), "rules are not supported yet");
+    assert!(p.notes.iter().any(|n| n.target == "opencode"
+        && n.message.contains("not supported")
+        && n.message.contains("1 rules")
+        && n.message.contains("1 commands")));
+    assert_eq!(p.changes.len(), 2, "{:?}", p.changes);
+}
+
+#[test]
+fn opencode_follows_xdg_config_home() {
+    let sb = Sandbox::empty();
+    let mut env = sb.env(Scope::User);
+    let xdg = sb.path("xdg");
+    env.locations
+        .insert("XDG_CONFIG_HOME".into(), xdg.display().to_string());
+    let p = plan(&sample(), &["opencode"], &env);
+    assert!(planned(&p, &xdg.join("opencode/opencode.json")).is_some());
+    assert!(planned(&p, &xdg.join("opencode/AGENTS.md")).is_some());
+}
+
+#[test]
+fn opencode_apply_merges_into_existing_jsonc() {
+    let sb = Sandbox::empty();
+    let dir = sb.home().join(".config/opencode");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("opencode.jsonc");
+    std::fs::write(
+        &cfg,
+        r#"{
+  // my model
+  "model": "anthropic/claude-sonnet-4-5",
+  "mcp": {
+    "servers": {
+      "github": {
+        "type": "local",
+        "command": ["npx", "-y", "@modelcontextprotocol/server-github"],
+        "timeout": { "execution": 30000 },
+      },
+      "linear": { "type": "remote", "url": "https://mcp.linear.app/mcp", "disabled": true, "oauth": false },
+      "mine": { "type": "local", "command": ["my-mcp"] },
+    },
+  },
+}
+"#,
+    )
+    .unwrap();
+    let mut prof = sample();
+    prof.mcp_servers.get_mut("github").unwrap().disabled = true;
+    prof.mcp_servers.insert(
+        "events".into(),
+        McpServer {
+            url: Some("https://events.example.com/sse".into()),
+            transport: Some(Transport::Sse),
+            ..Default::default()
+        },
+    );
+    let p = plan(&prof, &["opencode"], &sb.env(Scope::User));
+    assert!(
+        planned(&p, &dir.join("opencode.json")).is_none(),
+        "the existing .jsonc file is used"
+    );
+    let text = planned(&p, &cfg).unwrap();
+    assert!(text.contains("// my model"), "comments are kept: {text}");
+    let doc = kitbag::edit::json::parse_value(Some(&text), &cfg).unwrap();
+    let s = &doc["mcp"]["servers"];
+    assert_eq!(s["github"]["disabled"], true);
+    assert_eq!(s["github"]["timeout"], json!({"execution": 30000}));
+    // Turned back on: `disabled` goes, oauth stays.
+    assert_eq!(
+        s["linear"],
+        json!({"type": "remote", "url": "https://mcp.linear.app/mcp", "oauth": false, "headers": {"Authorization": "Bearer {env:LINEAR_API_KEY}"}})
+    );
+    assert_eq!(s["mine"], json!({"type": "local", "command": ["my-mcp"]}));
+    assert_eq!(doc["model"], "anthropic/claude-sonnet-4-5");
+    assert!(s.get("events").is_none());
+    assert!(
+        p.notes
+            .iter()
+            .any(|n| n.message.contains("events skipped") && n.message.contains("SSE"))
+    );
+}
+
+/// A file in opencode 1's layout (servers directly under `mcp`) keeps it, so
+/// opencode 1 can still read it.
+#[test]
+fn opencode_apply_keeps_the_legacy_layout() {
+    let sb = Sandbox::empty();
+    let cfg = sb.project().join("opencode.json");
+    std::fs::write(
+        &cfg,
+        r#"{
+  "mcp": {
+    "mine": { "type": "local", "command": ["my-mcp"], "enabled": true }
+  }
+}
+"#,
+    )
+    .unwrap();
+    let mut prof = sample();
+    prof.mcp_servers.get_mut("linear").unwrap().disabled = true;
+    let env = sb.env(Scope::Project);
+    apply(&sb, &prof, &["opencode"], &env);
+    let doc = sb.json("project/opencode.json");
+    assert!(doc["mcp"].get("servers").is_none(), "{doc}");
+    assert_eq!(doc["mcp"]["github"]["type"], "local");
+    assert_eq!(doc["mcp"]["linear"]["enabled"], false);
+    assert!(doc["mcp"]["linear"].get("disabled").is_none());
+    assert_eq!(doc["mcp"]["mine"]["enabled"], true);
+    assert!(plan(&prof, &["opencode"], &env).changes.is_empty());
+    // Back on: `enabled: false` goes.
+    prof.mcp_servers.get_mut("linear").unwrap().disabled = false;
+    apply(&sb, &prof, &["opencode"], &env);
+    let doc = sb.json("project/opencode.json");
+    assert!(doc["mcp"]["linear"].get("enabled").is_none(), "{doc}");
+}
+
+/// In opencode 1's layout a server named after one of opencode's own `mcp`
+/// keys is skipped, so it can't turn the file into a `mcp.servers` one.
+#[test]
+fn opencode_legacy_layout_skips_reserved_server_names() {
+    let sb = Sandbox::empty();
+    let cfg = sb.project().join("opencode.json");
+    std::fs::write(
+        &cfg,
+        r#"{
+  "mcp": {
+    "mine": { "type": "local", "command": ["my-mcp"] }
+  }
+}
+"#,
+    )
+    .unwrap();
+    let mut prof = sample();
+    for name in ["servers", "timeout"] {
+        prof.mcp_servers.insert(
+            name.into(),
+            McpServer {
+                command: Some("reserved-mcp".into()),
+                ..Default::default()
+            },
+        );
+    }
+    let env = sb.env(Scope::Project);
+    let p = plan(&prof, &["opencode"], &env);
+    assert!(
+        p.notes.iter().any(|n| n.target == "opencode"
+            && n.message.contains("servers, timeout skipped")
+            && n.message.contains("opencode.json")),
+        "{:?}",
+        p.notes
+    );
+    apply(&sb, &prof, &["opencode"], &env);
+    let doc = sb.json("project/opencode.json");
+    assert!(doc["mcp"].get("servers").is_none(), "{doc}");
+    assert!(doc["mcp"].get("timeout").is_none(), "{doc}");
+    assert_eq!(doc["mcp"]["github"]["type"], "local");
+    assert_eq!(doc["mcp"]["mine"]["command"], json!(["my-mcp"]));
+
+    let r = capture(&["opencode"], &env);
+    let s = &r.profile.mcp_servers;
+    assert!(s.contains_key("github") && s.contains_key("mine"), "{s:?}");
+    assert!(!s.contains_key("type") && !s.contains_key("command"));
+    assert!(
+        !r.notes
+            .iter()
+            .any(|n| n.message.contains("'type'") || n.message.contains("'command'")),
+        "{:?}",
+        r.notes
+    );
+}
+
+/// In a project, AGENTS.md is shared with Codex, Cursor and Antigravity:
+/// one managed block, and undo restores the file.
+#[test]
+fn opencode_shares_agents_md_with_codex_cursor_and_antigravity() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::Project);
+    let prof = sample();
+    let agents = sb.project().join("AGENTS.md");
+    std::fs::write(&agents, "My own notes.\n").unwrap();
+    let p = apply(
+        &sb,
+        &prof,
+        &["codex", "cursor", "antigravity", "opencode"],
+        &env,
+    );
+    assert_eq!(
+        p.changes.iter().filter(|c| c.path == agents).count(),
+        1,
+        "AGENTS.md is planned once"
+    );
+    let text = sb.read("project/AGENTS.md");
+    assert_eq!(
+        text.matches("<!-- kitbag:begin team -->").count(),
+        1,
+        "{text}"
+    );
+    assert_eq!(text.matches("Use British English.").count(), 1, "{text}");
+    assert!(plan(&prof, &["opencode"], &env).changes.is_empty());
+    assert!(plan(&prof, &["codex", "opencode"], &env).changes.is_empty());
+    // opencode's capture leaves out the rules Codex folded in.
+    let r = capture(&["opencode"], &env);
+    assert!(r.profile.rules.is_empty());
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n.message.contains("were not captured (ts)"))
+    );
+    Store::new(sb.state()).undo(None, false).unwrap();
+    assert_eq!(std::fs::read_to_string(&agents).unwrap(), "My own notes.\n");
+    assert!(!sb.project().join("opencode.json").exists());
+}
+
+#[test]
+fn opencode_notes_when_agents_md_hides_claude_md() {
+    let sb = Sandbox::empty();
+    std::fs::write(sb.project().join("CLAUDE.md"), "Claude notes.\n").unwrap();
+    let p = plan(&sample(), &["opencode"], &sb.env(Scope::Project));
+    assert!(
+        p.notes
+            .iter()
+            .any(|n| n.target == "opencode" && n.message.contains("CLAUDE.md only while")),
+        "{:?}",
+        p.notes
+    );
+}

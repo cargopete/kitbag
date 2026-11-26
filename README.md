@@ -8,8 +8,8 @@
 kitbag captures your MCP servers, instructions, rules, slash commands, skills and settings
 from the AI coding tools you already use. It stores them as a small, git-friendly **profile** with secrets
 redacted and applies that profile to any other tool in one step. Claude Code, Cursor,
-OpenAI Codex CLI, Gemini CLI, Claude Desktop and Google Antigravity (MCP servers and
-instructions) are supported, at user and project scope.
+OpenAI Codex CLI, Gemini CLI, Claude Desktop, Google Antigravity and opencode (the last two
+for MCP servers and instructions) are supported, at user and project scope.
 
 > [!IMPORTANT]
 > **Status: early release (v0.1).** kitbag works today and is tested against real setups,
@@ -85,6 +85,7 @@ Starting from scratch? `kitbag init my-profile` writes a commented starter profi
 | `gemini-cli`     | Gemini CLI        | user, project | ✓   | ✓            | folded     | ✓            | ✓      | ✓        |
 | `claude-desktop` | Claude Desktop    | user          | ✓ (local servers) | -  | -          | -            | -      | -        |
 | `antigravity`    | Google Antigravity | user, project | ✓  | ✓            | -          | -            | -      | -        |
+| `opencode`       | opencode          | user, project | ✓   | ✓            | -          | -            | -      | -        |
 
 `claude` is accepted as an alias for `claude-code` wherever a target id is given (`--to`,
 `--from`, `targets`, `disabled_on`, and `[settings.claude]`, read as `[settings.claude-code]`;
@@ -105,6 +106,7 @@ Where things go:
 | Gemini CLI | `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`, `~/.gemini/commands/*.toml`, `~/.gemini/skills/` | `.gemini/settings.json`, `GEMINI.md`, `.gemini/commands/`, `.gemini/skills/` |
 | Claude Desktop | `claude_desktop_config.json` in `~/Library/Application Support/Claude` (macOS), `%APPDATA%\Claude` (Windows), `~/.config/Claude` (Linux) | n/a |
 | Antigravity | `~/.gemini/config/mcp_config.json`, `~/.gemini/GEMINI.md` (the same file and managed block as Gemini CLI); capture also reads `~/.gemini/AGENTS.md` and `~/.gemini/config/{AGENTS,GEMINI}.md` | `.agents/mcp_config.json`, `AGENTS.md` (shared with Codex and Cursor); capture also reads `GEMINI.md` and `.agents/{AGENTS,GEMINI}.md` |
+| opencode | `~/.config/opencode/opencode.json` or `opencode.jsonc` (`mcp.servers`), `~/.config/opencode/AGENTS.md`; honours `XDG_CONFIG_HOME` | `opencode.json(c)` or `.opencode/opencode.json(c)` (the first that exists, else `opencode.json`), `AGENTS.md` (shared with Codex, Cursor and Antigravity); capture reads every config file there is |
 
 How each tool receives `${VAR}` references:
 
@@ -116,6 +118,7 @@ How each tool receives `${VAR}` references:
 | Codex CLI | `env_vars = ["VAR"]`, `bearer_token_env_var`, `env_http_headers` (read from the environment by Codex) | no, for same-name env vars, bearer tokens and whole-value headers. Anything else is resolved (see below) |
 | Claude Desktop | resolved value (no interpolation support) | yes, unless `--secrets never` |
 | Antigravity | resolved value (its docs describe no interpolation); remote servers get `serverUrl`, SSE servers are skipped | yes, unless `--secrets never` |
+| opencode | `{env:VAR}` (expanded by opencode; defaults resolved at apply time); SSE servers are skipped | no |
 
 ## The profile format
 
@@ -148,7 +151,7 @@ description = "Optional"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
 env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_PERSONAL_ACCESS_TOKEN}" }
-# cwd = "/path"               # working directory (Codex, Gemini CLI, Antigravity)
+# cwd = "/path"               # working directory (Codex, Gemini CLI, Antigravity, opencode)
 
 [mcp_servers.linear]          # remote server; transport inferred from `url`
 url = "https://mcp.linear.app/mcp"
@@ -156,7 +159,7 @@ headers = { Authorization = "Bearer ${LINEAR_API_KEY}" }
 # transport = "sse"           # stdio | http | sse (only needed for legacy SSE)
 # targets = ["claude-code"]   # only these tools (see "Per-tool MCP servers")
 # disabled_on = ["cursor"]    # or every tool except these
-# disabled = true             # keep the definition; Codex writes enabled = false, Antigravity disabled = true, others skip it
+# disabled = true             # keep the definition; Codex writes enabled = false, Antigravity and opencode disabled = true, others skip it
 
 [settings.claude-code]        # per-tool settings, allow-listed keys only
 model = "opus"
@@ -174,7 +177,7 @@ releases will refuse newer profiles instead of misreading them.
 don't need it. `targets` lists the only tools a server is applied to; `disabled_on` lists the
 tools it is kept out of. Use one or the other, not both, and give `targets` at least one tool.
 Target names are those of `kitbag list-targets` (`claude-code`, `cursor`, `codex`,
-`gemini-cli`, `claude-desktop`, `antigravity`). An unknown name (a typo, or a tool from a newer
+`gemini-cli`, `claude-desktop`, `antigravity`, `opencode`). An unknown name (a typo, or a tool from a newer
 kitbag) is a warning that lists the valid ones, and the name is ignored: it matches no tool.
 `only` and `except` still load as older names for the same fields (an empty `only` still means
 no restriction, with a warning); set each field under one name, not both. Capture writes the new
@@ -588,7 +591,7 @@ pub trait Adapter: Sync {
 5. **Test** it: add realistic configs under `tests/fixtures/{home,project}`, add capture and apply
    cases in `tests/adapters.rs`, and include it in the round-trip and idempotency tests.
 
-Good next candidates: Windsurf, Zed, VS Code / GitHub Copilot, OpenCode.
+Good next candidates: Windsurf, Zed, VS Code / GitHub Copilot.
 
 ## Format notes and known limitations
 
@@ -607,6 +610,16 @@ Good next candidates: Windsurf, Zed, VS Code / GitHub Copilot, OpenCode.
 - **Antigravity** shares `~/.gemini/GEMINI.md` with Gemini CLI, so it also sees the rules Gemini
   CLI folds into that file. kitbag doesn't write Antigravity's own rules, skills or workflows
   yet, and leaves its MCP tool approvals (Ask by default) alone.
+- **opencode** 2 keeps MCP servers under `mcp.servers` and turns one off with `disabled: true`;
+  opencode 1 kept them directly under `mcp` with `enabled: false`, and opencode 2 still reads
+  that. kitbag writes the layout a config file already uses (`mcp.servers` for a new one), so a
+  file opencode 1 reads stays readable, and capture reads both. In opencode 1's layout a server
+  named `servers` or `timeout` would overwrite opencode's own key, so it is skipped with a
+  warning; rename it in the profile. opencode reads
+  `~/.claude/CLAUDE.md` (or a project's `CLAUDE.md`) only while there is no `AGENTS.md`; the
+  plan notes when the `AGENTS.md` kitbag creates takes its place. Files listed under
+  `instructions`, `{file:...}` references and opencode's agents, commands, skills and plugins
+  are not carried yet, and its tool permissions are left alone.
 - Apply is additive and doesn't delete entries that were removed from the profile (see above).
 - **Not carried yet:** Claude Code subagents (`agents/`), output styles (`output-styles/`),
   plugins and hooks. Capture lists what it found of these and leaves them out. It also drops
