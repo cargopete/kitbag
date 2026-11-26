@@ -471,7 +471,11 @@ Common options:
   `//sub/dir` to pick a sub-directory and `#ref` for a branch or tag.
 
 kitbag clones with your own `git` (shallow, no prompts) into a temporary directory that is
-removed afterwards.
+removed afterwards. Cleartext `http://` and `git://` sources are refused, because anyone on the
+network could swap the profile, and so is an `https://` server that redirects to one; pass
+`--allow-insecure-source` to accept them. Credentials in a URL (`https://user:token@host/…`)
+are passed to `git` only: plans, errors, `history` and the transaction log show the URL
+without them.
 
 ## Install
 
