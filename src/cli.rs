@@ -1,6 +1,6 @@
 //! Command-line interface.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
@@ -14,10 +14,12 @@ use crate::adapters::{
 };
 use crate::edit::{json as jsonedit, toml as tomledit};
 use crate::engine::{self, Plan};
-use crate::model::{Profile, slugify};
+use crate::mcp_tokens;
+use crate::model::{McpServer, Profile, Transport, slugify};
 use crate::plan_fs::read_text_opt;
 use crate::policy;
 use crate::profile_io::{self, MANIFEST};
+use crate::secrets::{RefStyle, RenderState, render_refs};
 use crate::source;
 use crate::txn::{Status, Store};
 use crate::ui::{self, BOLD, CYAN, DIM, GREEN, RED, YELLOW, paint, tildify, visible, visible_line};
@@ -165,9 +167,47 @@ enum Cmd {
             value_name = "DIR",
             num_args = 0..=1,
             default_missing_value = ".",
-            conflicts_with_all = ["source", "scope", "project", "path", "allow_insecure_source"]
+            conflicts_with_all = ["source", "scope", "project", "path", "allow_insecure_source", "mcp_tokens"]
         )]
         why: Option<PathBuf>,
+        /// Also estimate the tokens each MCP server's tool definitions take up,
+        /// per tool. This starts every configured local server just long enough
+        /// to list its tools, so it runs their commands, including servers in
+        /// a project's config under --project; only use it on setups you trust.
+        /// Plain doctor starts nothing. Remote servers are not contacted. With
+        /// SOURCE, counts the profile's servers for each tool they apply to
+        /// (from a git source, only those allowed by --allow-git-mcp or
+        /// --trust-source); without, the servers in each tool's config. A
+        /// server that fails is reported but is not a problem. The estimate is
+        /// about 4 characters per token of each tool's name, description and
+        /// input schema.
+        #[arg(long)]
+        mcp_tokens: bool,
+        /// With --mcp-tokens and a git SOURCE, its servers are not started
+        /// unless allowed here: give their names (comma-separated,
+        /// repeatable), or no value to allow all
+        #[arg(
+            long,
+            value_name = "NAMES",
+            num_args = 0..=1,
+            default_missing_value = "*",
+            value_delimiter = ',',
+            action = clap::ArgAction::Append,
+            requires = "mcp_tokens"
+        )]
+        allow_git_mcp: Vec<String>,
+        /// With --mcp-tokens, start every server of a git SOURCE
+        #[arg(long, requires = "mcp_tokens")]
+        trust_source: bool,
+        /// Seconds each server gets to list its tools with --mcp-tokens
+        #[arg(
+            long,
+            value_name = "SECS",
+            default_value_t = 10,
+            value_parser = clap::value_parser!(u64).range(1..=600),
+            requires = "mcp_tokens"
+        )]
+        mcp_timeout: u64,
     },
     /// Show supported tools, what each supports, and which are installed
     ListTargets {
@@ -281,17 +321,23 @@ struct ApplyArgs {
 impl ApplyArgs {
     /// Which MCP servers a git source may add or change.
     fn git_mcp(&self) -> engine::GitMcp {
-        if self.allow_risky_settings || self.allow_git_mcp.iter().any(|n| n == "*") {
-            engine::GitMcp::All
-        } else {
-            engine::GitMcp::Only(
-                self.allow_git_mcp
-                    .iter()
-                    .map(|n| n.trim().to_string())
-                    .filter(|n| !n.is_empty())
-                    .collect(),
-            )
-        }
+        git_mcp(self.allow_risky_settings, &self.allow_git_mcp)
+    }
+}
+
+/// Which MCP servers of a git source `--trust-source` (`all`) and
+/// `--allow-git-mcp NAMES` let in.
+fn git_mcp(all: bool, names: &[String]) -> engine::GitMcp {
+    if all || names.iter().any(|n| n == "*") {
+        engine::GitMcp::All
+    } else {
+        engine::GitMcp::Only(
+            names
+                .iter()
+                .map(|n| n.trim().to_string())
+                .filter(|n| !n.is_empty())
+                .collect(),
+        )
     }
 }
 
@@ -540,11 +586,21 @@ pub fn run(cli: Cli) -> Result<i32> {
             ..
         } => cmd_doctor_why(home, &dir, &targets.to),
         Cmd::Doctor {
-            source, targets, ..
+            source,
+            targets,
+            mcp_tokens,
+            mcp_timeout,
+            allow_git_mcp,
+            trust_source,
+            ..
         } => cmd_doctor(
             &context(home, Some(&targets.place))?,
             source.as_deref(),
             &targets,
+            mcp_tokens.then(|| McpTokens {
+                timeout: std::time::Duration::from_secs(mcp_timeout),
+                git: git_mcp(trust_source, &allow_git_mcp),
+            }),
         ),
         Cmd::ListTargets { place, json } => cmd_list_targets(&context(home, Some(&place))?, json),
     }
@@ -1793,7 +1849,20 @@ fn check_file(path: &Path) -> Option<String> {
     result.err().map(|e| format!("{e:#}"))
 }
 
-fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
+/// What `doctor --mcp-tokens` was asked to do.
+struct McpTokens {
+    /// How long each server gets.
+    timeout: std::time::Duration,
+    /// Which servers of a git source may be started.
+    git: engine::GitMcp,
+}
+
+fn cmd_doctor(
+    ctx: &Ctx,
+    src: Option<&str>,
+    t: &TargetArgs,
+    mcp_tokens: Option<McpTokens>,
+) -> Result<i32> {
     let env = &ctx.env;
     let chosen = if t.to == "detected" {
         None
@@ -1889,6 +1958,9 @@ fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
         }
     }
 
+    // The profile's servers, for --mcp-tokens: Some(None) when it didn't
+    // load. The flag says whether it came from a git source.
+    let mut profile_servers: Option<Option<(Profile, bool)>> = None;
     if let Some(src) = src {
         println!("\n{}", paint(BOLD, "Profile"));
         // Not load_source: doctor lists the profile's warnings itself.
@@ -1897,9 +1969,13 @@ fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
         match loaded {
             Err(e) => {
                 problems += 1;
+                profile_servers = Some(None);
                 println!("  {} {}", paint(RED, "error"), visible(&format!("{e:#}")));
             }
             Ok((resolved, p)) => {
+                if mcp_tokens.is_some() {
+                    profile_servers = Some(Some((p.clone(), resolved.remote)));
+                }
                 println!(
                     "  '{}' from {}",
                     visible_line(&p.name),
@@ -1960,6 +2036,9 @@ fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
             }
         }
     }
+    if let Some(opts) = mcp_tokens {
+        doctor_mcp_tokens(env, chosen.as_deref(), profile_servers.as_ref(), &opts);
+    }
     println!();
     if problems == 0 {
         println!("{}", paint(GREEN, "No problems found."));
@@ -1967,6 +2046,197 @@ fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
     } else {
         println!("{}", paint(RED, format!("{problems} problem(s) found.")));
         Ok(1)
+    }
+}
+
+/// One MCP server's line in `doctor --mcp-tokens`.
+enum McpRow {
+    Cost(mcp_tokens::Cost),
+    Skipped(String),
+    Failed(String),
+}
+
+/// How to start `s` for listing its tools, or why it isn't started.
+fn mcp_launch(s: &McpServer, env: &Env) -> Result<mcp_tokens::Launch, McpRow> {
+    if s.transport() != Transport::Stdio {
+        return Err(McpRow::Skipped(format!(
+            "remote ({}) server, not contacted: its URL and headers may carry credentials",
+            s.transport().as_str()
+        )));
+    }
+    let mut state = RenderState::default();
+    let r = s.map_strings(|v| render_refs(v, RefStyle::Resolve, &env.vars, &mut state));
+    if !state.missing.is_empty() {
+        let vars: Vec<String> = state.missing.iter().map(|v| format!("${{{v}}}")).collect();
+        return Err(McpRow::Skipped(format!(
+            "not started: needs {}, which {} unset",
+            vars.join(", "),
+            if vars.len() == 1 { "is" } else { "are" }
+        )));
+    }
+    let Some(command) = r.command.filter(|c| !c.trim().is_empty()) else {
+        return Err(McpRow::Failed("it has no command".into()));
+    };
+    if let Some(cwd) = &r.cwd
+        && !mcp_tokens::cwd_ok(cwd)
+    {
+        return Err(McpRow::Failed("its cwd is not a directory".into()));
+    }
+    Ok(mcp_tokens::Launch {
+        command,
+        args: r.args,
+        env: r.env,
+        cwd: r.cwd,
+    })
+}
+
+/// `doctor --mcp-tokens`: per tool, the estimated tokens each MCP server's
+/// tool definitions take up. `profile` is the checked profile and whether it
+/// came from a git source (`Some(None)` when it didn't load); without one,
+/// the servers in each tool's config.
+fn doctor_mcp_tokens(
+    env: &Env,
+    chosen: Option<&[&'static dyn Adapter]>,
+    profile: Option<&Option<(Profile, bool)>>,
+    opts: &McpTokens,
+) {
+    let timeout = opts.timeout;
+    println!("\n{}", paint(BOLD, "MCP tool definitions"));
+    println!(
+        "  {}",
+        paint(
+            DIM,
+            format!(
+                "Estimated tokens of each server's tool names, descriptions and input schemas, at about {} characters per token (not an exact tokenizer count). Local servers were started only to list their tools",
+                mcp_tokens::CHARS_PER_TOKEN
+            )
+        )
+    );
+    let profile = match profile {
+        Some(None) => {
+            println!(
+                "  {} the profile could not be loaded",
+                paint(YELLOW, "skipped")
+            );
+            return;
+        }
+        Some(Some((p, remote))) => Some((crate::portable::expand_profile(p, env), *remote)),
+        None => None,
+    };
+    // A git source's servers start only when allowed, as for apply.
+    let git = match &profile {
+        Some((_, true)) => Some(&opts.git),
+        _ => None,
+    };
+    let profile = profile.map(|(p, _)| p);
+    let targets: Vec<&'static dyn Adapter> = adapters::all()
+        .iter()
+        .copied()
+        .filter(|a| match chosen {
+            Some(c) => c.iter().any(|c| c.id() == a.id()),
+            None => a.detect(env),
+        })
+        .filter(|a| {
+            a.scopes().contains(&env.scope)
+                && a.supports(env.scope, Feature::Mcp) != adapters::Support::None
+        })
+        .collect();
+    if targets.is_empty() {
+        println!("  no tool with MCP servers to check");
+        return;
+    }
+    // The same server set up in several tools is started once.
+    let mut seen: BTreeMap<mcp_tokens::Launch, Result<mcp_tokens::Cost, String>> = BTreeMap::new();
+    for a in targets {
+        println!("  {}", paint(BOLD, a.name()));
+        let servers = match &profile {
+            Some(p) => p.mcp_servers.clone(),
+            None => match a.capture(env) {
+                Ok(c) => crate::portable::expand_profile(&c.profile, env).mcp_servers,
+                Err(e) => {
+                    println!(
+                        "    {} could not read its MCP servers: {}",
+                        paint(RED, "error"),
+                        visible_line(&format!("{e:#}"))
+                    );
+                    continue;
+                }
+            },
+        };
+        if servers.is_empty() {
+            println!("    {}", paint(DIM, "no MCP servers"));
+            continue;
+        }
+        let width = servers
+            .keys()
+            .map(|n| visible_line(n).chars().count())
+            .max()
+            .unwrap_or(0)
+            .max("total".len());
+        let (mut total, mut counted) = (0, 0);
+        for (name, s) in &servers {
+            let skip = match &profile {
+                Some(_) => s
+                    .skip_reason(a.id())
+                    .map(|why| format!("disabled for this tool in the profile ({why})"))
+                    .or_else(|| s.disabled.then(|| "disabled in the profile".to_string()))
+                    .or_else(|| {
+                        git.filter(|g| !g.allows(name)).map(|_| {
+                            format!(
+                                "from a git source, so not started (pass --allow-git-mcp {} or --trust-source to start it)",
+                                visible_line(name)
+                            )
+                        })
+                    }),
+                None => s
+                    .disabled
+                    .then(|| format!("disabled in {}'s config", a.name())),
+            };
+            let row = match skip {
+                Some(why) => McpRow::Skipped(format!("{why}; not counted")),
+                None => match mcp_launch(s, env) {
+                    Err(row) => row,
+                    Ok(launch) => {
+                        let got = seen
+                            .entry(launch)
+                            .or_insert_with_key(|l| {
+                                mcp_tokens::list_tools(l, timeout)
+                                    .map(|tools| mcp_tokens::estimate(&tools))
+                            })
+                            .clone();
+                        match got {
+                            Ok(cost) => McpRow::Cost(cost),
+                            Err(e) => McpRow::Failed(e),
+                        }
+                    }
+                },
+            };
+            let shown = visible_line(name);
+            let pad = " ".repeat(width.saturating_sub(shown.chars().count()));
+            let line = match row {
+                McpRow::Cost(c) => {
+                    total += c.tokens;
+                    counted += 1;
+                    format!(
+                        "~{} tokens  {}",
+                        mcp_tokens::thousands(c.tokens),
+                        paint(DIM, format!("{} tool(s)", c.tools))
+                    )
+                }
+                McpRow::Skipped(why) => {
+                    format!("{} {}", paint(DIM, "skipped"), visible_line(&why))
+                }
+                McpRow::Failed(why) => {
+                    format!("{} {}", paint(YELLOW, "failed"), visible_line(&why))
+                }
+            };
+            println!("    {shown}{pad}  {line}");
+        }
+        println!(
+            "    {:<width$}  ~{} tokens from {counted} server(s)",
+            "total",
+            mcp_tokens::thousands(total)
+        );
     }
 }
 
