@@ -725,7 +725,7 @@ mod tests {
             err.contains("in total, the most a profile may hold"),
             "{err}"
         );
-        assert!(MAX_PROFILE_BYTES >= 16 * MAX_FILE_BYTES);
+        const { assert!(MAX_PROFILE_BYTES >= 16 * MAX_FILE_BYTES) };
     }
 
     fn sample() -> Profile {
