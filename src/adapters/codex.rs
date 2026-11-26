@@ -26,6 +26,7 @@ use super::common::{
     write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
+use crate::edit::keep_line_endings;
 use crate::edit::toml::{
     item_to_json, json_to_table, json_to_value, parse, set_keep_decor, table_mut,
 };
@@ -416,7 +417,10 @@ impl Adapter for Codex {
             }
         }
         if changed {
-            work.fs.write(&p.config, doc.to_string())?;
+            work.fs.write(
+                &p.config,
+                keep_line_endings(original.as_deref(), doc.to_string()),
+            )?;
         }
         if env.scope == Scope::Project && !profile.mcp_servers.is_empty() {
             work.info(

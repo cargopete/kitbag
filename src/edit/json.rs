@@ -14,6 +14,8 @@ use serde_json::{Map, Value};
 pub struct JsonDoc {
     root: CstRootNode,
     path: std::path::PathBuf,
+    /// The file used `\r\n` line endings; edits keep them.
+    crlf: bool,
 }
 
 /// The first property name that appears twice in `obj`, if any.
@@ -91,6 +93,7 @@ impl JsonDoc {
         Ok(JsonDoc {
             root,
             path: path.to_path_buf(),
+            crlf: super::uses_crlf(text),
         })
     }
 
@@ -193,6 +196,9 @@ impl JsonDoc {
         if !s.ends_with('\n') {
             s.push('\n');
         }
+        if self.crlf {
+            s = super::keep_line_endings(Some("\r\n"), s);
+        }
         s
     }
 }
@@ -273,6 +279,24 @@ mod tests {
         d.check_unique_keys(&["mcpServers"]).unwrap();
         d.check_unique_keys(&["missing", "deeper"]).unwrap();
         assert!(d.check_unique_keys(&["other"]).is_err());
+    }
+
+    #[test]
+    fn keeps_crlf_line_endings() {
+        let text = "{\r\n  \"theme\": \"dark\",\r\n  \"mcpServers\": {}\r\n}\r\n";
+        let mut d = JsonDoc::parse(Some(text), Path::new(P)).unwrap();
+        d.set(
+            &["mcpServers", "b"],
+            &json!({"command": "y", "args": ["1"]}),
+        );
+        let out = d.render();
+        assert!(!out.replace("\r\n", "").contains('\n'), "{out:?}");
+        assert!(
+            out.starts_with("{\r\n  \"theme\": \"dark\",\r\n"),
+            "{out:?}"
+        );
+        let lf = JsonDoc::parse(Some("{\"a\": 1}"), Path::new(P)).unwrap();
+        assert!(!lf.render().contains('\r'));
     }
 
     #[test]

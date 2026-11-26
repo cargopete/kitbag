@@ -4,6 +4,32 @@ pub mod block;
 pub mod json;
 pub mod toml;
 
+/// Does `text` use Windows line endings? True when most of its line breaks
+/// are `\r\n`.
+pub fn uses_crlf(text: &str) -> bool {
+    let crlf = text.matches("\r\n").count();
+    crlf > 0 && crlf * 2 > text.matches('\n').count()
+}
+
+/// Give `new` the line ending style of `original`: when `original` uses
+/// `\r\n`, every bare `\n` in `new` becomes `\r\n`. Otherwise `new` is
+/// returned unchanged.
+pub fn keep_line_endings(original: Option<&str>, new: String) -> String {
+    if !original.is_some_and(uses_crlf) || !new.contains('\n') {
+        return new;
+    }
+    let mut out = String::with_capacity(new.len() + new.len() / 32);
+    let mut prev = '\0';
+    for ch in new.chars() {
+        if ch == '\n' && prev != '\r' {
+            out.push('\r');
+        }
+        out.push(ch);
+        prev = ch;
+    }
+    out
+}
+
 /// A parse error that is safe to print: where it is (line and column, from a
 /// byte offset into `text`) and the parser's message, but never the source
 /// text itself, which can hold secrets. Quoted strings in the message (serde
@@ -40,6 +66,20 @@ pub fn line_col(text: &str, at: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_endings_follow_the_original() {
+        let new = "a\nb\r\nc\n".to_string();
+        assert_eq!(
+            keep_line_endings(Some("x\r\ny\r\n"), new.clone()),
+            "a\r\nb\r\nc\r\n"
+        );
+        assert_eq!(keep_line_endings(Some("x\ny\n"), new.clone()), new);
+        assert_eq!(keep_line_endings(None, new.clone()), new);
+        // Mostly LF with one stray CRLF stays LF.
+        assert_eq!(keep_line_endings(Some("x\r\ny\nz\n"), new.clone()), new);
+        assert!(uses_crlf("x\r\ny\r\nz\n"));
+    }
 
     #[test]
     fn parse_errors_carry_no_source_text() {

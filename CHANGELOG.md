@@ -18,6 +18,7 @@ All notable changes to this project are documented here. The format follows
 - `--no-overwrite` now also keeps existing managed instruction blocks and existing skill support files, and reports each one it kept. A profile that no longer has instructions still removes the old managed block (#38).
 - Capture matched secrets it redacted to MCP servers by location, so a server whose name contains a dot (`a.b`) also had its secrets counted under server `a`: they were listed twice and could raise a false "different secret values" warning. Each redaction now records its server (#53).
 - A JSON config with the same key twice in an object kitbag edits (two `mcpServers`, two servers with the same name, a server with two `command` keys) is refused with an error naming the file and the key. kitbag used to edit the first copy while the tools read the last, so `diff --exit-code` reported no change (#38).
+- Edits to JSON and TOML configs and to managed blocks in instruction files keep a file's Windows (`\r\n`) line endings. They used to write the lines they added with `\n`. A file is taken to use `\r\n` when most of its line breaks are `\r\n`; its other lines are then written with `\r\n` too (#38).
 
 ### Security
 
