@@ -256,7 +256,11 @@ fn read_skill_dir(dir: &Path, prefix: &str, out: &mut Vec<SkillFile>) -> Result<
         if is_dir {
             read_skill_dir(&abs, &rel, out)?;
         } else if let Some(content) = read_profile_file(&abs)? {
-            out.push(SkillFile { path: rel, content });
+            out.push(SkillFile {
+                path: rel,
+                content,
+                executable: crate::adapters::common::skill_file_executable(&abs),
+            });
         }
     }
     Ok(())
@@ -459,11 +463,24 @@ pub fn save(p: &Profile, dir: &Path, force: bool) -> Result<Vec<PathBuf>> {
         let old = load(dir).with_context(|| {
             format!("the existing profile in {} can't be read, so it won't be replaced; fix or remove it first", dir.display())
         })?;
-        for rel in profile_files(&old)
-            .keys()
-            .filter(|k| !new_files.contains_key(*k))
-        {
+        // `profile_files` names every rule `<name>.md`, but a profile may hold it
+        // as `<name>.mdc`: look for that twin too, so it is neither missed when
+        // removing nor left behind next to a rewritten `.md`.
+        let mut stale: Vec<String> = Vec::new();
+        for rel in profile_files(&old).keys() {
+            let is_rule = rel.starts_with("rules/") && rel.ends_with(".md");
+            if !new_files.contains_key(rel) {
+                stale.push(rel.clone());
+            }
+            if is_rule {
+                stale.push(format!("{rel}c"));
+            }
+        }
+        for rel in &stale {
             let abs = crate::plan_fs::join_rel(dir, rel);
+            if abs.symlink_metadata().is_err() {
+                continue;
+            }
             fs::remove_file(&abs).with_context(|| format!("removing {}", abs.display()))?;
             // Tidy now-empty directories up to the profile root.
             let mut d = abs.parent().map(Path::to_path_buf);
@@ -641,10 +658,12 @@ mod tests {
                 SkillFile {
                     path: "SKILL.md".into(),
                     content: b"---\nname: pdf\ndescription: PDFs\n---\nUse it.\n".to_vec(),
+                    executable: false,
                 },
                 SkillFile {
                     path: "bin/blob.bin".into(),
                     content: vec![0, 159, 146, 150],
+                    executable: false,
                 },
             ],
         });

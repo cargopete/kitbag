@@ -195,7 +195,7 @@ machine whenever the tool starts, so servers that a git profile would add, or ch
 applied by default. The plan lists each one under "MCP servers not applied (from a git
 source)" with its command and arguments (or URL) and the names of its env vars and headers.
 Pass `--allow-git-mcp docs,search` (repeatable) to apply the ones you name, `--allow-git-mcp`
-with no value for all of them, or `--trust-source`, which implies it. Servers already in
+with no value for all of them (a value that looks like a path or URL is taken as the source, so `--allow-git-mcp github:me/profile` works; write `--allow-git-mcp=NAME` to be explicit), or `--trust-source`, which implies it. Servers already in
 place with the same definition are left as they are and aren't listed; servers from a local
 directory apply as written. From a git source, commands and skills that run shell snippets are
 skipped, and `hooks` and `allowed-tools` are removed from the frontmatter of the rest, unless
