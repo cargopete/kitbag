@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-26
+
 ### Added
 
 - New target `opencode` for opencode, for MCP servers and instructions at user and project scope. Servers go to `~/.config/opencode/opencode.json` (or `$XDG_CONFIG_HOME/opencode`), or to `opencode.json` / `.opencode/opencode.json` in a project, whichever exists (`.jsonc` too; comments are kept). Local servers get `type: local` with a `command` array and `environment`, remote ones `type: remote` with `url` and `headers`; your own keys on an entry (`timeout`, `oauth`, `codemode` ...) are kept. References are written as `{env:VAR}`, which opencode expands, so secrets never touch disk; SSE servers are skipped. kitbag writes opencode 2's `mcp.servers` layout with `disabled: true`, but keeps opencode 1's layout (servers directly under `mcp`, `enabled: false`) in a file that already uses it, and capture reads both. In that layout a server named `servers` or `timeout` is skipped with a warning, since it would overwrite opencode's own key. Instructions go to `~/.config/opencode/AGENTS.md`, and to `AGENTS.md` in a project, shared with Codex, Cursor and Antigravity. Rules, commands, skills, agents and plugins are not supported yet (#26).
@@ -143,7 +145,8 @@ All notable changes to this project are documented here. The format follows
 - `capture` with several tools (`--from all`, `detected` or a list) reports a tool whose config can't be read and captures the rest; it fails only if nothing could be read. A single `--from` still fails loudly.
 - `install.sh` and `install.ps1` download `kitbag-<target>.sha256`, the checksum name the release workflow uploads (found in the v0.1.0-rc.1 dry run).
 
-[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/cargopete/kitbag/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/cargopete/kitbag/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/cargopete/kitbag/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/cargopete/kitbag/compare/v0.1.0...v0.1.1

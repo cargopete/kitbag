@@ -1,6 +1,6 @@
 [package]
 name = "kitbag"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.88"
 description = "Pack your AI agent setup once, unpack it into any coding tool: MCP servers, rules, commands and skills for Claude Code, Cursor, Codex and more."
