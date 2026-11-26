@@ -271,12 +271,40 @@ fn profile_names_with_control_characters_are_refused() {
         .assert()
         .success();
 
-    // init and capture refuse such a --name before writing anything.
+    // Text-direction and zero-width characters are refused too.
+    for name in ["a\\u202Eb", "a\\u2066b", "a\\u200Bb", "\\uFEFFme"] {
+        fs::write(
+            sb.path("p/kitbag.toml"),
+            format!("kitbag = 1\nname = \"{name}\"\n"),
+        )
+        .unwrap();
+        sb.cli()
+            .args(["apply", "p", "--to", "claude-code", "--yes"])
+            .assert()
+            .failure()
+            .stderr(contains(
+                "'name' must not contain text-direction or zero-width characters",
+            ));
+    }
+    assert!(!sb.home().join(".claude/CLAUDE.md").exists());
+
+    // init and capture refuse such a --name before writing anything, also
+    // when the control character is at the end.
+    for name in ["me\nnow", "ok\n", "\tok"] {
+        sb.cli()
+            .args(["init", "fresh", "--name", name])
+            .assert()
+            .failure()
+            .stderr(contains("--name must not contain control characters"));
+        assert!(!sb.path("fresh").exists());
+    }
     sb.cli()
-        .args(["init", "fresh", "--name", "me\nnow"])
+        .args(["init", "fresh", "--name", "a\u{202e}b"])
         .assert()
         .failure()
-        .stderr(contains("--name must not contain control characters"));
+        .stderr(contains(
+            "--name must not contain text-direction or zero-width characters",
+        ));
     assert!(!sb.path("fresh").exists());
     fs::create_dir_all(sb.home().join(".claude")).unwrap();
     fs::write(sb.home().join(".claude/CLAUDE.md"), "Be kind.\n").unwrap();

@@ -138,17 +138,29 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
 }
 
 /// Why a profile `name` (as written, before trimming) is unusable, if it is:
-/// empty, or holding control characters (a newline, tab, escape ...) that
-/// would end up in the apply records and in what kitbag prints.
+/// empty, or holding control characters (a newline, tab, escape ...) or
+/// invisible formatting characters (text-direction overrides, zero-width
+/// spaces) that would end up in the apply records and in what kitbag prints.
 pub fn check_profile_name(name: &str) -> std::result::Result<(), &'static str> {
-    let name = name.trim();
-    if name.is_empty() {
+    if name.trim().is_empty() {
         Err("must not be empty")
     } else if name.chars().any(char::is_control) {
         Err("must not contain control characters")
+    } else if name.chars().any(is_hidden_format) {
+        Err("must not contain text-direction or zero-width characters")
     } else {
         Ok(())
     }
+}
+
+/// Text-direction embeddings, overrides and isolates, zero-width spaces and
+/// joiners, and the byte order mark: characters that change how a name looks
+/// without being visible themselves.
+fn is_hidden_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}'..='\u{200D}' | '\u{FEFF}'
+    )
 }
 
 /// Read a file from an (untrusted) profile directory: no symlinks, bounded
