@@ -1705,13 +1705,16 @@ fn unescape(value: &str) -> String {
 /// For display: a value capture would flag as random-looking (a high-entropy
 /// value), and that also has a run of 16 or more letters and digits mixing
 /// both, as tokens do. The second test keeps ordinary ids such as model names
-/// (`claude-sonnet-4-5-20250929`) and camel-case tool names visible.
+/// (`claude-sonnet-4-5-20250929`) and camel-case tool names visible, and
+/// [`ordinary_digest`] keeps checksums, image digests and sortable ids visible.
+/// A value under a secret-sounding name is masked by [`shown_secret`] anyway.
 fn random_value(value: &str) -> bool {
     if value.contains(MASK) {
         return false;
     }
     let literal = strip_refs(value);
-    looks_random_token(&literal)
+    !ordinary_digest(&literal)
+        && looks_random_token(&literal)
         && literal
             .split(|c: char| !c.is_ascii_alphanumeric())
             .any(|run| {
@@ -1719,6 +1722,32 @@ fn random_value(value: &str) -> bool {
                     && run.chars().any(|c| c.is_ascii_digit())
                     && run.chars().any(|c| c.is_ascii_alphabetic())
             })
+}
+
+/// For display, under an ordinary name: values that are random by nature but
+/// that a reviewer needs to see, as they say *what* runs rather than unlock
+/// anything. All-hex values (sha256 checksums, commit hashes, Mongo
+/// ObjectIds), a Docker / OCI image pinned by digest
+/// (`ghcr.io/acme/server@sha256:9f86…`, or a bare `sha256:9f86…`), and
+/// ULIDs (26 characters of Crockford base32, all one case).
+fn ordinary_digest(v: &str) -> bool {
+    let hex = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit());
+    if hex(v) {
+        return true;
+    }
+    if let Some((_, tail)) = v.rsplit_once("sha256:")
+        && hex(tail)
+    {
+        return true;
+    }
+    v.len() == 26
+        && v.starts_with(|c: char| ('0'..='7').contains(&c))
+        && (v.chars().all(|c| !c.is_ascii_lowercase())
+            || v.chars().all(|c| !c.is_ascii_uppercase()))
+        && v.chars().all(|c| {
+            let c = c.to_ascii_uppercase();
+            c.is_ascii_digit() || (c.is_ascii_uppercase() && !matches!(c, 'I' | 'L' | 'O' | 'U'))
+        })
 }
 
 /// For display: known formats, values under a secret-sounding name, and
@@ -2760,6 +2789,49 @@ mod tests {
         ] {
             assert_eq!(mask_line(keep), keep);
         }
+    }
+
+    /// Checksums, image digests, ObjectIds and ULIDs under an ordinary name are
+    /// random by nature but not secrets, and a reviewer needs to see them
+    /// change; under a secret-sounding name the same values are still masked.
+    #[test]
+    fn keeps_digests_and_ids_under_ordinary_names() {
+        let sha = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        for keep in [
+            format!(r#""checksum": "{sha}","#),
+            format!(r#"sha256 = "{sha}""#),
+            format!(r#""args": ["run", "-i", "--rm", "ghcr.io/acme/server@sha256:{sha}"]"#),
+            format!(r#"      "ghcr.io/acme/server:1.2@sha256:{sha}","#),
+            format!(r#""image": "sha256:{sha}","#),
+            r#""object_id": "507f1f77bcf86cd799439011","#.to_string(),
+            r#""request_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV","#.to_string(),
+            r#"run = '01arz3ndektsv4rrffq69g5fav'"#.to_string(),
+        ] {
+            assert_eq!(mask_line(&keep), keep);
+        }
+        // A hex secret under a secret-sounding name is masked by its name.
+        for (line, want) in [
+            (
+                format!(r#""API_KEY": "{sha}""#),
+                r#""API_KEY": "••••••••""#.to_string(),
+            ),
+            (
+                format!(r#"client_secret = '{sha}'"#),
+                "client_secret = '••••••••'".to_string(),
+            ),
+            (
+                format!(r#""args": ["--token", "{sha}"]"#),
+                r#""args": ["--token", "••••••••"]"#.to_string(),
+            ),
+            (
+                r#""SESSION_TOKEN": "01ARZ3NDEKTSV4RRFFQ69G5FAV""#.to_string(),
+                r#""SESSION_TOKEN": "••••••••""#.to_string(),
+            ),
+        ] {
+            assert_eq!(mask_line(&line), want);
+        }
+        // A mixed-case 26-character token is not a ULID.
+        assert!(!mask_line(r#""ref": "01ArZ3NdEkTsV4RrFfQ69g5FaV""#).contains("01ArZ3"));
     }
 
     /// TOML literal strings (`'...'`) are checked like basic strings.

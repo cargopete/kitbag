@@ -374,7 +374,9 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
    on the next line as in a pretty-printed `args` array, a quoted random-looking value
    whatever it is called (a long mix of letters and digits, as capture redacts from MCP
    servers), and whatever capture would redact from free text. Ordinary values such as
-   model names, package names, paths and UUIDs are shown as they are. New files
+   model names, package names, paths and UUIDs are shown as they are, and so are, unless
+   they sit under a secret-sounding name, all-hex values (checksums, commit hashes, Mongo
+   ObjectIds), image digests (`ghcr.io/acme/server@sha256:…`) and ULIDs. New files
    containing resolved values are created `0600`.
    `--secrets never` keeps the `${VAR}` placeholder instead. It is the default for profiles
    from git sources, so your environment is never resolved into servers someone else defined

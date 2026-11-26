@@ -466,6 +466,56 @@ fn diffs_mask_secrets_already_in_tool_config() {
     assert!(out.contains("env = { API_KEY = '••••••••' }"), "{out}");
 }
 
+#[test]
+fn diffs_show_digests_and_ids_under_ordinary_names() {
+    let sb = Sandbox::empty();
+    sb.cli().args(["init", "prof"]).assert().success();
+    let old = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+    let new = "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae";
+    // The profile moves the image to a new digest.
+    fs::write(
+        sb.path("prof/kitbag.toml"),
+        format!(
+            "kitbag = 1\nname = \"prof\"\n\n[mcp_servers.img]\ncommand = \"docker\"\nargs = [\"run\", \"-i\", \"ghcr.io/acme/server@sha256:{new}\"]\n"
+        ),
+    )
+    .unwrap();
+    fs::create_dir_all(sb.home().join(".cursor")).unwrap();
+    fs::write(
+        sb.home().join(".cursor/mcp.json"),
+        format!(
+            "{{\n  \"mcpServers\": {{\n    \"img\": {{\n      \"command\": \"docker\",\n      \"args\": [\"run\", \"-i\", \"ghcr.io/acme/server@sha256:{old}\"],\n      \"env\": {{\n        \"CHECKSUM\": \"{old}\",\n        \"RUN_ID\": \"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\n        \"API_KEY\": \"FAKE{old}\"\n      }}\n    }}\n  }}\n}}\n"
+        ),
+    )
+    .unwrap();
+    let out = sb
+        .cli()
+        .args(["diff", "prof", "--to", "cursor"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let out = String::from_utf8(out).unwrap();
+    // Both sides of the changed pin are readable.
+    assert!(
+        out.contains(&format!("ghcr.io/acme/server@sha256:{old}")),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("ghcr.io/acme/server@sha256:{new}")),
+        "{out}"
+    );
+    assert!(out.contains(&format!("\"CHECKSUM\": \"{old}\"")), "{out}");
+    assert!(
+        out.contains("\"RUN_ID\": \"01ARZ3NDEKTSV4RRFFQ69G5FAV\""),
+        "{out}"
+    );
+    // Under a secret-sounding name a hex value is still masked.
+    assert!(!out.contains("FAKE"), "{out}");
+    assert!(out.contains("\"API_KEY\": \"••••••••\""), "{out}");
+}
+
 /// A `~/...` display path with the platform's separator.
 fn shown(path: &str) -> String {
     path.replace('/', std::path::MAIN_SEPARATOR_STR)
