@@ -52,7 +52,7 @@ dotfiles or a team repo), and each tool gets it in its own native format.
 
 ```sh
 # Install (pick one)
-cargo install --git https://github.com/cargopete/kitbag kitbag
+cargo install kitbag
 curl -fsSL https://raw.githubusercontent.com/cargopete/kitbag/main/install.sh | sh
 
 # See which tools kitbag found and what each supports
@@ -475,7 +475,8 @@ removed afterwards.
 
 ## Install
 
-- **Cargo:** `cargo install --git https://github.com/cargopete/kitbag kitbag`, or `cargo install --path .` from a checkout.
+- **Cargo:** `cargo install kitbag` (from [crates.io](https://crates.io/crates/kitbag)). For unreleased changes,
+  `cargo install --git https://github.com/cargopete/kitbag kitbag`, or `cargo install --path .` from a checkout.
 - **Prebuilt binaries:** static builds for Linux (x86_64/aarch64, musl), macOS (Intel and
   Apple Silicon) and Windows (x86_64/arm64) are attached to each
   [GitHub Release](https://github.com/cargopete/kitbag/releases), with SHA-256 checksums.
