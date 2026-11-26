@@ -260,7 +260,8 @@ fn list_targets_json() {
             "codex",
             "gemini-cli",
             "claude-desktop",
-            "antigravity"
+            "antigravity",
+            "opencode"
         ]
     );
     assert_eq!(v[2]["support"]["rules"], "folded");
@@ -314,6 +315,35 @@ fn apply_to_antigravity_then_undo() {
     sb.cli().arg("undo").assert().success();
     assert!(
         !sb.home().join(".gemini").exists(),
+        "undo removes what apply created"
+    );
+}
+
+#[test]
+fn apply_to_opencode_then_undo() {
+    let sb = Sandbox::empty();
+    sb.cli().args(["init", "prof"]).assert().success();
+    fs::write(
+        sb.path("prof/kitbag.toml"),
+        "kitbag = 1\nname = \"prof\"\n\n[mcp_servers.docs]\nurl = \"https://docs.example.com/mcp\"\nheaders = { Authorization = \"Bearer ${DOCS_TOKEN}\" }\n",
+    )
+    .unwrap();
+    sb.cli()
+        .args(["apply", "prof", "--to", "opencode", "--yes"])
+        .assert()
+        .success();
+    let cfg = sb.json("home/.config/opencode/opencode.json");
+    assert_eq!(
+        cfg["mcp"]["servers"]["docs"],
+        serde_json::json!({"type": "remote", "url": "https://docs.example.com/mcp", "headers": {"Authorization": "Bearer {env:DOCS_TOKEN}"}})
+    );
+    assert!(
+        sb.read("home/.config/opencode/AGENTS.md")
+            .contains("Write instructions every agent should follow")
+    );
+    sb.cli().arg("undo").assert().success();
+    assert!(
+        !sb.home().join(".config").exists(),
         "undo removes what apply created"
     );
 }

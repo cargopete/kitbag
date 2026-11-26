@@ -14,6 +14,7 @@ const ALL: &[&str] = &[
     "gemini-cli",
     "claude-desktop",
     "antigravity",
+    "opencode",
 ];
 
 /// Capture `from` in a fixture sandbox, save + reload the profile, apply it to `to`
@@ -128,6 +129,45 @@ fn antigravity_project_to_cursor_project() {
     // Cursor has no cwd.
     want.get_mut("chrome-devtools").unwrap().cwd = None;
     assert_eq!(b.mcp_servers, want);
+    assert_eq!(b.instructions, a.instructions);
+}
+
+#[test]
+fn opencode_to_claude_code_user() {
+    let (a, b) = round_trip("opencode", "claude-code", Scope::User);
+    assert!(a.mcp_servers.contains_key("context7"));
+    for (name, s) in &a.mcp_servers {
+        if s.disabled {
+            assert!(!b.mcp_servers.contains_key(name), "disabled: {name}");
+            continue;
+        }
+        assert_eq!(&b.mcp_servers[name], s, "server {name}");
+    }
+    assert_eq!(b.instructions, a.instructions);
+}
+
+#[test]
+fn claude_code_to_opencode_user() {
+    let (a, b) = round_trip("claude-code", "opencode", Scope::User);
+    // ${VAR} references go out as {env:VAR} and come back unchanged.
+    assert_eq!(b.mcp_servers, a.mcp_servers);
+    assert_eq!(b.instructions, a.instructions);
+}
+
+#[test]
+fn opencode_project_to_cursor_project() {
+    let (a, b) = round_trip("opencode", "cursor", Scope::Project);
+    let mut want = a.mcp_servers.clone();
+    // Cursor has no cwd.
+    want.get_mut("playwright").unwrap().cwd = None;
+    assert_eq!(b.mcp_servers, want);
+    assert_eq!(b.instructions, a.instructions);
+}
+
+#[test]
+fn cursor_project_to_opencode_project() {
+    let (a, b) = round_trip("cursor", "opencode", Scope::Project);
+    assert_eq!(b.mcp_servers, a.mcp_servers);
     assert_eq!(b.instructions, a.instructions);
 }
 

@@ -178,7 +178,7 @@ struct Place {
 #[derive(Args, Debug, Clone)]
 struct TargetArgs {
     /// Targets to write: ids (comma-separated: claude-code (alias: claude), cursor,
-    /// codex, gemini-cli, claude-desktop, antigravity), 'all' or 'detected'
+    /// codex, gemini-cli, claude-desktop, antigravity, opencode), 'all' or 'detected'
     #[arg(long, value_name = "IDS", default_value = "detected")]
     to: String,
     #[command(flatten)]

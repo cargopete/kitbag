@@ -158,7 +158,7 @@ fn older_and_newer_profiles_still_load() {
     assert!(
         stderr.contains(
             "warning: mcp_servers.heavy: unknown target 'vscode' in 'targets' is ignored"
-        ) && stderr.contains("claude-desktop, antigravity"),
+        ) && stderr.contains("claude-desktop, antigravity, opencode"),
         "{stderr}"
     );
     assert!(cursor_has(&sb, "heavy"));
