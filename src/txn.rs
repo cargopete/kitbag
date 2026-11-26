@@ -36,6 +36,12 @@ pub struct Entry {
     pub mode: Option<u32>,
     pub before_sha256: Option<String>,
     pub after_sha256: Option<String>,
+    /// Canonical form of the file's directory once it was written. Undo
+    /// refuses to touch the file if its directory now resolves elsewhere (a
+    /// symbolic link appeared or changed). Missing in transactions recorded
+    /// by kitbag 0.1.1 and older.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub real_parent: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +123,69 @@ pub fn file_mode(path: &Path) -> Option<u32> {
     {
         let _ = path;
         None
+    }
+}
+
+/// Where `path` really is: the deepest part of it that exists, resolved
+/// through every symbolic link, plus the rest as written. A dangling link is
+/// an error.
+pub fn real_location(path: &Path) -> io::Result<PathBuf> {
+    let mut rest = Vec::new();
+    let mut cur = path;
+    loop {
+        if fs::symlink_metadata(cur).is_ok() {
+            let mut real = fs::canonicalize(cur)?;
+            for c in rest.iter().rev() {
+                real.push(c);
+            }
+            return Ok(real);
+        }
+        match (cur.parent(), cur.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                cur = parent;
+            }
+            _ => return Ok(path.to_path_buf()),
+        }
+    }
+}
+
+/// Why undo must not touch `e.path`, if it must not: `--force` overrides
+/// "edited since", never this.
+fn moved(e: &Entry) -> Option<String> {
+    if fs::symlink_metadata(&e.path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Some("it is now a symbolic link, and kitbag wrote a regular file there".into());
+    }
+    let parent = e.path.parent()?;
+    let real = match real_location(parent) {
+        Ok(r) => r,
+        Err(err) => {
+            return Some(format!(
+                "{} can't be resolved ({err}); a symbolic link there may dangle",
+                parent.display()
+            ));
+        }
+    };
+    match &e.real_parent {
+        Some(rp) if *rp == real => None,
+        Some(rp) => Some(format!(
+            "{} now resolves to {}, not {} where kitbag wrote it (a symbolic link changed)",
+            parent.display(),
+            real.display(),
+            rp.display()
+        )),
+        // Recorded by an older kitbag, which wrote to resolved paths: a
+        // symbolic link anywhere in the directory now means it may have moved.
+        None => parent
+            .ancestors()
+            .find(|a| fs::symlink_metadata(a).is_ok_and(|m| m.file_type().is_symlink()))
+            .map(|link| {
+                format!(
+                    "{} is a symbolic link (to {}); this apply was recorded by an older kitbag, which didn't note where the file really was",
+                    link.display(),
+                    real.display()
+                )
+            }),
     }
 }
 
@@ -244,13 +313,14 @@ impl Store {
                         write_atomic(dest, content, mode)?;
                     }
                 }
+                tx.entries[i].real_parent = c.path.parent().and_then(|p| real_location(p).ok());
                 done = i + 1;
             }
             Ok(())
         })();
         if let Err(e) = result {
             let entries: Vec<Entry> = tx.entries[..done].to_vec();
-            let _ = self.restore(&tx, &entries);
+            let _ = self.restore(&tx, &entries, &[]);
             tx.status = Status::RolledBack;
             let _ = self.save(&tx);
             return Err(e.context("apply failed; changes already written were rolled back"));
@@ -276,6 +346,7 @@ impl Store {
                 mode: None,
                 before_sha256: sha256(cur.as_deref()),
                 after_sha256: sha256(c.after.as_deref()),
+                real_parent: None,
             };
             if let Some(data) = &cur {
                 let name = format!(
@@ -295,7 +366,9 @@ impl Store {
         Ok(())
     }
 
-    fn restore(&self, tx: &Transaction, entries: &[Entry]) -> Result<()> {
+    /// Put `entries` back as they were before `tx`. Directories `tx` created
+    /// are removed when empty, except around files in `kept`.
+    fn restore(&self, tx: &Transaction, entries: &[Entry], kept: &[PathBuf]) -> Result<()> {
         for e in entries.iter().rev() {
             match (&e.backup, e.existed) {
                 (Some(b), true) => {
@@ -315,6 +388,9 @@ impl Store {
             }
         }
         for d in tx.created_dirs.iter().rev() {
+            if kept.iter().any(|k| k.starts_with(d)) {
+                continue;
+            }
             let _ = fs::remove_dir(d); // only succeeds when empty
         }
         Ok(())
@@ -349,8 +425,12 @@ impl Store {
 
     /// Files modified after `tx` was applied (undo would overwrite those edits).
     pub fn drift(&self, tx: &Transaction) -> Result<Vec<PathBuf>> {
+        self.drift_in(&tx.entries)
+    }
+
+    fn drift_in(&self, entries: &[Entry]) -> Result<Vec<PathBuf>> {
         let mut out = Vec::new();
-        for e in &tx.entries {
+        for e in entries {
             if sha256(read_opt(&e.path)?.as_deref()) != e.after_sha256 {
                 out.push(e.path.clone());
             }
@@ -359,7 +439,12 @@ impl Store {
     }
 
     /// Undo transaction `id` (default: the most recent applied one).
-    pub fn undo(&self, id: Option<&str>, force: bool) -> Result<Transaction> {
+    ///
+    /// A file whose directory now resolves somewhere else than where it was
+    /// written (a symbolic link appeared or changed), or that is now a link
+    /// itself, is left alone even with `force`, and reported in
+    /// [`Undone::refused`]; the rest is undone.
+    pub fn undo(&self, id: Option<&str>, force: bool) -> Result<Undone> {
         let all = self.list()?;
         let mut tx = match id {
             Some(id) => {
@@ -394,7 +479,19 @@ impl Store {
                 later.join(", ")
             );
         }
-        let drifted = self.drift(&tx)?;
+        let mut refused = Vec::new();
+        let mut entries = Vec::new();
+        for e in &tx.entries {
+            match moved(e) {
+                Some(why) => refused.push(Refused {
+                    path: e.path.clone(),
+                    reason: why,
+                    backup: e.backup.as_ref().map(|b| self.tx_dir(&tx.id).join(b)),
+                }),
+                None => entries.push(e.clone()),
+            }
+        }
+        let drifted = self.drift_in(&entries)?;
         if !drifted.is_empty() && !force {
             let list: Vec<String> = drifted
                 .iter()
@@ -406,11 +503,28 @@ impl Store {
                 list.join("\n")
             );
         }
-        self.restore(&tx, &tx.entries)?;
+        let kept: Vec<PathBuf> = refused.iter().map(|r| r.path.clone()).collect();
+        self.restore(&tx, &entries, &kept)?;
         tx.status = Status::Undone;
         self.save(&tx)?;
-        Ok(tx)
+        Ok(Undone { tx, refused })
     }
+}
+
+/// The result of [`Store::undo`].
+#[derive(Debug)]
+pub struct Undone {
+    pub tx: Transaction,
+    /// Files left alone because they are no longer where kitbag wrote them.
+    pub refused: Vec<Refused>,
+}
+
+#[derive(Debug)]
+pub struct Refused {
+    pub path: PathBuf,
+    pub reason: String,
+    /// The backup of the original, when there was one.
+    pub backup: Option<PathBuf>,
 }
 
 #[cfg(test)]
@@ -448,7 +562,8 @@ mod tests {
         assert_eq!(store.list().unwrap().len(), 1);
 
         let undone = store.undo(None, false).unwrap();
-        assert_eq!(undone.id, tx.id);
+        assert_eq!(undone.tx.id, tx.id);
+        assert!(undone.refused.is_empty());
         assert_eq!(fs::read_to_string(&existing).unwrap(), "{}");
         assert!(!created.exists());
         assert!(
@@ -516,6 +631,51 @@ mod tests {
         store.undo(None, false).unwrap();
         store.undo(None, false).unwrap();
         assert!(!f.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn undo_never_follows_a_directory_swapped_for_a_link() {
+        use std::os::unix::fs::symlink;
+        for legacy in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Store::new(root.path().join("state"));
+            let real = root.path().join("real");
+            let kept = root.path().join("kept.txt");
+            let tx = store
+                .commit(
+                    &[
+                        change(&real.join("config.toml"), Some("x")),
+                        change(&kept, Some("y")),
+                    ],
+                    "t",
+                    &[],
+                    &WriteOptions::default(),
+                )
+                .unwrap();
+            assert_eq!(
+                tx.entries[0].real_parent.as_deref(),
+                Some(real.canonicalize().unwrap().as_path())
+            );
+            if legacy {
+                // Transactions written by 0.1.1 have no `real_parent`.
+                let file = store.tx_dir(&tx.id).join("transaction.json");
+                let mut v: serde_json::Value =
+                    serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+                for e in v["entries"].as_array_mut().unwrap() {
+                    e.as_object_mut().unwrap().remove("real_parent");
+                }
+                fs::write(&file, v.to_string()).unwrap();
+            }
+            let outside = root.path().join("outside");
+            fs::rename(&real, &outside).unwrap();
+            symlink(&outside, &real).unwrap();
+            let done = store.undo(None, true).unwrap();
+            assert_eq!(done.refused.len(), 1, "legacy: {legacy}");
+            assert!(done.refused[0].reason.contains("symbolic link"));
+            assert!(outside.join("config.toml").exists(), "legacy: {legacy}");
+            assert!(!kept.exists(), "the other file is still undone");
+        }
     }
 
     #[cfg(unix)]

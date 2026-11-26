@@ -326,8 +326,13 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
 - **Backups and undo.** Every apply is a transaction. The originals are copied to the state
   directory first, writes are atomic, and a failure part-way through rolls back.
   `kitbag history` lists applies, and `kitbag undo [id]` restores them byte for byte. Undo
-  refuses if you edited a file since, unless you pass `--force`. If a file changes between
-  planning and writing, the apply is refused.
+  refuses if you edited a file since, unless you pass `--force`. A file whose directory now
+  resolves somewhere else (a symbolic link appeared or changed since the apply), or that is
+  now a link itself, is left alone even with `--force`: undo reverts the rest, names it and
+  exits with status 1. If a file changes between planning and writing, the apply is refused.
+- **Profile directories.** `init --force` and `capture --force` replace a symbolic link inside
+  the profile directory (a file or a sub-directory) with a regular file or directory; they
+  never write through it.
 - **State directory:** `$KITBAG_STATE_DIR`, else `$XDG_STATE_HOME/kitbag`, else
   `~/.local/state/kitbag` (`%LOCALAPPDATA%\kitbag` on Windows).
 

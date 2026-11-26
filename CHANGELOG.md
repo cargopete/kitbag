@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- `undo --force` no longer follows a symbolic link that appeared or changed after the apply. Each apply records where every file's directory really was; undo leaves a file alone, even with `--force`, when its directory now resolves elsewhere or the file is now a link, reverts the rest and exits with status 1. Applies recorded by 0.1.1 are checked against the recorded path: any symbolic link in it is refused. `init --force` and `capture --force` replace symbolic links inside the profile directory instead of writing through them, and `init` without `--force` treats a dangling link as an existing file (#35).
+
 ## [0.1.1] - 2026-11-25
 
 ### Security

@@ -414,7 +414,7 @@ fn cmd_init(dir: &Path, name: Option<String>, force: bool) -> Result<i32> {
     if !force
         && let Some(f) = starter
             .iter()
-            .find(|f| crate::plan_fs::join_rel(dir, f).exists())
+            .find(|f| crate::plan_fs::present(&crate::plan_fs::join_rel(dir, f)))
     {
         bail!(
             "{} already exists; pass --force to replace the starter files",
@@ -442,12 +442,10 @@ fn cmd_init(dir: &Path, name: Option<String>, force: bool) -> Result<i32> {
         ("rules/example.md", STARTER_RULE.to_string()),
         ("commands/review.md", STARTER_COMMAND.to_string()),
     ];
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     for (rel, content) in &files {
-        let p = crate::plan_fs::join_rel(dir, rel);
-        if let Some(parent) = p.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&p, content).with_context(|| format!("writing {}", p.display()))?;
+        // Links in the profile are replaced, never written through.
+        crate::plan_fs::write_owned_file(dir, rel, content.as_bytes())?;
     }
     println!(
         "{} profile '{}' in {}",
@@ -790,7 +788,8 @@ fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) ->
 
 fn cmd_undo(ctx: &Ctx, id: Option<&str>, force: bool) -> Result<i32> {
     let store = Store::new(&ctx.state_dir);
-    let tx = store.undo(id, force)?;
+    let done = store.undo(id, force)?;
+    let tx = &done.tx;
     println!(
         "{} {} ({})",
         paint(GREEN, "Undid"),
@@ -798,6 +797,9 @@ fn cmd_undo(ctx: &Ctx, id: Option<&str>, force: bool) -> Result<i32> {
         visible_line(&tx.description)
     );
     for e in &tx.entries {
+        if done.refused.iter().any(|r| r.path == e.path) {
+            continue;
+        }
         let what = if e.existed { "restored" } else { "removed" };
         println!(
             "  {}  {}",
@@ -805,7 +807,30 @@ fn cmd_undo(ctx: &Ctx, id: Option<&str>, force: bool) -> Result<i32> {
             tildify(&e.path, &ctx.env.home)
         );
     }
-    Ok(0)
+    for r in &done.refused {
+        println!(
+            "  {}  {}: {}",
+            paint(RED, "left alone"),
+            tildify(&r.path, &ctx.env.home),
+            visible_line(&r.reason)
+        );
+        if let Some(b) = &r.backup {
+            println!(
+                "      the original is backed up in {}",
+                tildify(b, &ctx.env.home)
+            );
+        }
+    }
+    if done.refused.is_empty() {
+        Ok(0)
+    } else {
+        println!(
+            "\n{} {} file(s) are no longer where kitbag wrote them, so undo didn't touch them (--force doesn't change this). Check them by hand.",
+            paint(YELLOW, "Note:"),
+            done.refused.len()
+        );
+        Ok(1)
+    }
 }
 
 fn cmd_history(ctx: &Ctx, as_json: bool) -> Result<i32> {

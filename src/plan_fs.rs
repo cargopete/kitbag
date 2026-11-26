@@ -330,6 +330,46 @@ fn keep_bom(before: Option<&[u8]>, content: Vec<u8>) -> Vec<u8> {
     }
 }
 
+/// Does anything exist at `path`, a dangling symbolic link included?
+pub fn present(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+/// Remove the symbolic link at `path` itself (never its target).
+fn remove_link(path: &Path) -> Result<()> {
+    // On Windows a link to a directory is removed like a directory.
+    fs::remove_file(path)
+        .or_else(|e| fs::remove_dir(path).map_err(|_| e))
+        .with_context(|| format!("removing the symbolic link {}", path.display()))
+}
+
+/// Write `content` to `rel` (`/`-separated) inside `dir`, a directory kitbag
+/// owns (a profile). Symbolic links on the way, the file included, are
+/// removed and replaced by a real directory or file, so the write never lands
+/// on their target. `dir` itself may be a link (say into a dotfiles repo).
+pub fn write_owned_file(dir: &Path, rel: &str, content: &[u8]) -> Result<()> {
+    let parts: Vec<&str> = rel.split('/').collect();
+    let mut cur = dir.to_path_buf();
+    for (i, part) in parts.iter().enumerate() {
+        cur.push(part);
+        let last = i + 1 == parts.len();
+        match fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => remove_link(&cur)?,
+            Ok(m) if !last && !m.is_dir() => {
+                bail!("{} is not a directory", cur.display())
+            }
+            Ok(m) if last && m.is_dir() => {
+                bail!("{} is a directory, expected a file", cur.display())
+            }
+            _ => {}
+        }
+        if !last && !cur.is_dir() {
+            fs::create_dir(&cur).with_context(|| format!("creating {}", cur.display()))?;
+        }
+    }
+    crate::txn::write_atomic(&cur, content, None)
+}
+
 /// Join a `/`-separated relative path onto `base` using native separators.
 pub fn join_rel(base: &Path, rel: &str) -> PathBuf {
     rel.split('/')

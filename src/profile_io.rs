@@ -491,13 +491,11 @@ pub fn save(p: &Profile, dir: &Path, force: bool) -> Result<Vec<PathBuf>> {
         .into());
     }
     let mut written = Vec::new();
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     for (rel, content) in new_files {
-        let abs = crate::plan_fs::join_rel(dir, &rel);
-        if let Some(parent) = abs.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-        }
-        fs::write(&abs, content).with_context(|| format!("writing {}", abs.display()))?;
-        written.push(abs);
+        // Links in the profile are replaced, never written through.
+        crate::plan_fs::write_owned_file(dir, &rel, &content)?;
+        written.push(crate::plan_fs::join_rel(dir, &rel));
     }
     Ok(written)
 }
