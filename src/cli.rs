@@ -749,6 +749,9 @@ fn load_source(
 ) -> Result<(source::Resolved, Profile)> {
     let resolved = source::resolve(src, path, allow_insecure)?;
     let profile = profile_io::load(&resolved.dir)?;
+    for w in &profile.warnings {
+        eprintln!("{} {}", paint(YELLOW, "warning:"), visible_line(w));
+    }
     Ok((resolved, profile))
 }
 
@@ -1736,7 +1739,10 @@ fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
 
     if let Some(src) = src {
         println!("\n{}", paint(BOLD, "Profile"));
-        match load_source(src, t.path.as_deref(), t.allow_insecure_source) {
+        // Not load_source: doctor lists the profile's warnings itself.
+        let loaded = source::resolve(src, t.path.as_deref(), t.allow_insecure_source)
+            .and_then(|r| profile_io::load(&r.dir).map(|p| (r, p)));
+        match loaded {
             Err(e) => {
                 problems += 1;
                 println!("  {} {}", paint(RED, "error"), visible(&format!("{e:#}")));
@@ -1759,6 +1765,9 @@ fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
                         ""
                     }
                 );
+                for w in &p.warnings {
+                    println!("  {} {}", paint(YELLOW, "warn"), visible_line(w));
+                }
                 for leak in profile_io::scan_for_secrets(&p) {
                     problems += 1;
                     println!("  {} {}", paint(RED, "secret"), visible_line(&leak));

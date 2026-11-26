@@ -89,14 +89,6 @@ fn servers_are_only_applied_where_enabled() {
 #[test]
 fn bad_targeting_is_an_error() {
     let sb = Sandbox::empty();
-    write_profile(&sb, "p", &profile("shared", "targets = [\"vscode\"]\n"));
-    sb.cli()
-        .args(["diff", "p", "--to", "cursor"])
-        .assert()
-        .failure()
-        .stderr(contains(
-            "mcp_servers.heavy: unknown target 'vscode' in 'targets'; valid targets: claude-code, cursor, codex, gemini-cli, claude-desktop",
-        ));
     write_profile(
         &sb,
         "p",
@@ -110,6 +102,82 @@ fn bad_targeting_is_an_error() {
         .assert()
         .failure()
         .stderr(contains("set either 'targets'").and(contains("not both")));
+
+    // The older name and the new one for the same field.
+    write_profile(
+        &sb,
+        "p",
+        &profile("shared", "only = [\"cursor\"]\ntargets = [\"cursor\"]\n"),
+    );
+    sb.cli()
+        .args(["diff", "p", "--to", "cursor"])
+        .assert()
+        .failure()
+        .stderr(contains(
+            "mcp_servers.heavy: both 'only' and 'targets' are set; 'only' is the older name of 'targets', keep one",
+        ));
+    write_profile(
+        &sb,
+        "p",
+        &profile(
+            "shared",
+            "except = [\"cursor\"]\ndisabled_on = [\"codex\"]\n",
+        ),
+    );
+    sb.cli()
+        .args(["diff", "p", "--to", "cursor"])
+        .assert()
+        .failure()
+        .stderr(contains("both 'except' and 'disabled_on' are set"));
+
+    write_profile(&sb, "p", &profile("shared", "targets = []\n"));
+    sb.cli()
+        .args(["diff", "p", "--to", "cursor"])
+        .assert()
+        .failure()
+        .stderr(contains("'targets' is empty"));
+}
+
+#[test]
+fn older_and_newer_profiles_still_load() {
+    // A target this kitbag doesn't know (from a newer one, say) is a warning
+    // and matches nothing; the rest of the profile applies.
+    let sb = Sandbox::empty();
+    write_profile(
+        &sb,
+        "p",
+        &profile("shared", "targets = [\"vscode\", \"cursor\"]\n"),
+    );
+    let out = sb
+        .cli()
+        .args(["apply", "p", "--to", "cursor,codex", "--yes"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(
+            "warning: mcp_servers.heavy: unknown target 'vscode' in 'targets' is ignored"
+        ) && stderr.contains("claude-desktop, antigravity"),
+        "{stderr}"
+    );
+    assert!(cursor_has(&sb, "heavy"));
+    assert!(!sb.read(CODEX).contains("heavy"));
+    sb.cli().args(["doctor", "p"]).assert().stdout(contains(
+        "warn mcp_servers.heavy: unknown target 'vscode' in 'targets' is ignored",
+    ));
+
+    // An empty 'only' meant no restriction before 'targets', and still does.
+    let sb = Sandbox::empty();
+    write_profile(&sb, "p", &profile("shared", "only = []\n"));
+    sb.cli()
+        .args(["apply", "p", "--to", "cursor", "--yes"])
+        .assert()
+        .success()
+        .stderr(contains(
+            "warning: mcp_servers.heavy: 'only' is empty, which means no restriction",
+        ));
+    assert!(cursor_has(&sb, "heavy"));
 }
 
 #[test]

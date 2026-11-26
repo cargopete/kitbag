@@ -63,7 +63,7 @@ struct Manifest {
 
 /// Parse and validate a `kitbag.toml` manifest into a profile without file-based parts.
 pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> {
-    let m: Manifest = toml::from_str(text).map_err(|e| {
+    let mut m: Manifest = toml::from_str(text).map_err(|e| {
         ProfileError::new(
             format!("{} is not a valid kitbag manifest", file.display()),
             vec![crate::edit::safe_parse_error(
@@ -83,7 +83,8 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
     if m.name.trim().is_empty() {
         issues.push("'name' must not be empty".into());
     }
-    for (name, s) in &m.mcp_servers {
+    let mut warnings = Vec::new();
+    for (name, s) in &mut m.mcp_servers {
         if !is_valid_name(name) {
             issues.push(format!(
                 "mcp_servers.{name}: names may only contain letters, digits, '.', '_' and '-'"
@@ -92,8 +93,13 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
         for i in s.validate() {
             issues.push(format!("mcp_servers.{name}: {i}"));
         }
-        for i in s.targeting_issues(&crate::adapters::ids()) {
+        let (legacy_errors, legacy_warnings) = s.take_legacy_targeting();
+        let (errors, unknown) = s.targeting_issues(&crate::adapters::ids());
+        for i in legacy_errors.into_iter().chain(errors) {
             issues.push(format!("mcp_servers.{name}: {i}"));
+        }
+        for w in legacy_warnings.into_iter().chain(unknown) {
+            warnings.push(format!("mcp_servers.{name}: {w}"));
         }
     }
     if !issues.is_empty() {
@@ -107,6 +113,7 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
         description: m.description.filter(|d| !d.trim().is_empty()),
         mcp_servers: m.mcp_servers,
         settings: m.settings,
+        warnings,
         ..Profile::default()
     })
 }
@@ -880,15 +887,54 @@ mod tests {
                 .contains("mcp_servers.a: set either 'targets'"),
             "{e}"
         );
-        let unknown =
-            "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\ntargets = [\"claude\"]\n";
-        let e = parse_manifest(unknown, Path::new("k")).unwrap_err();
+        let both_names = "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\nonly = [\"codex\"]\ntargets = [\"codex\"]\n";
+        let e = parse_manifest(both_names, Path::new("k")).unwrap_err();
         assert!(
             e.to_string().contains(
-                "unknown target 'claude' in 'targets'; valid targets: claude-code, cursor, codex, gemini-cli, claude-desktop"
+                "mcp_servers.a: both 'only' and 'targets' are set; 'only' is the older name of 'targets'"
             ),
             "{e}"
         );
+        let empty = "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\ntargets = []\n";
+        let e = parse_manifest(empty, Path::new("k")).unwrap_err();
+        assert!(e.to_string().contains("'targets' is empty"), "{e}");
+    }
+
+    #[test]
+    fn targeting_warnings() {
+        // A target from a newer kitbag loads, with a warning, and matches nothing.
+        let unknown = "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\ntargets = [\"claude\", \"codex\"]\n[mcp_servers.b]\ncommand = \"b\"\nexcept = [\"vscode\"]\n";
+        let p = parse_manifest(unknown, Path::new("k")).unwrap();
+        assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
+        assert!(
+            p.warnings[0]
+                .starts_with("mcp_servers.a: unknown target 'claude' in 'targets' is ignored"),
+            "{:?}",
+            p.warnings
+        );
+        assert!(p.warnings[0].contains(
+            "valid targets: claude-code, cursor, codex, gemini-cli, claude-desktop, antigravity"
+        ));
+        assert!(
+            p.warnings[1].starts_with("mcp_servers.b: unknown target 'vscode' in 'disabled_on'")
+        );
+        assert!(p.mcp_servers["a"].applies_to("codex"));
+        assert!(!p.mcp_servers["a"].applies_to("cursor"));
+        assert!(p.mcp_servers["b"].applies_to("cursor"));
+        // The name is kept, so re-saving the profile doesn't lose it.
+        assert!(manifest_toml(&p).contains("targets = [\"claude\", \"codex\"]"));
+
+        // An empty 'only' keeps its old meaning: no restriction.
+        let empty_only = "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\nonly = []\n";
+        let p = parse_manifest(empty_only, Path::new("k")).unwrap();
+        assert_eq!(p.mcp_servers["a"].targets, None);
+        assert!(p.mcp_servers["a"].applies_to("cursor"));
+        assert!(
+            p.warnings[0].contains("'only' is empty"),
+            "{:?}",
+            p.warnings
+        );
+        assert!(!manifest_toml(&p).contains("only"));
     }
 
     #[test]
