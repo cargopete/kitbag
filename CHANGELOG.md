@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- New target `antigravity` for Google Antigravity (app, IDE and CLI), for MCP servers and instructions at user and project scope. Servers go to `~/.gemini/config/mcp_config.json` or `.agents/mcp_config.json`, with `serverUrl` for remote servers and `disabled` for disabled ones; your own keys on an entry (`disabledTools`, `timeoutSeconds` ...) are kept. Antigravity's docs describe no env-reference syntax, so references are resolved at apply time like Claude Desktop (`--secrets never` keeps placeholders) and the file ends up mode 0600; SSE servers are skipped. Instructions go to `~/.gemini/GEMINI.md`, the same file and managed block Gemini CLI uses, so applying to both writes one copy, and to `AGENTS.md` in a project, shared with Codex and Cursor. Capture also reads the other instructions files Antigravity loads. Rules, skills and workflows are not supported yet (#27).
+
 ## [0.1.2] - 2026-11-26
 
 ### Added
