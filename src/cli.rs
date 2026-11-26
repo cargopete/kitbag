@@ -1418,6 +1418,13 @@ fn cmd_undo(ctx: &Ctx, id: Option<&str>, force: bool) -> Result<i32> {
             );
         }
     }
+    for t in &done.tampered {
+        println!(
+            "  {}  {}: restored from a backup that changed after the apply (--force)",
+            paint(YELLOW, "warning"),
+            tildify(&t.path, &ctx.env.home)
+        );
+    }
     if done.refused.is_empty() {
         Ok(0)
     } else {

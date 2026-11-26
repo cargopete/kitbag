@@ -306,6 +306,43 @@ fn undo_refuses_when_files_changed_since() {
     assert!(!sb.home().join(".claude/CLAUDE.md").exists());
 }
 
+#[test]
+fn undo_refuses_a_tampered_backup_without_force() {
+    let sb = Sandbox::empty();
+    sb.cli().args(["init", "prof"]).assert().success();
+    fs::create_dir_all(sb.home().join(".claude")).unwrap();
+    fs::write(sb.home().join(".claude/CLAUDE.md"), "mine\n").unwrap();
+    sb.cli()
+        .args(["apply", "prof", "--to", "claude-code", "--yes"])
+        .assert()
+        .success();
+    let tx = fs::read_dir(sb.state().join("backups"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let backup = fs::read_dir(&tx)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with("CLAUDE.md"))
+        .unwrap();
+    fs::write(&backup, "planted\n").unwrap();
+    let applied = sb.read("home/.claude/CLAUDE.md");
+    sb.cli()
+        .arg("undo")
+        .assert()
+        .code(2)
+        .stderr(contains("backups were changed").and(contains("--force")));
+    assert_eq!(sb.read("home/.claude/CLAUDE.md"), applied);
+    sb.cli()
+        .args(["undo", "--force"])
+        .assert()
+        .success()
+        .stdout(contains("restored from a backup that changed"));
+    assert_eq!(sb.read("home/.claude/CLAUDE.md"), "planted\n");
+}
+
 /// A `~/...` display path with the platform's separator.
 fn shown(path: &str) -> String {
     path.replace('/', std::path::MAIN_SEPARATOR_STR)

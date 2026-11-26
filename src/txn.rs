@@ -34,6 +34,8 @@ pub struct Entry {
     pub backup: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<u32>,
+    /// SHA-256 of the file before the apply, which is also what its backup
+    /// holds: undo refuses a backup that no longer matches it.
     pub before_sha256: Option<String>,
     pub after_sha256: Option<String>,
     /// Canonical form of the file's directory once it was written. Undo
@@ -477,6 +479,27 @@ impl Store {
         self.drift_in(&tx.entries)
     }
 
+    /// Backups of `entries` that no longer hold what was saved at apply time.
+    /// Entries without a recorded hash can't be checked and are trusted.
+    fn tampered_backups(&self, tx: &Transaction, entries: &[Entry]) -> Result<Vec<Tampered>> {
+        let mut out = Vec::new();
+        for e in entries {
+            let (Some(b), Some(want)) = (&e.backup, &e.before_sha256) else {
+                continue;
+            };
+            let backup = self.tx_dir(&tx.id).join(b);
+            let data = fs::read(&backup)
+                .with_context(|| format!("reading backup of {}", e.path.display()))?;
+            if sha256(Some(&data)).as_ref() != Some(want) {
+                out.push(Tampered {
+                    path: e.path.clone(),
+                    backup,
+                });
+            }
+        }
+        Ok(out)
+    }
+
     fn drift_in(&self, entries: &[Entry]) -> Result<Vec<PathBuf>> {
         let mut out = Vec::new();
         for e in entries {
@@ -493,6 +516,10 @@ impl Store {
     /// written (a symbolic link appeared or changed), or that is now a link
     /// itself, is left alone even with `force`, and reported in
     /// [`Undone::refused`]; the rest is undone.
+    ///
+    /// A backup that changed since the apply (its SHA-256 no longer matches
+    /// the one recorded) is refused unless `force`; with `force` it is
+    /// restored and listed in [`Undone::tampered`].
     ///
     /// Transactions recorded by kitbag 0.1.1 and older don't say where the
     /// files really were, so for those any symbolic link in a file's path
@@ -575,11 +602,27 @@ impl Store {
                 list.join("\n")
             );
         }
+        let tampered = self.tampered_backups(&tx, &entries)?;
+        if !tampered.is_empty() && !force {
+            let list: Vec<String> = tampered
+                .iter()
+                .map(|t| format!("  {} (backup {})", t.path.display(), t.backup.display()))
+                .collect();
+            bail!(
+                "these backups were changed after {} was applied, so they may not be your original files:\n{}\nnothing was undone; check them, then re-run with --force to restore them anyway",
+                tx.id,
+                list.join("\n")
+            );
+        }
         let kept: Vec<PathBuf> = refused.iter().map(|r| r.path.clone()).collect();
         self.restore(&tx, &entries, &kept)?;
         tx.status = Status::Undone;
         self.save(&tx)?;
-        Ok(Undone { tx, refused })
+        Ok(Undone {
+            tx,
+            refused,
+            tampered,
+        })
     }
 }
 
@@ -589,6 +632,15 @@ pub struct Undone {
     pub tx: Transaction,
     /// Files left alone because they are no longer where kitbag wrote them.
     pub refused: Vec<Refused>,
+    /// Files restored with `force` from a backup that changed since the apply.
+    pub tampered: Vec<Tampered>,
+}
+
+/// A backup whose content no longer matches the hash recorded at apply time.
+#[derive(Debug)]
+pub struct Tampered {
+    pub path: PathBuf,
+    pub backup: PathBuf,
 }
 
 #[derive(Debug)]
@@ -663,6 +715,65 @@ mod tests {
         assert!(e.to_string().contains("modified after"), "{e}");
         store.undo(None, true).unwrap();
         assert!(!f.exists());
+    }
+
+    #[test]
+    fn undo_refuses_a_backup_changed_since_the_apply() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path().join("state"));
+        let f = root.path().join("f.txt");
+        fs::write(&f, "original").unwrap();
+        let tx = store
+            .commit(
+                &[change(&f, Some("kitbag"))],
+                "t",
+                &[],
+                &WriteOptions::default(),
+            )
+            .unwrap();
+        let backup = store
+            .tx_dir(&tx.id)
+            .join(tx.entries[0].backup.as_ref().unwrap());
+        fs::write(&backup, "planted").unwrap();
+        let e = store.undo(None, false).unwrap_err().to_string();
+        assert!(e.contains("backups were changed"), "{e}");
+        assert!(e.contains("--force") && !e.contains("planted"), "{e}");
+        assert_eq!(fs::read_to_string(&f).unwrap(), "kitbag", "nothing undone");
+        assert_eq!(store.list().unwrap()[0].status, Status::Applied);
+
+        let done = store.undo(None, true).unwrap();
+        assert_eq!(done.tampered.len(), 1);
+        assert_eq!(done.tampered[0].path, f);
+        assert_eq!(fs::read_to_string(&f).unwrap(), "planted");
+    }
+
+    /// A backup without a recorded hash (hand-edited or very old state) can't
+    /// be checked; undo restores it as before.
+    #[test]
+    fn undo_restores_backups_without_a_recorded_hash() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path().join("state"));
+        let f = root.path().join("f.txt");
+        fs::write(&f, "original").unwrap();
+        let tx = store
+            .commit(
+                &[change(&f, Some("kitbag"))],
+                "t",
+                &[],
+                &WriteOptions::default(),
+            )
+            .unwrap();
+        let file = store.tx_dir(&tx.id).join("transaction.json");
+        let mut v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        v["entries"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("before_sha256");
+        fs::write(&file, v.to_string()).unwrap();
+        let done = store.undo(None, false).unwrap();
+        assert!(done.tampered.is_empty());
+        assert_eq!(fs::read_to_string(&f).unwrap(), "original");
     }
 
     #[test]
