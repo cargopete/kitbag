@@ -34,6 +34,7 @@ Examples:
   kitbag diff ~/dotagents --to codex
   kitbag apply github:you/dotagents --to all
   kitbag apply ~/dotagents --project . --to cursor,codex
+  kitbag apply ~/dotagents --to gemini-cli,antigravity
   kitbag status ~/dotagents
   kitbag sync ~/dotagents --from claude-code
   kitbag undo";
@@ -174,7 +175,8 @@ struct Place {
 
 #[derive(Args, Debug, Clone)]
 struct TargetArgs {
-    /// Targets to write: ids (comma-separated), 'all' or 'detected'
+    /// Targets to write: ids (comma-separated: claude-code, cursor, codex, gemini-cli,
+    /// claude-desktop, antigravity), 'all' or 'detected'
     #[arg(long, value_name = "IDS", default_value = "detected")]
     to: String,
     #[command(flatten)]

@@ -8,7 +8,8 @@
 kitbag captures your MCP servers, instructions, rules, slash commands, skills and settings
 from the AI coding tools you already use. It stores them as a small, git-friendly **profile** with secrets
 redacted and applies that profile to any other tool in one step. Claude Code, Cursor,
-OpenAI Codex CLI, Gemini CLI and Claude Desktop are supported, at user and project scope.
+OpenAI Codex CLI, Gemini CLI, Claude Desktop and Google Antigravity (MCP servers and
+instructions) are supported, at user and project scope.
 
 > [!IMPORTANT]
 > **Status: early release (v0.1).** kitbag works today and is tested against real setups,
@@ -82,6 +83,7 @@ Starting from scratch? `kitbag init my-profile` writes a commented starter profi
 | `codex`          | OpenAI Codex CLI  | user, project | ✓   | ✓            | folded     | user         | ✓      | ✓        |
 | `gemini-cli`     | Gemini CLI        | user, project | ✓   | ✓            | folded     | ✓            | ✓      | ✓        |
 | `claude-desktop` | Claude Desktop    | user          | ✓ (local servers) | -  | -          | -            | -      | -        |
+| `antigravity`    | Google Antigravity | user, project | ✓  | ✓            | -          | -            | -      | -        |
 
 *folded*: the tool has no file-scoped rules, so rules become labelled sections of its single
 instructions file. Each section records the rule's globs, and `capture` splits them back out
@@ -96,6 +98,7 @@ Where things go:
 | Codex CLI | `$CODEX_HOME/config.toml` (default `~/.codex`), `$CODEX_HOME/AGENTS.md`, `$CODEX_HOME/prompts/`, `~/.agents/skills/` | `.codex/config.toml` (trusted projects only), `AGENTS.md`, `.agents/skills/` |
 | Gemini CLI | `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`, `~/.gemini/commands/*.toml`, `~/.gemini/skills/` | `.gemini/settings.json`, `GEMINI.md`, `.gemini/commands/`, `.gemini/skills/` |
 | Claude Desktop | `claude_desktop_config.json` in `~/Library/Application Support/Claude` (macOS), `%APPDATA%\Claude` (Windows), `~/.config/Claude` (Linux) | n/a |
+| Antigravity | `~/.gemini/config/mcp_config.json`, `~/.gemini/GEMINI.md` (the same file and managed block as Gemini CLI); capture also reads `~/.gemini/AGENTS.md` and `~/.gemini/config/{AGENTS,GEMINI}.md` | `.agents/mcp_config.json`, `AGENTS.md` (shared with Codex and Cursor); capture also reads `GEMINI.md` and `.agents/{AGENTS,GEMINI}.md` |
 
 How each tool receives `${VAR}` references:
 
@@ -106,6 +109,7 @@ How each tool receives `${VAR}` references:
 | Gemini CLI | `${VAR}` (expanded by Gemini CLI; defaults resolved at apply time) | no |
 | Codex CLI | `env_vars = ["VAR"]`, `bearer_token_env_var`, `env_http_headers` (read from the environment by Codex) | no, for same-name env vars, bearer tokens and whole-value headers. Anything else is resolved (see below) |
 | Claude Desktop | resolved value (no interpolation support) | yes, unless `--secrets never` |
+| Antigravity | resolved value (its docs describe no interpolation); remote servers get `serverUrl`, SSE servers are skipped | yes, unless `--secrets never` |
 
 ## The profile format
 
@@ -138,7 +142,7 @@ description = "Optional"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
 env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_PERSONAL_ACCESS_TOKEN}" }
-# cwd = "/path"               # working directory (Codex, Gemini CLI)
+# cwd = "/path"               # working directory (Codex, Gemini CLI, Antigravity)
 
 [mcp_servers.linear]          # remote server; transport inferred from `url`
 url = "https://mcp.linear.app/mcp"
@@ -146,7 +150,7 @@ headers = { Authorization = "Bearer ${LINEAR_API_KEY}" }
 # transport = "sse"           # stdio | http | sse (only needed for legacy SSE)
 # only = ["claude-code"]      # restrict to these targets
 # except = ["claude-desktop"] # or exclude some
-# disabled = true             # keep the definition; Codex writes enabled = false, others skip it
+# disabled = true             # keep the definition; Codex writes enabled = false, Antigravity disabled = true, others skip it
 
 [settings.claude-code]        # per-tool settings, allow-listed keys only
 model = "opus"
@@ -549,6 +553,9 @@ Good next candidates: Windsurf, Zed, VS Code / GitHub Copilot, OpenCode.
   builds.
 - At project scope, Cursor and Codex both read `AGENTS.md`. When both are targeted, Cursor also
   sees Codex's folded rules section.
+- **Antigravity** shares `~/.gemini/GEMINI.md` with Gemini CLI, so it also sees the rules Gemini
+  CLI folds into that file. kitbag doesn't write Antigravity's own rules, skills or workflows
+  yet, and leaves its MCP tool approvals (Ask by default) alone.
 - Apply is additive and doesn't delete entries that were removed from the profile (see above).
 - **Not carried yet:** Claude Code subagents (`agents/`), output styles (`output-styles/`),
   plugins and hooks. Capture lists what it found of these and leaves them out. It also drops
