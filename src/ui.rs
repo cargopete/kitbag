@@ -154,8 +154,9 @@ pub fn render_diff(
             paint(BOLD, visible_line(display_path))
         );
     };
-    let before = mask(&before, sensitive);
-    let after = mask(&after, sensitive);
+    // Private keys span lines, so they are masked before the text is split.
+    let before = crate::secrets::mask_key_blocks(&mask(&before, sensitive));
+    let after = crate::secrets::mask_key_blocks(&mask(&after, sensitive));
     let diff = TextDiff::from_lines(&before, &after);
     let display_path = visible_line(display_path);
     let display_path = display_path.as_ref();

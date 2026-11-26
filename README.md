@@ -265,7 +265,9 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
    Redaction covers env values, headers, URL credentials (`user:pass@` and `:pass@`), query
    parameters and the literal fallback of `${VAR:-fallback}` (it becomes `${VAR}`). URLs are
    checked wherever they appear (`url`, args, `--flag=URL`, env values): tokens in the path
-   (Slack and Discord webhooks, Zapier-style `/mcp/s/<token>/`, random-looking segments) and a
+   (Slack and Discord webhooks, Zapier-style `/mcp/s/<token>/`, random-looking segments, and
+   hex-only segments of 32 digits or more, except a full commit SHA of 40 or 64 digits after
+   `commit`, `blob`, `tree` and the like) and a
    token used as the username (`https://<token>@host`) are replaced; `git@` or `bob@` stay. It also covers
    secrets passed through `args`, as in `--api-key=…`, `--token …`, `NAME=value` (e.g.
    `docker -e`), `Authorization: Bearer …` (e.g. `mcp-remote --header`) and URLs.
@@ -285,7 +287,9 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
    is skipped with a warning. A skill directory that is itself a link (say into a git
    checkout) works as usual.
    Two servers with different secrets under the same key get separate variables
-   (`API_KEY`, `MONGO_API_KEY`), and identical secrets share one.
+   (`API_KEY`, `MONGO_API_KEY`), and identical secrets share one. Two different secrets
+   that would get the same name, in one server or across servers, get a numbered one
+   (`API_KEY_2`) instead of sharing it.
 2. **The profile is checked before it is written.** If anything still looks like a credential
    (the same checks as capture), kitbag refuses to write the profile at all. `kitbag doctor`
    runs the same check on any profile.
@@ -296,7 +300,8 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
    such as anything for Claude Desktop, or a Codex env var whose name differs from its source.
    kitbag resolves those from your environment at apply time and warns per field. The value is
    masked as `••••••••` in every diff. Diffs also mask anything that already looks like a
-   credential in your existing files. New files containing resolved values are created `0600`.
+   credential in your existing files, including private keys that span several lines, and
+   anything capture would redact. New files containing resolved values are created `0600`.
    `--secrets never` keeps the `${VAR}` placeholder instead. It is the default for profiles
    from git sources, so your environment is never resolved into servers someone else defined
    unless you pass `--secrets resolve` (or `--trust-source`). Unset variables are reported and
@@ -339,7 +344,9 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
 - **Backups and undo.** Every apply is a transaction. The originals are copied to the state
   directory first, writes are atomic, and a failure part-way through rolls back.
   `kitbag history` lists applies, and `kitbag undo [id]` restores them byte for byte. Undo
-  refuses if you edited a file since, unless you pass `--force`. A file whose directory now
+  refuses if you edited a file since, or if a backup no longer matches the SHA-256 recorded
+  when it was taken, unless you pass `--force`. (The hash sits next to the backups, so it
+  catches a backup that changed on its own, not someone who can write to the state directory.) A file whose directory now
   resolves somewhere else (a symbolic link appeared or changed since the apply), or that is
   now a link itself, is left alone even with `--force`: undo reverts the rest, names it and
   exits with status 1. If a file changes between planning and writing, the apply is refused.
@@ -473,7 +480,11 @@ Common options:
   `//sub/dir` to pick a sub-directory and `#ref` for a branch or tag.
 
 kitbag clones with your own `git` (shallow, no prompts) into a temporary directory that is
-removed afterwards.
+removed afterwards. Cleartext `http://` and `git://` sources are refused, because anyone on the
+network could swap the profile, and so is an `https://` server that redirects to one; pass
+`--allow-insecure-source` to accept them. Credentials in a URL (`https://user:token@host/…`)
+are passed to `git` only: plans, errors, `history` and the transaction log show the URL
+without them.
 
 ## Install
 

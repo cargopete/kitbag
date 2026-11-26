@@ -553,6 +553,9 @@ pub struct Redaction {
     /// SHA-256 of the redacted value (set during capture), so identical secrets
     /// can share one variable while different ones never do.
     pub fingerprint: Option<String>,
+    /// The MCP server the value came from. Server names may contain dots
+    /// (`a.b`), so the server can't be read back from `location` reliably.
+    pub server: Option<String>,
 }
 
 /// `ENV_VAR_NAME` built from parts (`"github", "apiKey"` -> `GITHUB_API_KEY`).
@@ -590,24 +593,71 @@ static URL_USERINFO: LazyLock<Regex> = LazyLock::new(|| {
 static URL_QUERY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"([?&])([^=&#\s]+)=([^&#\s]*)").expect("valid regex"));
 
+/// SHA-256 of a redacted secret, so identical secrets can share one variable
+/// while different ones never do.
+pub fn fingerprint(secret: &str) -> String {
+    crate::txn::sha256(Some(secret.as_bytes())).unwrap_or_default()
+}
+
+/// The redactions of one MCP server, and the env var names given out so far.
+/// The same secret keeps its name; a different secret that would get a name
+/// already taken gets a numbered one (`API_KEY_2`), so two secrets never end
+/// up sharing a variable.
+#[derive(Default)]
+struct Found {
+    redactions: Vec<Redaction>,
+    /// Env var name -> fingerprint of the secret it stands for.
+    names: HashMap<String, String>,
+}
+
+impl Found {
+    /// Record that the secret at `location` is replaced by a reference to a
+    /// variable named like `want`; returns the variable's name.
+    fn add(&mut self, location: &str, want: String, reason: &'static str, secret: &str) -> String {
+        let fp = fingerprint(secret);
+        let mut name = want.clone();
+        let mut n = 1;
+        while let Some(taken) = self.names.get(&name) {
+            if *taken == fp {
+                break;
+            }
+            n += 1;
+            name = format!("{want}_{n}");
+        }
+        self.names.entry(name.clone()).or_insert_with(|| fp.clone());
+        self.redactions.push(Redaction {
+            location: location.to_string(),
+            env_var: name.clone(),
+            reason,
+            fingerprint: Some(fp),
+            server: None,
+        });
+        name
+    }
+}
+
 /// Replace secret-looking values in an MCP server definition with env references.
 pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Redaction>) {
     let mut s = input.clone();
-    let mut out = Vec::new();
+    let mut found = Found::default();
     let loc = format!("mcp_servers.{server_name}");
 
     // `${API_KEY:-literal}`: the literal is written wherever API_KEY is unset.
+    // The variable keeps its name: it is the user's own.
     let locations: Vec<String> = s.strings().into_iter().map(|(l, _)| l).collect();
     for l in locations {
         s.map_string_at(&l, |v| {
             REF_RE
                 .replace_all(v, |c: &Captures| match c.get(2) {
                     Some(fb) if classify(Some(&c[1]), fb.as_str()).is_some() => {
-                        out.push(Redaction {
+                        let fp = fingerprint(fb.as_str());
+                        found.names.entry(c[1].to_string()).or_insert(fp.clone());
+                        found.redactions.push(Redaction {
                             location: format!("{loc}.{l}"),
                             env_var: c[1].to_string(),
                             reason: "secret-fallback",
-                            fingerprint: None,
+                            fingerprint: Some(fp),
+                            server: None,
                         });
                         reference(&c[1])
                     }
@@ -618,27 +668,13 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
     }
 
     for (k, v) in s.env.iter_mut() {
+        let at = format!("{loc}.env.{k}");
         if let Some(reason) = classify(Some(k), v) {
-            let env_var = env_var_name(&[k]);
+            let env_var = found.add(&at, env_var_name(&[k]), reason, v);
             *v = reference(&env_var);
-            out.push(Redaction {
-                location: format!("{loc}.env.{k}"),
-                env_var,
-                reason,
-                fingerprint: None,
-            });
         } else if URL_LIKE.is_match(v) {
             // `API_BASE = "https://x/v1?token=..."`: keep the URL, lose the token.
-            let (value, found) = redact_url(server_name, v);
-            *v = value;
-            for (env_var, reason) in found {
-                out.push(Redaction {
-                    location: format!("{loc}.env.{k}"),
-                    env_var,
-                    reason,
-                    fingerprint: None,
-                });
-            }
+            *v = redact_url_into(server_name, v, &at, &mut found);
         }
     }
 
@@ -660,34 +696,28 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
             } else {
                 k.as_str()
             };
-            let env_var = env_var_name(&[server_name, part]);
+            let env_var = found.add(
+                &format!("{loc}.headers.{k}"),
+                env_var_name(&[server_name, part]),
+                reason,
+                &raw,
+            );
             *v = match scheme {
                 Some(sc) => format!("{sc} {}", reference(&env_var)),
                 None => reference(&env_var),
             };
-            out.push(Redaction {
-                location: format!("{loc}.headers.{k}"),
-                env_var,
-                reason,
-                fingerprint: None,
-            });
         }
     }
 
     let mut n = 0;
     for i in 0..s.args.len() {
         let a = s.args[i].clone();
+        let at = format!("{loc}.args[{i}]");
         if let Some(c) = FLAG_EQ.captures(&a) {
             // `--header=Authorization: Bearer ...`
-            match redact_header_arg(server_name, &c[2]) {
-                HeaderArg::Redacted(new, env_var, reason) => {
+            match redact_header_arg(server_name, &c[2], &at, &mut found) {
+                HeaderArg::Redacted(new) => {
                     s.args[i] = format!("{}={new}", &c[1]);
-                    out.push(Redaction {
-                        location: format!("{loc}.args[{i}]"),
-                        env_var,
-                        reason,
-                        fingerprint: None,
-                    });
                     continue;
                 }
                 HeaderArg::Referenced => continue,
@@ -696,27 +726,13 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
             let flag = c[1].trim_start_matches('-').to_string();
             if URL_LIKE.is_match(&c[2]) && !is_secret_name(&flag) {
                 // `--endpoint=https://host/sse?api_key=...`
-                let (value, found) = redact_url(server_name, &c[2]);
+                let value = redact_url_into(server_name, &c[2], &at, &mut found);
                 s.args[i] = format!("{}={value}", &c[1]);
-                for (env_var, reason) in found {
-                    out.push(Redaction {
-                        location: format!("{loc}.args[{i}]"),
-                        env_var,
-                        reason,
-                        fingerprint: None,
-                    });
-                }
                 continue;
             }
             if let Some(reason) = classify(Some(&flag), &c[2]) {
-                let env_var = env_var_name(&[server_name, &flag]);
+                let env_var = found.add(&at, env_var_name(&[server_name, &flag]), reason, &c[2]);
                 s.args[i] = format!("{}={}", &c[1], reference(&env_var));
-                out.push(Redaction {
-                    location: format!("{loc}.args[{i}]"),
-                    env_var,
-                    reason,
-                    fingerprint: None,
-                });
             }
             continue;
         }
@@ -726,39 +742,19 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
         // `NAME=value` (docker -e, env-style wrappers).
         if let Some(c) = ASSIGN.captures(&a) {
             if let Some(reason) = classify(Some(&c[1]), &c[2]) {
-                let env_var = env_var_name(&[&c[1]]);
+                let env_var = found.add(&at, env_var_name(&[&c[1]]), reason, &c[2]);
                 s.args[i] = format!("{}={}", &c[1], reference(&env_var));
-                out.push(Redaction {
-                    location: format!("{loc}.args[{i}]"),
-                    env_var,
-                    reason,
-                    fingerprint: None,
-                });
             } else if URL_LIKE.is_match(&c[2]) {
-                let (value, found) = redact_url(server_name, &c[2]);
+                let value = redact_url_into(server_name, &c[2], &at, &mut found);
                 s.args[i] = format!("{}={value}", &c[1]);
-                for (env_var, reason) in found {
-                    out.push(Redaction {
-                        location: format!("{loc}.args[{i}]"),
-                        env_var,
-                        reason,
-                        fingerprint: None,
-                    });
-                }
             }
             continue;
         }
         // `Header-Name: value` (mcp-remote --header, curl-style wrappers).
         if !URL_LIKE.is_match(&a) {
-            match redact_header_arg(server_name, &a) {
-                HeaderArg::Redacted(new, env_var, reason) => {
+            match redact_header_arg(server_name, &a, &at, &mut found) {
+                HeaderArg::Redacted(new) => {
                     s.args[i] = new;
-                    out.push(Redaction {
-                        location: format!("{loc}.args[{i}]"),
-                        env_var,
-                        reason,
-                        fingerprint: None,
-                    });
                     continue;
                 }
                 // `X-Api-Key:${KEY}` is already safe; the entropy check below
@@ -769,17 +765,10 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
         }
         // URLs: credentials in userinfo or query parameters.
         if URL_LIKE.is_match(&a) {
-            let (value, found) = redact_url(server_name, &a);
-            if !found.is_empty() {
+            let before = found.redactions.len();
+            let value = redact_url_into(server_name, &a, &at, &mut found);
+            if found.redactions.len() > before {
                 s.args[i] = value;
-                for (env_var, reason) in found {
-                    out.push(Redaction {
-                        location: format!("{loc}.args[{i}]"),
-                        env_var,
-                        reason,
-                        fingerprint: None,
-                    });
-                }
                 continue;
             }
         }
@@ -787,53 +776,44 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
             .then(|| FLAG.captures(&s.args[i - 1]).map(|c| c[1].to_string()))
             .flatten();
         if let Some(reason) = classify(prev_flag.as_deref(), &a) {
-            let env_var = match &prev_flag {
+            let want = match &prev_flag {
                 Some(f) => env_var_name(&[server_name, f]),
                 None => {
                     n += 1;
                     env_var_name(&[server_name, &format!("secret_{n}")])
                 }
             };
+            let env_var = found.add(&at, want, reason, &a);
             s.args[i] = reference(&env_var);
-            out.push(Redaction {
-                location: format!("{loc}.args[{i}]"),
-                env_var,
-                reason,
-                fingerprint: None,
-            });
         }
     }
 
     if let Some(url) = s.url.clone() {
-        let (value, found) = redact_url(server_name, &url);
-        if !found.is_empty() {
+        let before = found.redactions.len();
+        let value = redact_url_into(server_name, &url, &format!("{loc}.url"), &mut found);
+        if found.redactions.len() > before {
             s.url = Some(value);
-            for (env_var, reason) in found {
-                out.push(Redaction {
-                    location: format!("{loc}.url"),
-                    env_var,
-                    reason,
-                    fingerprint: None,
-                });
-            }
         }
     }
 
     if let Some(cmd) = s.command.clone()
         && let Some(kind) = strong_secret_kind(&cmd)
     {
-        let env_var = env_var_name(&[server_name, "command_secret"]);
         let p = STRONG.iter().find(|p| p.kind == kind).expect("kind exists");
-        s.command = Some(p.re.replace_all(&cmd, reference(&env_var)).into_owned());
-        out.push(Redaction {
-            location: format!("{loc}.command"),
-            env_var,
-            reason: kind,
-            fingerprint: None,
-        });
+        let at = format!("{loc}.command");
+        let want = env_var_name(&[server_name, "command_secret"]);
+        let replaced =
+            p.re.replace_all(&cmd, |c: &Captures| {
+                reference(&found.add(&at, want.clone(), kind, &c[0]))
+            })
+            .into_owned();
+        s.command = Some(replaced);
     }
 
-    (s, out)
+    for r in &mut found.redactions {
+        r.server = Some(server_name.to_string());
+    }
+    (s, found.redactions)
 }
 
 /// What [`redact_header_arg`] made of an argument.
@@ -842,12 +822,12 @@ enum HeaderArg {
     NotHeader,
     /// A header whose value already uses an env reference.
     Referenced,
-    /// (`Name: ${VAR}`, VAR, reason).
-    Redacted(String, String, &'static str),
+    /// `Name: ${VAR}`, recorded in the [`Found`] passed in.
+    Redacted(String),
 }
 
 /// `Name: value` with a secret value -> `Name: ${VAR}`.
-fn redact_header_arg(server_name: &str, arg: &str) -> HeaderArg {
+fn redact_header_arg(server_name: &str, arg: &str, at: &str, found: &mut Found) -> HeaderArg {
     let Some(c) = HEADER_ARG.captures(arg) else {
         return HeaderArg::NotHeader;
     };
@@ -877,13 +857,13 @@ fn redact_header_arg(server_name: &str, arg: &str) -> HeaderArg {
     } else {
         name.as_str()
     };
-    let env_var = env_var_name(&[server_name, part]);
+    let env_var = found.add(at, env_var_name(&[server_name, part]), reason, &raw);
     let v = match scheme {
         Some(sc) => format!("{sc} {}", reference(&env_var)),
         None => reference(&env_var),
     };
     // Keep the original separator: mcp-remote documents `Name:value` without a space.
-    HeaderArg::Redacted(format!("{name}{sep}{v}"), env_var, reason)
+    HeaderArg::Redacted(format!("{name}{sep}{v}"))
 }
 
 fn percent_decode(s: &str) -> String {
@@ -943,29 +923,66 @@ fn secret_path_segments(host: &str, segs: &[&str], entropy: bool) -> Vec<usize> 
             && seg.chars().any(|c| c.is_ascii_uppercase())
             && seg.chars().any(|c| c.is_ascii_lowercase())
             && seg.chars().any(|c| c.is_ascii_digit());
-        if known || strong_secret_kind(seg).is_some() || random {
+        let hex = entropy && hex_token(seg) && !names_a_commit(&host, prev(1), seg);
+        if known || strong_secret_kind(seg).is_some() || random || hex {
             out.push(i);
         }
     }
     out
 }
 
-/// Replace the secret path segments `hits` of `segs` with `with(n)`. A Slack
-/// webhook's `T…/B…/<secret>` tail is one credential, so it becomes one value.
+/// A hex-only token (`/mcp/3f9a...`, a classic 40-digit GitHub token), which
+/// the mixed-case test above can't catch. 32 hex digits is 128 bits, the
+/// usual size of a random API token, while numeric ids, short git SHAs (7 to
+/// 12 digits) and most other hex ids in paths are shorter. A long run of
+/// digits alone is a numeric id, so a letter and a digit are both required.
+fn hex_token(seg: &str) -> bool {
+    seg.len() >= 32
+        && seg.chars().all(|c| c.is_ascii_hexdigit())
+        && seg.chars().any(|c| c.is_ascii_digit())
+        && seg.chars().any(|c| c.is_ascii_alphabetic())
+}
+
+/// Full commit SHAs (40 hex digits, 64 for SHA-256 repositories) appear in
+/// paths where they name a commit, not a credential: after `commit`, `blob`,
+/// `tree`, `raw` and the like, and on hosts that serve files by commit
+/// (`raw.githubusercontent.com/<owner>/<repo>/<sha>/<file>`). Any other
+/// length can't be a full SHA, so it is redacted wherever it appears.
+fn names_a_commit(host: &str, prev: Option<&str>, seg: &str) -> bool {
+    const WORDS: &[&str] = &[
+        "commit", "commits", "tree", "blob", "raw", "blame", "src", "archive", "compare", "rev",
+        "revision", "sha", "ref", "refs",
+    ];
+    const HOSTS: &[&str] = &[
+        "raw.githubusercontent.com",
+        "gist.githubusercontent.com",
+        "codeload.github.com",
+    ];
+    if seg.len() != 40 && seg.len() != 64 {
+        return false;
+    }
+    prev.is_some_and(|p| WORDS.contains(&p.to_ascii_lowercase().as_str()))
+        || HOSTS.contains(&host.split(':').next().unwrap_or(host))
+}
+
+/// Replace the secret path segments `hits` of `segs` with `with(n, secret)`.
+/// A Slack webhook's `T…/B…/<secret>` tail is one credential, so it becomes
+/// one value.
 fn replace_segments(
     host: &str,
     segs: &mut Vec<String>,
     hits: &[usize],
-    mut with: impl FnMut(usize) -> String,
+    mut with: impl FnMut(usize, &str) -> String,
 ) {
     let slack = host.eq_ignore_ascii_case("hooks.slack.com") && hits.len() > 1;
     if slack && hits.iter().enumerate().all(|(n, i)| *i == n + 1) {
+        let tail = segs[1..].join("/");
         segs.truncate(1);
-        segs.push(with(0));
+        segs.push(with(0, &tail));
         return;
     }
     for (n, i) in hits.iter().enumerate() {
-        segs[*i] = with(n);
+        segs[*i] = with(n, &segs[*i].clone());
     }
 }
 
@@ -986,17 +1003,35 @@ fn split_url(url: &str) -> Option<(&str, &str, &str)> {
     ))
 }
 
+/// `url` with its credentials replaced by env references, as (new URL,
+/// [(variable, reason)]). Used on its own in tests.
+#[cfg(test)]
 fn redact_url(server_name: &str, url: &str) -> (String, Vec<(String, &'static str)>) {
-    let mut found = Vec::new();
+    let mut found = Found::default();
+    let value = redact_url_into(server_name, url, "url", &mut found);
+    let list = found
+        .redactions
+        .into_iter()
+        .map(|r| (r.env_var, r.reason))
+        .collect();
+    (value, list)
+}
+
+/// `url` with its credentials replaced by env references, each recorded in
+/// `found` at location `at`.
+fn redact_url_into(server_name: &str, url: &str, at: &str, found: &mut Found) -> String {
     let value = URL_USERINFO
         .replace(url, |c: &Captures| {
             if strip_refs(&c[3]).is_empty() {
                 return c[0].to_string();
             }
-            let env_var = env_var_name(&[server_name, "password"]);
-            let r = format!("{}{}:{}@", &c[1], &c[2], reference(&env_var));
-            found.push((env_var, "url-credentials"));
-            r
+            let env_var = found.add(
+                at,
+                env_var_name(&[server_name, "password"]),
+                "url-credentials",
+                &c[3],
+            );
+            format!("{}{}:{}@", &c[1], &c[2], reference(&env_var))
         })
         .into_owned();
     let value = URL_TOKEN_USER
@@ -1004,10 +1039,13 @@ fn redact_url(server_name: &str, url: &str) -> (String, Vec<(String, &'static st
             if !token_username(&c[2]) {
                 return c[0].to_string();
             }
-            let env_var = env_var_name(&[server_name, "url_user_token"]);
-            let r = format!("{}{}@", &c[1], reference(&env_var));
-            found.push((env_var, "url-username-token"));
-            r
+            let env_var = found.add(
+                at,
+                env_var_name(&[server_name, "url_user_token"]),
+                "url-username-token",
+                &c[2],
+            );
+            format!("{}{}@", &c[1], reference(&env_var))
         })
         .into_owned();
     let value = match split_url(&value) {
@@ -1016,16 +1054,14 @@ fn redact_url(server_name: &str, url: &str) -> (String, Vec<(String, &'static st
             let mut segs: Vec<String> = path.split('/').skip(1).map(str::to_string).collect();
             let view: Vec<&str> = segs.iter().map(String::as_str).collect();
             let hits = secret_path_segments(host, &view, true);
-            replace_segments(host, &mut segs, &hits, |n| {
+            replace_segments(host, &mut segs, &hits, |n, secret| {
                 let suffix = if n == 0 {
                     String::new()
                 } else {
                     format!("_{}", n + 1)
                 };
-                let env_var = env_var_name(&[server_name, &format!("url_token{suffix}")]);
-                let r = reference(&env_var);
-                found.push((env_var, "url-path-token"));
-                r
+                let want = env_var_name(&[server_name, &format!("url_token{suffix}")]);
+                reference(&found.add(at, want, "url-path-token", secret))
             });
             if hits.is_empty() {
                 value.clone()
@@ -1036,21 +1072,19 @@ fn redact_url(server_name: &str, url: &str) -> (String, Vec<(String, &'static st
         }
         None => value,
     };
-    let value = URL_QUERY
+    URL_QUERY
         .replace_all(&value, |c: &Captures| {
             let decoded = percent_decode(&c[3]);
             match classify(Some(&c[2]), &decoded) {
                 Some(reason) => {
-                    let env_var = env_var_name(&[server_name, &c[2]]);
-                    let r = format!("{}{}={}", &c[1], &c[2], reference(&env_var));
-                    found.push((env_var, reason));
-                    r
+                    let env_var =
+                        found.add(at, env_var_name(&[server_name, &c[2]]), reason, &decoded);
+                    format!("{}{}={}", &c[1], &c[2], reference(&env_var))
                 }
                 None => c[0].to_string(),
             }
         })
-        .into_owned();
-    (value, found)
+        .into_owned()
 }
 
 static TEXT_URL: LazyLock<Regex> = LazyLock::new(|| {
@@ -1066,7 +1100,7 @@ fn placeholder_value(v: &str) -> bool {
 
 /// In free text, URLs lose secret-named query values and secret path segments
 /// (known shapes only: prose has too many ids for an entropy guess).
-fn redact_text_urls(text: &str) -> (String, bool) {
+fn redact_text_urls(text: &str, marker: &str) -> (String, bool) {
     let mut hit = false;
     let out = TEXT_URL
         .replace_all(text, |c: &Captures| {
@@ -1081,7 +1115,7 @@ fn redact_text_urls(text: &str) -> (String, bool) {
             let view: Vec<&str> = segs.iter().map(String::as_str).collect();
             let hits = secret_path_segments(host, &view, false);
             hit |= !hits.is_empty();
-            replace_segments(host, &mut segs, &hits, |_| REDACTED_PASSWORD.to_string());
+            replace_segments(host, &mut segs, &hits, |_, _| marker.to_string());
             let path: String = segs.iter().map(|s| format!("/{s}")).collect();
             let rest = URL_QUERY.replace_all(rest, |q: &Captures| {
                 let v = percent_decode(&q[3]);
@@ -1092,7 +1126,7 @@ fn redact_text_urls(text: &str) -> (String, bool) {
                     && classify(Some(&q[2]), &v).is_some()
                 {
                     hit = true;
-                    format!("{}{}={REDACTED_PASSWORD}", &q[1], &q[2])
+                    format!("{}{}={marker}", &q[1], &q[2])
                 } else {
                     q[0].to_string()
                 }
@@ -1224,6 +1258,19 @@ fn assignment_spans(text: &str) -> Vec<(usize, usize)> {
 /// Tokens become `[REDACTED:<kind>]`. In URLs only the password is replaced
 /// (`postgres://user:[REDACTED]@host/db`), so the surrounding Markdown survives.
 pub fn redact_text(text: &str) -> (String, Vec<&'static str>) {
+    redact_text_with(text, &|kind| match kind {
+        Some(k) => format!("[REDACTED:{k}]"),
+        None => REDACTED_PASSWORD.to_string(),
+    })
+}
+
+/// [`redact_text`], with `mark(Some(kind))` replacing a known token format
+/// and `mark(None)` any other secret.
+fn redact_text_with(
+    text: &str,
+    mark: &dyn Fn(Option<&'static str>) -> String,
+) -> (String, Vec<&'static str>) {
+    let plain = mark(None);
     let mut kinds = Vec::new();
     let mut out = text.to_string();
     for p in STRONG.iter().filter(|p| p.kind != "url-credentials") {
@@ -1232,7 +1279,7 @@ pub fn redact_text(text: &str) -> (String, Vec<&'static str>) {
             p.re.replace_all(&out, |c: &Captures| {
                 if literal_match(&p.re, &c[0]) {
                     hit = true;
-                    format!("[REDACTED:{}]", p.kind)
+                    mark(Some(p.kind))
                 } else {
                     c[0].to_string()
                 }
@@ -1251,7 +1298,7 @@ pub fn redact_text(text: &str) -> (String, Vec<&'static str>) {
                 c[0].to_string()
             } else {
                 hit = true;
-                format!("{}{REDACTED_PASSWORD}@", &c[1])
+                format!("{}{plain}@", &c[1])
             }
         })
         .into_owned();
@@ -1260,7 +1307,7 @@ pub fn redact_text(text: &str) -> (String, Vec<&'static str>) {
         out = replaced;
     }
     // Tokens in URL queries and webhook paths.
-    let (replaced, hit) = redact_text_urls(&out);
+    let (replaced, hit) = redact_text_urls(&out, &plain);
     if hit {
         kinds.push("url-token");
         out = replaced;
@@ -1271,7 +1318,7 @@ pub fn redact_text(text: &str) -> (String, Vec<&'static str>) {
         .replace_all(&out, |c: &Captures| {
             if secret_text_value(&c[2]) {
                 hit = true;
-                format!("{} {REDACTED_PASSWORD}", &c[1])
+                format!("{} {plain}", &c[1])
             } else {
                 c[0].to_string()
             }
@@ -1285,7 +1332,7 @@ pub fn redact_text(text: &str) -> (String, Vec<&'static str>) {
     let spans = assignment_spans(&out);
     if !spans.is_empty() {
         for (a, b) in spans.into_iter().rev() {
-            out.replace_range(a..b, REDACTED_PASSWORD);
+            out.replace_range(a..b, &plain);
         }
         kinds.push("secret-named-value");
     }
@@ -1462,7 +1509,15 @@ fn shown_secret(key: &str, value: &str) -> bool {
         return false; // already masked
     }
     let unescaped = value.replace("\\\"", "\"").replace("\\\\", "\\");
-    named_secret(Some(key), &unescaped)
+    // Like capture: under a secret-sounding name any literal counts, however
+    // short, except configuration such as numbers, booleans, URLs and paths.
+    let literal = strip_refs(&unescaped);
+    let named = is_secret_name(key)
+        && sole_ref(&unescaped).is_none()
+        && (!has_ref(&unescaped) || substantial_literal(&literal))
+        && !obviously_not_secret(&literal);
+    strong_secret_kind(&unescaped).is_some()
+        || named
         || BEARER
             .captures(&unescaped)
             .is_some_and(|c| !has_ref(&c[2]) && c[2].len() >= 6)
@@ -1521,7 +1576,7 @@ pub fn mask_line(line: &str) -> String {
             }
         })
         .into_owned();
-    TOML_PAIR
+    out = TOML_PAIR
         .replace_all(&out, |c: &Captures| {
             if shown_secret(c[2].trim_matches('"'), &c[4]) {
                 format!("{}{}{}\"••••••••\"", &c[1], &c[2], &c[3])
@@ -1529,7 +1584,67 @@ pub fn mask_line(line: &str) -> String {
                 c[0].to_string()
             }
         })
-        .into_owned()
+        .into_owned();
+    // Whatever capture would redact from free text (instructions, rules):
+    // `export DB_PASSWORD=...`, `Bearer ...`, webhook and query tokens.
+    redact_text_with(&out, &|_| MASK.to_string()).0
+}
+
+/// What a secret is shown as.
+const MASK: &str = "••••••••";
+
+static KEY_BEGIN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"-----BEGIN [A-Z ]*PRIVATE KEY-----").expect("valid regex"));
+static KEY_END: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"-----END [A-Z ]*PRIVATE KEY-----").expect("valid regex"));
+static BASE64_LINE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z0-9+/=]{16,}$").expect("valid regex"));
+static PEM_HEADER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z-]+: \S").expect("valid regex"));
+
+/// Mask private keys (PEM `-----BEGIN ... PRIVATE KEY-----` blocks) across
+/// lines, before a text is split into lines for display. Each block becomes
+/// one line, `•••••••• (private key, sha256:1a2b3c4d)`: the short hash can't
+/// be turned back into the key, but shows whether a key changed.
+///
+/// A block without an `END` line runs as far as it looks like one: base64
+/// lines, PEM headers (`Proc-Type: ...`) and blank lines between them.
+pub fn mask_key_blocks(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(m) = KEY_BEGIN.find(rest) {
+        out.push_str(&rest[..m.start()]);
+        let block = &rest[m.start()..];
+        let len = match KEY_END.find(block) {
+            Some(e) => e.end(),
+            None => unterminated_key_len(block),
+        };
+        let hash = crate::txn::sha256(Some(&block.as_bytes()[..len])).unwrap_or_default();
+        out.push_str(&format!("{MASK} (private key, sha256:{})", &hash[..8]));
+        rest = &block[len..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Length of a key block that has no `END` line: its first line plus the
+/// key-like lines after it, without the line break after the last one.
+fn unterminated_key_len(block: &str) -> usize {
+    let mut lines = block.split_inclusive('\n');
+    let first = lines.next().unwrap_or_default();
+    let mut end = first.trim_end_matches(['\n', '\r']).len();
+    let mut pos = first.len();
+    for line in lines {
+        let content = line.trim_end_matches(['\n', '\r']);
+        let t = content.trim();
+        if BASE64_LINE.is_match(t) || PEM_HEADER.is_match(t) {
+            end = pos + content.len();
+        } else if !t.is_empty() {
+            break;
+        }
+        pos += line.len();
+    }
+    end
 }
 
 /// The forms a secret can take on disk: raw, and escaped inside a JSON / TOML string.
@@ -1862,13 +1977,70 @@ mod tests {
         assert_eq!(r.args[3], "Authorization: Bearer ${REMOTE_TOKEN}");
         assert_eq!(r.args[5], "DB_PASSWORD=${DB_PASSWORD}");
         assert_eq!(r.args[7], "X-Api-Key:${REMOTE_X_API_KEY}");
-        assert_eq!(r.args[8], "--header=Authorization: Bearer ${REMOTE_TOKEN}");
+        // A different token than args[3], so a variable of its own.
+        assert_eq!(
+            r.args[8],
+            "--header=Authorization: Bearer ${REMOTE_TOKEN_2}"
+        );
         assert_eq!(r.args[9], "postgresql://admin:${REMOTE_PASSWORD}@db/app");
         assert_eq!(red.len(), 6);
         let flat = r.args.join(" ");
         for leak in ["a8f3kd93", "hunter2", "s3cr3t", "abcabc", "lowentropy"] {
             assert!(!flat.contains(leak), "{leak} in {flat}");
         }
+    }
+
+    #[test]
+    fn different_secrets_in_one_server_get_different_variables() {
+        let s = McpServer {
+            command: Some("docker".into()),
+            args: vec![
+                "-e".into(),
+                "API_KEY=FakeFirstSecret111".into(),
+                "postgres://u:FakePwOne1@db/a".into(),
+                "postgres://u:FakePwTwo2@db/b?password=FakePwThree3".into(),
+                "https://x.example/sse?token=FakeTokA1b2&token=FakeTokC3d4".into(),
+                // The same secret again shares its variable.
+                "--header=Authorization: Bearer FakeBearer123".into(),
+                "Authorization: Bearer FakeBearer123".into(),
+            ],
+            env: [("API_KEY".to_string(), "FakeSecondSecret22".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let (r, red) = redact_server("svc", &s);
+        assert_eq!(r.env["API_KEY"], "${API_KEY}");
+        assert_eq!(r.args[1], "API_KEY=${API_KEY_2}");
+        assert_eq!(r.args[2], "postgres://u:${SVC_PASSWORD}@db/a");
+        assert_eq!(
+            r.args[3],
+            "postgres://u:${SVC_PASSWORD_2}@db/b?password=${SVC_PASSWORD_3}"
+        );
+        assert_eq!(
+            r.args[4],
+            "https://x.example/sse?token=${SVC_TOKEN}&token=${SVC_TOKEN_2}"
+        );
+        assert_eq!(r.args[5], "--header=Authorization: Bearer ${SVC_TOKEN_3}");
+        assert_eq!(r.args[6], "Authorization: Bearer ${SVC_TOKEN_3}");
+        // One variable per secret, one fingerprint per variable.
+        let mut by_var: HashMap<&str, &Option<String>> = HashMap::new();
+        for x in &red {
+            assert!(x.fingerprint.is_some(), "{x:?}");
+            let prev = by_var.insert(&x.env_var, &x.fingerprint);
+            assert!(prev.is_none_or(|p| p == &x.fingerprint), "{x:?}");
+        }
+        assert_eq!(by_var.len(), 8);
+        // Two tokens of the same kind in the command.
+        let s = McpServer {
+            command: Some(format!("run ghp_{} ghp_{}", "A".repeat(36), "B".repeat(36))),
+            ..Default::default()
+        };
+        let (r, _) = redact_server("svc", &s);
+        assert_eq!(
+            r.command.as_deref(),
+            Some("run ${SVC_COMMAND_SECRET} ${SVC_COMMAND_SECRET_2}")
+        );
     }
 
     #[test]
@@ -1962,6 +2134,47 @@ mod tests {
         ] {
             assert_eq!(redact_text(keep), (keep.to_string(), vec![]), "{keep}");
         }
+    }
+
+    #[test]
+    fn hex_only_path_tokens_are_redacted() {
+        let tok32 = "3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c";
+        let tok40 = "0123456789abcdef0123456789abcdef01234567";
+        for url in [
+            format!("https://mcp.example.com/u/{tok32}/sse"),
+            format!("https://mcp.example.com/{}/sse", tok32.to_ascii_uppercase()),
+            // A 40-digit token outside a commit position.
+            format!("https://hooks.example.com/notify/{tok40}"),
+            // A 32-digit token can't be a full SHA, even after a commit word
+            // or on a host that serves files by commit.
+            format!("https://mcp.example.com/src/{tok32}/sse"),
+            format!("https://mcp.example.com/raw/{tok32}/sse"),
+            format!("https://raw.githubusercontent.com/o/r/{tok32}/server.js"),
+        ] {
+            let (v, found) = redact_url("s", &url);
+            assert!(v.contains("${S_URL_TOKEN}"), "{url} -> {v}");
+            assert!(!v.contains("3f9a8b") && !v.contains("3F9A8B") && !v.contains(tok40));
+            assert_eq!(found, vec![("S_URL_TOKEN".to_string(), "url-path-token")]);
+        }
+        for url in [
+            // One digit short of the threshold.
+            format!("https://x.example/u/{}/sse", &tok32[..31]),
+            // Short ids and short SHAs.
+            "https://x.example/items/1a2b3c4d/v/deadbeef0123".to_string(),
+            // A long numeric id.
+            "https://x.example/n/12345678901234567890123456789012".to_string(),
+            // Full commit SHAs where they name a commit.
+            format!("https://gitlab.com/o/r/-/blob/{tok40}/server.js"),
+            format!("https://github.com/o/r/tree/{tok40}/src"),
+            format!("https://raw.githubusercontent.com/o/r/{tok40}/server.js"),
+            format!("https://x.example/o/r/archive/{tok40}"),
+            format!("https://x.example/o/r/commit/{}", &tok40.repeat(2)[..64]),
+        ] {
+            assert_eq!(redact_url("s", &url), (url.clone(), vec![]), "{url}");
+        }
+        // Free text keeps to known shapes: prose has too many ids for a guess.
+        let prose = format!("See https://x.example/u/{tok32}/sse for details.");
+        assert_eq!(redact_text(&prose).0, prose);
     }
 
     #[test]
@@ -2066,6 +2279,71 @@ mod tests {
         ] {
             assert_eq!(mask_line(keep), keep);
         }
+    }
+
+    /// Anything capture would redact from text is masked in a diff too.
+    #[test]
+    fn masks_what_capture_would_redact() {
+        for (line, gone) in [
+            ("export DB_PASSWORD=hunter22x", "hunter22x"),
+            (
+                "curl -H 'Authorization: Bearer abcdef123456'",
+                "abcdef123456",
+            ),
+            (
+                "see https://hooks.slack.com/services/T0FAKE/B0FAKE/FakeFakeFake123",
+                "FakeFakeFake123",
+            ),
+            (
+                "https://api.example.com/v1?api_key=fake123abc456",
+                "fake123abc456",
+            ),
+            // Under a secret name, however short, as capture redacts it.
+            (r#"  "PASSWORD": "rootE","#, "rootE"),
+            (r#"token = "a1b2c""#, "a1b2c"),
+        ] {
+            let masked = mask_line(line);
+            assert!(!masked.contains(gone), "{line} -> {masked}");
+            assert!(masked.contains("••••••••"), "{line} -> {masked}");
+        }
+        for keep in [
+            "Run `cargo test` before you push.",
+            "export LOG_LEVEL=debug",
+            r#"  "PASSWORD": "${DB_PASSWORD}","#,
+            r#"  "AUTH_TIMEOUT": "30","#,
+            r#"  "PASSWORD_FILE": "/run/secrets/db","#,
+            "token: [REDACTED]",
+        ] {
+            assert_eq!(mask_line(keep), keep);
+        }
+    }
+
+    #[test]
+    fn masks_private_key_blocks_across_lines() {
+        let key = "-----BEGIN OPENSSH PRIVATE KEY-----\nFAKEb3BlbnNzaC1rZXktdjEAAAAA\nFAKEAAAAAAAAAAEAAAAzAAAAC3Nz\n-----END OPENSSH PRIVATE KEY-----";
+        let text = format!("before\n{key}\nafter\n");
+        let masked = mask_key_blocks(&text);
+        assert!(!masked.contains("FAKE"), "{masked}");
+        assert!(masked.starts_with("before\n•••••••• (private key, sha256:"));
+        assert!(masked.ends_with(")\nafter\n"), "{masked}");
+        assert_eq!(masked.lines().count(), 3);
+        // A different key gets a different tag, so the diff shows the change.
+        let other = mask_key_blocks(&text.replace("FAKEb3", "FAKEc4"));
+        assert_ne!(masked, other);
+        // Escaped on one line, as in JSON.
+        let json = format!("\"key\": \"{}\",", key.replace('\n', "\\n"));
+        let masked = mask_key_blocks(&json);
+        assert!(
+            !masked.contains("FAKE") && masked.ends_with("\","),
+            "{masked}"
+        );
+        // Without an END line: the key-like lines after BEGIN, not the prose.
+        let cut = "-----BEGIN RSA PRIVATE KEY-----\r\nProc-Type: 4,ENCRYPTED\r\n\r\nFAKEMIIEpAIBAAKCAQEA0Z3VS5JJcds3xf\r\n  FAKEn/ygWyF8PbnGy0AHB7MhgHcTz6sE2I2y\r\n\r\nThe end.\r\n";
+        let masked = mask_key_blocks(cut);
+        assert!(!masked.contains("FAKE"), "{masked}");
+        assert!(masked.ends_with(")\r\n\r\nThe end.\r\n"), "{masked:?}");
+        let plain = "No keys here: -----BEGIN PUBLIC KEY----- is fine.\n";
+        assert_eq!(mask_key_blocks(plain), plain);
     }
 
     #[test]
