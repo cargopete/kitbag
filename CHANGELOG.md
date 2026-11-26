@@ -19,6 +19,8 @@ All notable changes to this project are documented here. The format follows
 - Capture matched secrets it redacted to MCP servers by location, so a server whose name contains a dot (`a.b`) also had its secrets counted under server `a`: they were listed twice and could raise a false "different secret values" warning. Each redaction now records its server (#53).
 - A JSON config with the same key twice in an object kitbag edits (two `mcpServers`, two servers with the same name, a server with two `command` keys) is refused with an error naming the file and the key. kitbag used to edit the first copy while the tools read the last, so `diff --exit-code` reported no change (#38).
 - Edits to JSON and TOML configs and to managed blocks in instruction files keep a file's Windows (`\r\n`) line endings. They used to write the lines they added with `\n`. A file is taken to use `\r\n` when most of its line breaks are `\r\n`; its other lines are then written with `\r\n` too (#38).
+- Rules, commands, skills and skill files named after a Windows device (`CON`, `nul.md`, `COM1`, `aux.sh` ...), or whose names differ only in case (`Build.md` and `build.md`), are refused when a profile is loaded or captured, on every OS, naming each one: profiles move between machines, and such files can't be created on Windows or are one file on Windows and macOS (#38).
+- Backups of files with very long names no longer fail to be written: the file name part of a backup's name is cut to 100 bytes, and the number in front keeps it unique (#38).
 
 ### Security
 

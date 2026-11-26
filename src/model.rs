@@ -299,6 +299,78 @@ pub fn is_valid_name(name: &str) -> bool {
     NAME_RE.is_match(name) && name != "." && name != ".." && !name.ends_with('.')
 }
 
+/// Is `name` (or the part before its first `.`) a device name Windows
+/// reserves, such as `CON`, `nul.md` or `COM1`? Such files can't be created
+/// on Windows.
+pub fn is_reserved_on_windows(name: &str) -> bool {
+    let base = name.split('.').next().unwrap_or("").trim_end_matches(' ');
+    let upper = base.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || ((upper.starts_with("COM") || upper.starts_with("LPT"))
+        && upper.len() == 4
+        && upper.as_bytes()[3].is_ascii_digit())
+}
+
+/// Names of rules, commands, skills and skill files that would break the
+/// profile on another system: Windows device names, and names that differ
+/// only in case (one file on Windows and macOS). Profiles move between
+/// machines, so this applies on every OS.
+pub fn portable_name_issues(p: &Profile) -> Vec<String> {
+    let mut issues = Vec::new();
+    let reserved = |what: String| {
+        format!(
+            "{what}: reserved device name on Windows, where the file can't be created; rename it"
+        )
+    };
+    let check = |kind: &str, names: Vec<String>, issues: &mut Vec<String>| {
+        let mut seen: BTreeMap<String, String> = BTreeMap::new();
+        for name in names {
+            if name.rsplit('/').next().is_some_and(is_reserved_on_windows) {
+                issues.push(reserved(format!("{kind}{name}")));
+            }
+            if let Some(first) = seen.insert(name.to_lowercase(), name.clone())
+                && first != name
+            {
+                issues.push(format!(
+                    "{kind}{first} and {kind}{name}: names differ only in case, so they are one file on Windows and macOS; rename one"
+                ));
+            }
+        }
+    };
+    check(
+        "rules/",
+        p.rules.iter().map(|r| r.name.clone()).collect(),
+        &mut issues,
+    );
+    check(
+        "commands/",
+        p.commands.iter().map(|c| c.name.clone()).collect(),
+        &mut issues,
+    );
+    check(
+        "skills/",
+        p.skills.iter().map(|s| s.name.clone()).collect(),
+        &mut issues,
+    );
+    for s in &p.skills {
+        // Every directory along a path counts, so `a/x` and `A/y` clash too.
+        let mut paths: Vec<String> = Vec::new();
+        for f in &s.files {
+            let parts: Vec<&str> = f.path.split('/').collect();
+            for i in 1..parts.len() {
+                paths.push(parts[..i].join("/"));
+            }
+            paths.push(f.path.clone());
+        }
+        paths.sort();
+        paths.dedup();
+        check(&format!("skills/{}/", s.name), paths, &mut issues);
+    }
+    issues
+}
+
 /// Turn arbitrary text into a valid name (`My Setup!` -> `my-setup`).
 pub fn slugify(input: &str) -> String {
     let mut out = String::new();
@@ -362,6 +434,72 @@ mod tests {
         assert!(!is_valid_name("../etc"));
         assert!(!is_valid_name(".hidden"));
         assert!(!is_valid_name("a/b"));
+        for n in [
+            "CON",
+            "con",
+            "nul.md",
+            "Com1",
+            "LPT9.txt",
+            "aux.tar.gz",
+            "PRN ",
+        ] {
+            assert!(is_reserved_on_windows(n), "{n}");
+        }
+        for n in ["console", "com", "COM10", "nul-ish", "lpt", "a.con"] {
+            assert!(!is_reserved_on_windows(n), "{n}");
+        }
+    }
+
+    #[test]
+    fn names_that_break_on_other_systems() {
+        let file = |path: &str| SkillFile {
+            path: path.into(),
+            content: vec![],
+            executable: false,
+        };
+        let mut p = Profile::new("me");
+        p.rules.push(Rule {
+            name: "nul".into(),
+            ..Default::default()
+        });
+        for name in ["Build", "build", "ok"] {
+            p.commands.push(Command {
+                name: name.into(),
+                ..Default::default()
+            });
+        }
+        p.skills.push(Skill {
+            name: "s".into(),
+            description: None,
+            files: vec![
+                file("SKILL.md"),
+                file("lib/a.sh"),
+                file("Lib/b.sh"),
+                file("aux.txt"),
+            ],
+        });
+        let issues = portable_name_issues(&p);
+        assert_eq!(issues.len(), 4, "{issues:#?}");
+        assert!(issues[0].starts_with("rules/nul: reserved device name"));
+        assert!(
+            issues[1].starts_with("commands/Build and commands/build: names differ only in case")
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.starts_with("skills/s/Lib and skills/s/lib")),
+            "{issues:#?}"
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.starts_with("skills/s/aux.txt: reserved")),
+            "{issues:#?}"
+        );
+        p.rules.clear();
+        p.commands.retain(|c| c.name == "ok");
+        p.skills.clear();
+        assert!(portable_name_issues(&p).is_empty());
         assert_eq!(slugify("My Setup!"), "my-setup");
         assert_eq!(slugify("  "), "profile");
     }

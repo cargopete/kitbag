@@ -14,6 +14,7 @@ use crate::edit::toml::{json_to_table, json_to_value};
 use crate::frontmatter::{self, glob_list, opt, string};
 use crate::model::{
     Command, FORMAT_VERSION, McpServer, Profile, Rule, Skill, SkillFile, is_valid_name,
+    portable_name_issues,
 };
 use crate::secrets::{
     redact_server, refs_in, sensitive_file, strong_secret_kind, text_secret_kind,
@@ -336,6 +337,7 @@ pub fn load(dir: &Path) -> Result<Profile> {
             files,
         });
     }
+    issues.extend(portable_name_issues(&p));
     if !issues.is_empty() {
         return Err(ProfileError::new(
             format!("{} is not a valid kitbag profile", dir.display()),
@@ -428,6 +430,14 @@ pub fn save(p: &Profile, dir: &Path, force: bool) -> Result<Vec<PathBuf>> {
         return Err(ProfileError::new(
             "refusing to write a profile that appears to contain secrets",
             leaks,
+        )
+        .into());
+    }
+    let names = portable_name_issues(p);
+    if !names.is_empty() {
+        return Err(ProfileError::new(
+            "refusing to write a profile that couldn't be used on every system",
+            names,
         )
         .into());
     }

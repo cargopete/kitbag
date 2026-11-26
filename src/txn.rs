@@ -114,6 +114,23 @@ pub fn write_atomic(path: &Path, content: &[u8], mode: Option<u32>) -> Result<()
     Ok(())
 }
 
+/// Longest file-name part, in bytes, kept in a backup's name. File systems
+/// cap names at 255 bytes; the number in front keeps shortened names unique.
+const BACKUP_NAME_BYTES: usize = 100;
+
+/// The name of backup number `n` (unique within its transaction) of `path`.
+fn backup_name(n: usize, path: &Path) -> String {
+    let file = path
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut end = file.len().min(BACKUP_NAME_BYTES);
+    while !file.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{n:04}-{}", &file[..end])
+}
+
 /// The permission bits of `path` (Unix only; `None` elsewhere or if missing).
 pub fn file_mode(path: &Path) -> Option<u32> {
     #[cfg(unix)]
@@ -406,14 +423,7 @@ impl Store {
                 real_parent: None,
             };
             if let Some(data) = &cur {
-                let name = format!(
-                    "{:04}-{}",
-                    n + 1,
-                    c.path
-                        .file_name()
-                        .map(|f| f.to_string_lossy().into_owned())
-                        .unwrap_or_default()
-                );
+                let name = backup_name(n + 1, &c.path);
                 write_atomic(&self.tx_dir(&tx.id).join(&name), data, Some(0o600))?;
                 entry.backup = Some(name);
                 entry.mode = file_mode(&c.path);
@@ -737,6 +747,46 @@ mod tests {
             "created directories are removed"
         );
         assert!(store.undo(None, false).is_err(), "nothing left to undo");
+    }
+
+    #[test]
+    fn backup_names_are_short_and_unique() {
+        let long = format!("{}é.json", "a".repeat(200));
+        let a = backup_name(1, Path::new(&long));
+        let b = backup_name(2, Path::new(&long));
+        assert_ne!(a, b);
+        assert!(a.len() <= 5 + BACKUP_NAME_BYTES, "{}", a.len());
+        assert!(a.starts_with("0001-aaa"));
+        assert_eq!(
+            backup_name(3, Path::new("/x/.claude.json")),
+            "0003-.claude.json"
+        );
+        // A cut through a multi-byte character backs off to its start.
+        let wide = "é".repeat(80);
+        assert!(backup_name(1, Path::new(&wide)).len() <= 5 + BACKUP_NAME_BYTES);
+    }
+
+    /// Files whose names are near the 255-byte limit can still be backed up.
+    #[cfg(unix)]
+    #[test]
+    fn long_file_names_back_up_and_undo() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path().join("state"));
+        let f1 = root.path().join(format!("{}1", "n".repeat(250)));
+        let f2 = root.path().join(format!("{}2", "n".repeat(250)));
+        fs::write(&f1, "one").unwrap();
+        fs::write(&f2, "two").unwrap();
+        store
+            .commit(
+                &[change(&f1, Some("x")), change(&f2, Some("y"))],
+                "t",
+                &[],
+                &WriteOptions::default(),
+            )
+            .unwrap();
+        store.undo(None, false).unwrap();
+        assert_eq!(fs::read_to_string(&f1).unwrap(), "one");
+        assert_eq!(fs::read_to_string(&f2).unwrap(), "two");
     }
 
     #[test]

@@ -106,3 +106,63 @@ fn crlf_files_keep_their_line_endings() {
         .assert()
         .success();
 }
+
+#[test]
+fn reserved_and_case_clashing_names_are_refused_on_load() {
+    let sb = Sandbox::empty();
+    server_profile(&sb);
+    fs::create_dir_all(sb.path("p/skills/lint")).unwrap();
+    fs::write(sb.path("p/skills/lint/SKILL.md"), "Lint.\n").unwrap();
+    // `aux.sh` can't be created on Windows; the manifest check is the same there.
+    let reserved_file = if cfg!(windows) {
+        None
+    } else {
+        Some("p/skills/lint/aux.sh")
+    };
+    if let Some(rel) = reserved_file {
+        fs::write(sb.path(rel), "echo\n").unwrap();
+        sb.cli()
+            .args(["apply", "p", "--to", "claude-code", "--yes"])
+            .assert()
+            .failure()
+            .stderr(contains(
+                "skills/lint/aux.sh: reserved device name on Windows",
+            ));
+        fs::remove_file(sb.path(rel)).unwrap();
+    }
+    sb.cli()
+        .args(["apply", "p", "--to", "claude-code", "--dry-run"])
+        .assert()
+        .success();
+
+    // Two command files that differ only in case, where the file system allows it.
+    fs::create_dir_all(sb.path("p/commands")).unwrap();
+    fs::write(sb.path("p/commands/Build.md"), "Build it.\n").unwrap();
+    fs::write(sb.path("p/commands/build.md"), "Build it too.\n").unwrap();
+    if fs::read_dir(sb.path("p/commands")).unwrap().count() == 2 {
+        sb.cli()
+            .args(["apply", "p", "--to", "claude-code", "--yes"])
+            .assert()
+            .failure()
+            .stderr(contains(
+                "commands/Build and commands/build: names differ only in case",
+            ));
+        assert!(!sb.home().join(".claude/commands").exists());
+    }
+}
+
+#[cfg(not(windows))]
+#[test]
+fn capture_refuses_a_reserved_command_name() {
+    let sb = Sandbox::empty();
+    let dir = sb.home().join(".claude/commands");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("nul.md"), "Nothing.\n").unwrap();
+    fs::write(dir.join("ok.md"), "Fine.\n").unwrap();
+    sb.cli()
+        .args(["capture", "--from", "claude-code", "-o", "prof"])
+        .assert()
+        .failure()
+        .stderr(contains("commands/nul: reserved device name on Windows"));
+    assert!(!sb.path("prof/kitbag.toml").exists());
+}
