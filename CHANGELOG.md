@@ -6,10 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The `copilot` target carries commands and skills. Commands become VS Code prompt files, `.github/prompts/<name>.prompt.md`, at project scope (VS Code keeps user prompt files in its own profile storage and Copilot CLI doesn't read them, so there are none at user scope); they keep `description`, `argument-hint` and VS Code's `name`, `agent`, `model` and `tools`, other keys such as `allowed-tools` are left out with a note, and `$ARGUMENTS` is written as is with a warning. Skills go to `$COPILOT_HOME/skills/<name>/SKILL.md` (default `~/.copilot`) and `.github/skills/`, with `name` and `description` filled in when missing and a warning for a name VS Code wouldn't load. Capture reads both. Custom agents and chat modes (their old name) are still listed by capture and not carried, as profiles have no agents yet (#22).
+
+### Changed
+
+- `copilot`: a bare `$VAR` in a project `.mcp.json` or `.github/mcp.json` is captured as a reference, as in the user file, since Copilot CLI expands it in `env`. The warning about references in `url` and `cwd` now says neither Copilot CLI's nor VS Code's docs say they expand there; the old one said Copilot CLI expands them (#22).
+
 ### Fixed
 
 - `kitbag undo` after an `apply` or `sync` that had nothing to write no longer leaves `status` saying `tool edited` where it should say `profile changed`. The no-op recorded every item again without a transaction, so undoing the earlier apply that wrote them couldn't set those records aside. Now an item whose last record already matches isn't recorded again, and any other is tied to the transaction of the record it replaces, so undo sets it aside too. A repeated `sync` that holds back an edited item, which records the tool's other items, hit this too (#63).
 - `capture --force` into an existing profile no longer drops the profile's MCP servers that it found in no tool, such as one disabled everywhere it was applied (`disabled_on`) or one for a tool not installed on this machine (`targets`). They are kept as they were, `targets` / `disabled_on` included, and the capture summary names them. The new `--prune` drops them instead, and says which it dropped (#59).
+
 
 ## [0.1.4] - 2026-11-26
 
