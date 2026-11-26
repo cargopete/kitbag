@@ -595,10 +595,21 @@ MCP tool definitions
 ```
 
 This **runs the servers' commands**, so it is off unless you pass the flag; plain `doctor`
-starts nothing. Each local server is started once, with its `${VAR}` references filled in from
-your environment, asked for its tools, and stopped; it gets `--mcp-timeout SECS` (default 10)
-in all. A server that fails to start, exits or times out is reported and the others are still
-counted. A server needing a variable that isn't set is not started. kitbag doesn't show or keep
+starts nothing. That includes the servers in a project's own config (`.mcp.json` and the like)
+under `--project`, so only use it on setups you trust. From a git `SOURCE`, a server is only
+started if you allow it, as for `apply`: name it with `--allow-git-mcp NAMES`, or pass
+`--allow-git-mcp` with no names or `--trust-source` to allow them all; the others are listed as
+skipped with the flag to pass.
+
+Each local server is started once, with its `${VAR}` references filled in from your
+environment, asked for its tools, and stopped; it gets `--mcp-timeout SECS` (default 10) in
+all. On Linux and macOS it runs in a process group of its own and the whole group is stopped,
+so a wrapper such as `npx`, `uvx` or `sh -c` can't leave the real server running. On Windows
+only the process kitbag started is stopped, and a bare command such as `npx` also finds
+`npx.cmd` (through `PATHEXT`). A relative `cwd` (or a relative `command` such as
+`./server.js`) is taken from where you run doctor, not from the profile or project. A server that fails to start, exits or times out is reported and the others
+are still counted; this is not a doctor problem, so doctor still exits 0. A server needing a
+variable that isn't set is not started. kitbag doesn't show or keep
 anything a server prints: its error output is discarded and its tool list is only counted.
 Remote servers are not contacted, since their URL and headers may carry credentials.
 
@@ -623,7 +634,7 @@ wrapping of their own.
 | `kitbag undo [ID] [--force]` | Revert the latest (or a specific) apply; with an ID, also an interrupted one |
 | `kitbag history [--json]` | List applies |
 | `kitbag doctor [SOURCE]` | Check installed tools' configs, a profile, required env vars, risky settings, interrupted applies |
-| `kitbag doctor [SOURCE] --mcp-tokens [--mcp-timeout SECS]` | Also start each local MCP server to list its tools, and estimate the tokens its tool definitions take up in each tool |
+| `kitbag doctor [SOURCE] --mcp-tokens [--mcp-timeout SECS] [--allow-git-mcp [NAMES]] [--trust-source]` | Also start each local MCP server to list its tools, and estimate the tokens its tool definitions take up in each tool |
 | `kitbag doctor --why [DIR] [--to IDS]` | Which instruction files each tool loads in `DIR` (default: the current directory), in order, which it skips and why, and known traps |
 | `kitbag list-targets [--json]` | Targets, what they support, which are detected, file locations |
 

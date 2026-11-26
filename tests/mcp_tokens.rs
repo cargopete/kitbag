@@ -153,6 +153,12 @@ fn fake(mode: &str, marker: &Path) -> toml::Table {
 fn profile(sb: &Sandbox, servers: Vec<(&str, toml::Table)>) -> PathBuf {
     let dir = sb.path("profile");
     fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("kitbag.toml"), manifest(servers)).unwrap();
+    dir
+}
+
+/// A `kitbag.toml` with `servers`.
+fn manifest(servers: Vec<(&str, toml::Table)>) -> String {
     let mut mcp = toml::Table::new();
     for (name, s) in servers {
         mcp.insert(name.into(), s.into());
@@ -161,8 +167,7 @@ fn profile(sb: &Sandbox, servers: Vec<(&str, toml::Table)>) -> PathBuf {
     manifest.insert("kitbag".into(), 1.into());
     manifest.insert("name".into(), "tokens".into());
     manifest.insert("mcp_servers".into(), mcp.into());
-    fs::write(dir.join("kitbag.toml"), toml::to_string(&manifest).unwrap()).unwrap();
-    dir
+    toml::to_string(&manifest).unwrap()
 }
 
 /// Run doctor with `args`; returns (exit code, stdout).
@@ -417,6 +422,68 @@ fn a_server_disabled_for_a_tool_is_not_counted_against_it() {
 }
 
 #[test]
+fn a_git_sources_servers_start_only_when_allowed() {
+    if !common::has_git() {
+        return;
+    }
+    let sb = Sandbox::empty();
+    let marker = sb.path("started");
+    let other = sb.path("other-started");
+    let url = sb.git_profile(
+        "g",
+        &[(
+            "kitbag.toml",
+            &manifest(vec![
+                ("fake", fake("serve", &marker)),
+                ("other", fake("serve", &other)),
+            ]),
+        )],
+    );
+    let run = |extra: &[&str]| {
+        let mut args = vec![url.as_str(), "--to", "claude", "--mcp-tokens"];
+        args.extend_from_slice(extra);
+        let (code, out) = doctor(&sb, &args);
+        assert_eq!(code, 0, "{out}");
+        out
+    };
+    let tokens = expected_tokens();
+
+    let out = run(&[]);
+    for name in ["fake", "other"] {
+        assert!(
+            row(&out, "Claude Code", name).contains(&format!(
+                "skipped from a git source, so not started (pass --allow-git-mcp {name} or --trust-source to start it); not counted"
+            )),
+            "{out}"
+        );
+    }
+    assert!(!marker.exists() && !other.exists(), "a server was started");
+
+    let out = run(&["--allow-git-mcp", "fake"]);
+    assert!(
+        row(&out, "Claude Code", "fake").contains(&format!("~{tokens} tokens")),
+        "{out}"
+    );
+    assert!(
+        row(&out, "Claude Code", "other").contains("from a git source, so not started"),
+        "{out}"
+    );
+    assert!(marker.exists() && !other.exists());
+
+    for flag in ["--trust-source", "--allow-git-mcp"] {
+        fs::remove_file(&marker).ok();
+        let out = run(&[flag]);
+        for name in ["fake", "other"] {
+            assert!(
+                row(&out, "Claude Code", name).contains(&format!("~{tokens} tokens")),
+                "{flag}: {out}"
+            );
+        }
+    }
+    assert!(marker.exists() && other.exists());
+}
+
+#[test]
 fn without_a_profile_the_servers_in_each_tools_config_are_counted() {
     let sb = Sandbox::empty();
     // Under the home directory, so capture turns it into ~/... and doctor
@@ -473,9 +540,18 @@ fn the_flags_are_checked() {
         .args(["doctor", "--mcp-tokens", "--mcp-timeout", "0"])
         .assert()
         .failure();
-    sb.cli()
-        .args(["doctor", "--help"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("--mcp-tokens"));
+    for flag in ["--trust-source", "--allow-git-mcp"] {
+        sb.cli()
+            .args(["doctor", flag])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("--mcp-tokens"));
+    }
+    let help = sb.cli().args(["doctor", "--help"]).output().unwrap();
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(help.contains("--mcp-tokens"), "{help}");
+    assert!(help.contains("only use it on setups you trust"), "{help}");
+    assert!(help.contains("--trust-source"), "{help}");
 }
