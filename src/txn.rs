@@ -150,9 +150,69 @@ pub fn real_location(path: &Path) -> io::Result<PathBuf> {
     }
 }
 
+/// The project directory of a project-scope apply, from its description
+/// (`apply ... (project DIR)`), with `~` expanded against `home`.
+fn described_project(description: &str, home: Option<&Path>) -> Option<PathBuf> {
+    let at = description.rfind(" (project ")?;
+    let dir = description[at + " (project ".len()..].strip_suffix(')')?;
+    let path = match (dir.strip_prefix('~'), home) {
+        (Some(""), Some(h)) => h.to_path_buf(),
+        (Some(rest), Some(h)) if rest.starts_with(std::path::is_separator) => {
+            h.join(rest.trim_start_matches(std::path::is_separator))
+        }
+        _ => PathBuf::from(dir),
+    };
+    path.is_absolute().then_some(path)
+}
+
+/// For an apply recorded by kitbag 0.1.1 and older, which didn't note where
+/// files really were: whether `parent` (resolving to `real`) may have moved.
+///
+/// Only the part of the path at or below the deepest of `roots` (the home or
+/// project directory) that contains it counts, so links the system put above
+/// it (`/var` -> `/private/var` on macOS, `/home` -> `/usr/home`) are fine,
+/// while a link that appeared below it is refused. A path under none of the
+/// roots is refused when any component is a link.
+fn legacy_moved(parent: &Path, real: &Path, roots: &[PathBuf]) -> Option<String> {
+    const OLDER: &str =
+        "this apply was recorded by an older kitbag, which didn't note where the file really was";
+    let is_link = |p: &Path| fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink());
+    let Some(root) = roots
+        .iter()
+        .filter(|r| r.is_absolute() && parent.starts_with(r))
+        .max_by_key(|r| r.components().count())
+    else {
+        return parent.ancestors().find(|a| is_link(a)).map(|link| {
+            format!(
+                "{} is a symbolic link (to {}); {OLDER}",
+                link.display(),
+                real.display()
+            )
+        });
+    };
+    if is_link(root) {
+        return Some(format!(
+            "{} is now a symbolic link; {OLDER}",
+            root.display()
+        ));
+    }
+    let rest = parent.strip_prefix(root).ok()?;
+    let expected = real_location(root).ok().map(|r| r.join(rest));
+    if expected.as_deref() == Some(real) {
+        return None;
+    }
+    Some(format!(
+        "{} resolves to {}, so a symbolic link appeared below {}; {OLDER}",
+        parent.display(),
+        real.display(),
+        root.display()
+    ))
+}
+
 /// Why undo must not touch `e.path`, if it must not: `--force` overrides
-/// "edited since", never this.
-fn moved(e: &Entry) -> Option<String> {
+/// "edited since", never this. `roots` anchor the check for old
+/// transactions (see [`legacy_moved`]).
+fn moved(e: &Entry, roots: &[PathBuf]) -> Option<String> {
     if fs::symlink_metadata(&e.path).is_ok_and(|m| m.file_type().is_symlink()) {
         return Some("it is now a symbolic link, and kitbag wrote a regular file there".into());
     }
@@ -174,18 +234,7 @@ fn moved(e: &Entry) -> Option<String> {
             real.display(),
             rp.display()
         )),
-        // Recorded by an older kitbag, which wrote to resolved paths: a
-        // symbolic link anywhere in the directory now means it may have moved.
-        None => parent
-            .ancestors()
-            .find(|a| fs::symlink_metadata(a).is_ok_and(|m| m.file_type().is_symlink()))
-            .map(|link| {
-                format!(
-                    "{} is a symbolic link (to {}); this apply was recorded by an older kitbag, which didn't note where the file really was",
-                    link.display(),
-                    real.display()
-                )
-            }),
+        None => legacy_moved(parent, &real, roots),
     }
 }
 
@@ -444,7 +493,25 @@ impl Store {
     /// written (a symbolic link appeared or changed), or that is now a link
     /// itself, is left alone even with `force`, and reported in
     /// [`Undone::refused`]; the rest is undone.
+    ///
+    /// Transactions recorded by kitbag 0.1.1 and older don't say where the
+    /// files really were, so for those any symbolic link in a file's path
+    /// counts; use [`Store::undo_with_home`] to ignore links above the home
+    /// or project directory.
     pub fn undo(&self, id: Option<&str>, force: bool) -> Result<Undone> {
+        self.undo_with_home(id, force, None)
+    }
+
+    /// [`Store::undo`], where for transactions recorded by kitbag 0.1.1 and
+    /// older only symbolic links at or below `home` (or the project directory
+    /// of a project-scope apply) count, so links the system keeps above them
+    /// (`/var` -> `/private/var` on macOS) don't make undo refuse a file.
+    pub fn undo_with_home(
+        &self,
+        id: Option<&str>,
+        force: bool,
+        home: Option<&Path>,
+    ) -> Result<Undone> {
         let all = self.list()?;
         let mut tx = match id {
             Some(id) => {
@@ -479,10 +546,15 @@ impl Store {
                 later.join(", ")
             );
         }
+        let roots: Vec<PathBuf> = home
+            .map(Path::to_path_buf)
+            .into_iter()
+            .chain(described_project(&tx.description, home))
+            .collect();
         let mut refused = Vec::new();
         let mut entries = Vec::new();
         for e in &tx.entries {
-            match moved(e) {
+            match moved(e, &roots) {
                 Some(why) => refused.push(Refused {
                     path: e.path.clone(),
                     reason: why,
@@ -658,24 +730,128 @@ mod tests {
                 Some(real.canonicalize().unwrap().as_path())
             );
             if legacy {
-                // Transactions written by 0.1.1 have no `real_parent`.
-                let file = store.tx_dir(&tx.id).join("transaction.json");
-                let mut v: serde_json::Value =
-                    serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
-                for e in v["entries"].as_array_mut().unwrap() {
-                    e.as_object_mut().unwrap().remove("real_parent");
-                }
-                fs::write(&file, v.to_string()).unwrap();
+                make_legacy(&store, &tx);
             }
             let outside = root.path().join("outside");
             fs::rename(&real, &outside).unwrap();
             symlink(&outside, &real).unwrap();
-            let done = store.undo(None, true).unwrap();
+            let done = store.undo_with_home(None, true, Some(root.path())).unwrap();
             assert_eq!(done.refused.len(), 1, "legacy: {legacy}");
             assert!(done.refused[0].reason.contains("symbolic link"));
             assert!(outside.join("config.toml").exists(), "legacy: {legacy}");
             assert!(!kept.exists(), "the other file is still undone");
         }
+    }
+
+    /// Drop `real_parent` like transactions written by kitbag 0.1.1.
+    fn make_legacy(store: &Store, tx: &Transaction) {
+        let file = store.tx_dir(&tx.id).join("transaction.json");
+        let mut v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        for e in v["entries"].as_array_mut().unwrap() {
+            e.as_object_mut().unwrap().remove("real_parent");
+        }
+        fs::write(&file, v.to_string()).unwrap();
+    }
+
+    /// macOS keeps temporary and home-like directories behind system links
+    /// (`/var` -> `/private/var`); links above the home or project directory
+    /// were there all along and must not make undo refuse anything.
+    #[cfg(unix)]
+    #[test]
+    fn undo_accepts_links_above_the_home_or_project_directory() {
+        use std::os::unix::fs::symlink;
+        for legacy in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            fs::create_dir(tmp.path().join("private")).unwrap();
+            symlink(tmp.path().join("private"), tmp.path().join("var")).unwrap();
+            let home = tmp.path().join("var/home");
+            let project = tmp.path().join("var/work/app");
+            fs::create_dir_all(&home).unwrap();
+            fs::create_dir_all(&project).unwrap();
+            let store = Store::new(home.join("state"));
+            let user_file = home.join(".codex/config.toml");
+            let project_file = project.join(".cursor/rules/x.mdc");
+            let desc = format!("apply ./p -> codex, cursor (project {})", project.display());
+            let tx = store
+                .commit(
+                    &[
+                        change(&user_file, Some("x")),
+                        change(&project_file, Some("y")),
+                    ],
+                    &desc,
+                    &[],
+                    &WriteOptions::default(),
+                )
+                .unwrap();
+            if legacy {
+                make_legacy(&store, &tx);
+            }
+            let done = store.undo_with_home(None, false, Some(&home)).unwrap();
+            assert!(
+                done.refused.is_empty(),
+                "legacy: {legacy}: {:?}",
+                done.refused
+            );
+            assert!(!user_file.exists() && !project_file.exists());
+        }
+
+        // Without a root to anchor it, an old transaction stays strict.
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("private")).unwrap();
+        symlink(tmp.path().join("private"), tmp.path().join("var")).unwrap();
+        let store = Store::new(tmp.path().join("state"));
+        let f = tmp.path().join("var/elsewhere/f.txt");
+        let tx = store
+            .commit(&[change(&f, Some("x"))], "t", &[], &WriteOptions::default())
+            .unwrap();
+        make_legacy(&store, &tx);
+        let done = store
+            .undo_with_home(None, false, Some(&tmp.path().join("home")))
+            .unwrap();
+        assert_eq!(done.refused.len(), 1);
+        assert!(f.exists());
+    }
+
+    /// A link that appears below the home directory, between it and the file,
+    /// is still refused for an old transaction.
+    #[cfg(unix)]
+    #[test]
+    fn legacy_undo_refuses_a_link_below_the_home_directory() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let store = Store::new(tmp.path().join("state"));
+        let f = home.join(".codex/sub/config.toml");
+        let tx = store
+            .commit(&[change(&f, Some("x"))], "t", &[], &WriteOptions::default())
+            .unwrap();
+        make_legacy(&store, &tx);
+        let outside = tmp.path().join("outside");
+        fs::rename(home.join(".codex"), &outside).unwrap();
+        symlink(&outside, home.join(".codex")).unwrap();
+        let done = store.undo_with_home(None, true, Some(&home)).unwrap();
+        assert_eq!(done.refused.len(), 1);
+        assert!(done.refused[0].reason.contains("symbolic link"));
+        assert!(outside.join("sub/config.toml").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_directory_comes_from_the_description() {
+        let home = Path::new("/h");
+        let p = |d: &str| described_project(d, Some(home));
+        assert_eq!(
+            p("apply ./x (y) -> codex (project ~/work/app)"),
+            Some(PathBuf::from("/h/work/app"))
+        );
+        assert_eq!(
+            p("apply ./x -> codex (project /srv/app)"),
+            Some(PathBuf::from("/srv/app"))
+        );
+        assert_eq!(p("apply ./x -> codex (project ~)"), Some(home.into()));
+        assert_eq!(p("apply ./x -> codex (user scope)"), None);
+        assert_eq!(p("apply ./x -> codex (project rel/dir)"), None);
     }
 
     #[cfg(unix)]

@@ -1373,7 +1373,7 @@ fn cmd_sync(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, s: &SyncArgs) -
 
 fn cmd_undo(ctx: &Ctx, id: Option<&str>, force: bool) -> Result<i32> {
     let store = Store::new(&ctx.state_dir);
-    let done = store.undo(id, force)?;
+    let done = store.undo_with_home(id, force, Some(&ctx.env.home))?;
     let tx = &done.tx;
     println!(
         "{} {} ({})",
