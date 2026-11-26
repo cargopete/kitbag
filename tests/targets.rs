@@ -423,6 +423,56 @@ fn unreadable_records_are_a_warning() {
     );
     assert!(out.contains("kitbag has no record of adding it"), "{out}");
     assert!(cursor_has(&sb, "heavy"));
+    assert!(!sb.path("state/applied-servers.json.bak").exists());
+
+    // The next apply that writes a server starts the records afresh, and
+    // keeps the unreadable file next to them.
+    let changed = profile("shared", "disabled_on = [\"cursor\"]\n")
+        .replace("command = \"light-mcp\"", "command = \"light-mcp-2\"");
+    write_profile(&sb, "p", &changed);
+    let out = apply(&sb, "p", "cursor");
+    assert!(out.contains("Wrote"), "{out}");
+    assert_eq!(sb.read("state/applied-servers.json.bak"), "not json");
+    let rec: serde_json::Value = sb.json("state/applied-servers.json");
+    assert!(
+        rec.as_array()
+            .is_some_and(|a| a.iter().any(|r| r["name"] == "light")),
+        "{rec}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(sb.path("state/applied-servers.json.bak"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+}
+
+#[test]
+fn up_to_date_says_when_disabled_servers_were_left_in_place() {
+    let sb = Sandbox::empty();
+    write_profile(&sb, "p", &profile("shared", ""));
+    apply(&sb, "p", "cursor");
+    let out = apply(&sb, "p", "cursor");
+    assert!(
+        out.contains("Up to date: every target already matches the profile.")
+            && !out.contains("left in place"),
+        "{out}"
+    );
+
+    // Another profile disables it: nothing is written, and the summary
+    // doesn't claim Cursor matches the profile outright.
+    write_profile(&sb, "q", &profile("other", "disabled_on = [\"cursor\"]\n"));
+    let out = apply(&sb, "q", "cursor");
+    assert!(
+        out.contains(
+            "Up to date: every target already matches the profile, except for MCP servers it disables that were left in place (see below)."
+        ) && out.contains("profile 'shared' added it"),
+        "{out}"
+    );
+    assert!(cursor_has(&sb, "heavy"));
 }
 
 #[test]
