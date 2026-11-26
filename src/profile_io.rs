@@ -139,7 +139,7 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
 
 /// Why a profile `name` (as written, before trimming) is unusable, if it is:
 /// empty, or holding control characters (a newline, tab, escape ...) that
-/// would end up in `history` and in what kitbag prints.
+/// would end up in the apply records and in what kitbag prints.
 pub fn check_profile_name(name: &str) -> std::result::Result<(), &'static str> {
     let name = name.trim();
     if name.is_empty() {
