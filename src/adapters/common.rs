@@ -490,11 +490,13 @@ impl<'a> Resolver<'a> {
 }
 
 /// What a server entry runs or connects to: its `command`, or its URL
-/// (`url`, or Gemini CLI's `httpUrl`).
+/// (`url`, Gemini CLI's `httpUrl` or Antigravity's `serverUrl`).
 fn server_identity(def: &Map<String, Value>) -> (Option<&Value>, Option<&Value>) {
     (
         def.get("command"),
-        def.get("url").or_else(|| def.get("httpUrl")),
+        def.get("url")
+            .or_else(|| def.get("httpUrl"))
+            .or_else(|| def.get("serverUrl")),
     )
 }
 
@@ -1015,19 +1017,9 @@ pub fn import_server(
     {
         s.transport = None;
     }
-    let (redacted, mut redactions) = redact_server(name, &s);
+    let (redacted, redactions) = redact_server(name, &s);
     if cap.profile.mcp_servers.contains_key(name) {
         return;
-    }
-    let originals: BTreeMap<String, String> = s
-        .strings()
-        .into_iter()
-        .map(|(loc, v)| (format!("mcp_servers.{name}.{loc}"), v.to_string()))
-        .collect();
-    for r in &mut redactions {
-        r.fingerprint = originals
-            .get(&r.location)
-            .map(|v| crate::txn::sha256(Some(v.as_bytes())).unwrap_or_default());
     }
     let s = redacted;
     cap.redactions.extend(redactions);
@@ -1450,5 +1442,29 @@ mod tests {
             "frontend-component"
         );
         assert_eq!(name_from_rel("a b.mdc", ".mdc"), "a-b");
+    }
+
+    #[test]
+    fn server_url_is_part_of_a_servers_identity() {
+        let obj = |v: Value| v.as_object().unwrap().clone();
+        let managed = &["serverUrl", "url", "headers"];
+        // A different Antigravity serverUrl is a different server: its oauth goes.
+        let cur = obj(json!({"serverUrl": "https://good.example/mcp", "oauth": {"clientId": "x"}}));
+        let want = obj(json!({"serverUrl": "https://other.example/mcp"}));
+        let m = merge_server_def(Some(&cur), &want, managed).unwrap();
+        assert_eq!(m.dropped, vec!["oauth"]);
+        assert_eq!(
+            Value::Object(m.def),
+            json!({"serverUrl": "https://other.example/mcp"})
+        );
+        // The same URL under the older `url` key is the same server.
+        let cur = obj(json!({"url": "https://good.example/mcp", "timeoutSeconds": 30}));
+        let want = obj(json!({"serverUrl": "https://good.example/mcp"}));
+        let m = merge_server_def(Some(&cur), &want, managed).unwrap();
+        assert!(m.dropped.is_empty());
+        assert_eq!(
+            Value::Object(m.def),
+            json!({"timeoutSeconds": 30, "serverUrl": "https://good.example/mcp"})
+        );
     }
 }

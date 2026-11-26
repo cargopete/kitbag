@@ -259,7 +259,8 @@ fn list_targets_json() {
             "cursor",
             "codex",
             "gemini-cli",
-            "claude-desktop"
+            "claude-desktop",
+            "antigravity"
         ]
     );
     assert_eq!(v[2]["support"]["rules"], "folded");
@@ -289,6 +290,35 @@ fn doctor_reports_problems() {
 }
 
 #[test]
+fn apply_to_antigravity_then_undo() {
+    let sb = Sandbox::empty();
+    sb.cli().args(["init", "prof"]).assert().success();
+    fs::write(
+        sb.path("prof/kitbag.toml"),
+        "kitbag = 1\nname = \"prof\"\n\n[mcp_servers.docs]\nurl = \"https://docs.example.com/mcp\"\n",
+    )
+    .unwrap();
+    sb.cli()
+        .args(["apply", "prof", "--to", "antigravity", "--yes"])
+        .assert()
+        .success();
+    let cfg = sb.json("home/.gemini/config/mcp_config.json");
+    assert_eq!(
+        cfg["mcpServers"]["docs"]["serverUrl"],
+        "https://docs.example.com/mcp"
+    );
+    assert!(
+        sb.read("home/.gemini/GEMINI.md")
+            .contains("Write instructions every agent should follow")
+    );
+    sb.cli().arg("undo").assert().success();
+    assert!(
+        !sb.home().join(".gemini").exists(),
+        "undo removes what apply created"
+    );
+}
+
+#[test]
 fn undo_refuses_when_files_changed_since() {
     let sb = Sandbox::empty();
     sb.cli().args(["init", "prof"]).assert().success();
@@ -304,6 +334,64 @@ fn undo_refuses_when_files_changed_since() {
         .stderr(contains("modified after"));
     sb.cli().args(["undo", "--force"]).assert().success();
     assert!(!sb.home().join(".claude/CLAUDE.md").exists());
+}
+
+#[test]
+fn undo_refuses_a_tampered_backup_without_force() {
+    let sb = Sandbox::empty();
+    sb.cli().args(["init", "prof"]).assert().success();
+    fs::create_dir_all(sb.home().join(".claude")).unwrap();
+    fs::write(sb.home().join(".claude/CLAUDE.md"), "mine\n").unwrap();
+    sb.cli()
+        .args(["apply", "prof", "--to", "claude-code", "--yes"])
+        .assert()
+        .success();
+    let tx = fs::read_dir(sb.state().join("backups"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let backup = fs::read_dir(&tx)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with("CLAUDE.md"))
+        .unwrap();
+    fs::write(&backup, "planted\n").unwrap();
+    let applied = sb.read("home/.claude/CLAUDE.md");
+    sb.cli()
+        .arg("undo")
+        .assert()
+        .code(2)
+        .stderr(contains("backups were changed").and(contains("--force")));
+    assert_eq!(sb.read("home/.claude/CLAUDE.md"), applied);
+    sb.cli()
+        .args(["undo", "--force"])
+        .assert()
+        .success()
+        .stdout(contains("restored from a backup that changed"));
+    assert_eq!(sb.read("home/.claude/CLAUDE.md"), "planted\n");
+}
+
+#[test]
+fn diffs_mask_private_keys_and_secrets_in_existing_files() {
+    let sb = Sandbox::empty();
+    sb.cli().args(["init", "prof"]).assert().success();
+    fs::create_dir_all(sb.home().join(".claude")).unwrap();
+    fs::write(
+        sb.home().join(".claude/CLAUDE.md"),
+        "# Notes\n\nexport DB_PASSWORD=FAKEpw123\n\n-----BEGIN OPENSSH PRIVATE KEY-----\nFAKEb3BlbnNzaC1rZXktdjEAAAAA\nFAKEAAAAAAAAAAEAAAAzAAAAC3Nz\n-----END OPENSSH PRIVATE KEY-----\n",
+    )
+    .unwrap();
+    sb.cli()
+        .args(["diff", "prof", "--to", "claude-code"])
+        .assert()
+        .success()
+        .stdout(
+            contains("(private key, sha256:")
+                .and(contains("DB_PASSWORD=••••••••"))
+                .and(contains("FAKE").not()),
+        );
 }
 
 /// A `~/...` display path with the platform's separator.

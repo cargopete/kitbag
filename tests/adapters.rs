@@ -6,6 +6,7 @@ mod common;
 use common::*;
 use kitbag::adapters::Scope;
 use kitbag::model::{McpServer, Profile, Rule, Transport};
+use kitbag::txn::Store;
 use serde_json::json;
 
 // ---------------------------------------------------------------- capture
@@ -439,4 +440,233 @@ fn env_overrides_relocate_configs() {
     );
     let p = plan(&sample(), &["codex"], &env);
     assert!(planned(&p, &codex_home.join("config.toml")).is_some());
+}
+
+// ---------------------------------------------------------------- antigravity
+
+#[test]
+fn antigravity_capture() {
+    let sb = Sandbox::fixtures();
+    let r = capture(&["antigravity"], &sb.env(Scope::User));
+    let p = &r.profile;
+    assert_eq!(
+        p.mcp_servers["firebase"].args,
+        vec!["-y", "firebase-tools@latest", "mcp"]
+    );
+    let stitch = &p.mcp_servers["stitch"];
+    assert_eq!(
+        stitch.url.as_deref(),
+        Some("https://stitch.example.com/mcp")
+    );
+    assert_eq!(stitch.transport(), Transport::Http);
+    // A literal key in headers is redacted (Antigravity has no env syntax to keep).
+    assert_eq!(stitch.headers["X-Goog-Api-Key"], "${STITCH_X_GOOG_API_KEY}");
+    assert!(p.mcp_servers["time"].disabled);
+    // Every file Antigravity reads: ~/.gemini/GEMINI.md and ~/.gemini/config/AGENTS.md.
+    assert_eq!(
+        p.instructions.as_deref(),
+        Some("Prefer small functions.\n\nExplain the plan before editing files.")
+    );
+
+    let p = capture(&["antigravity"], &sb.env(Scope::Project)).profile;
+    let devtools = &p.mcp_servers["chrome-devtools"];
+    assert_eq!(devtools.cwd.as_deref(), Some("tools"));
+    assert!(p.instructions.as_deref().unwrap().contains("pnpm test"));
+}
+
+#[test]
+fn antigravity_capture_leaves_out_rules_folded_by_other_tools() {
+    let sb = Sandbox::empty();
+    apply(&sb, &sample(), &["gemini-cli"], &sb.env(Scope::User));
+    let r = capture(&["antigravity"], &sb.env(Scope::User));
+    assert_eq!(
+        r.profile.instructions.as_deref(),
+        Some("Use British English.")
+    );
+    assert!(r.profile.rules.is_empty());
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n.message.contains("were not captured (ts)"))
+    );
+}
+
+#[test]
+fn antigravity_apply_user() {
+    let sb = Sandbox::empty();
+    let env = sb.env_with(Scope::User, &[("GITHUB_TOKEN", "ghp_FAKEvalue123")]);
+    let p = plan(&sample(), &["antigravity"], &env);
+    let cfg: serde_json::Value = serde_json::from_str(
+        &planned(&p, &sb.home().join(".gemini/config/mcp_config.json")).unwrap(),
+    )
+    .unwrap();
+    // No interpolation in mcp_config.json: references are resolved, like Claude Desktop.
+    assert_eq!(
+        cfg["mcpServers"]["github"],
+        json!({"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": {"GITHUB_TOKEN": "ghp_FAKEvalue123"}})
+    );
+    assert!(p.sensitive.contains("ghp_FAKEvalue123"));
+    // Remote servers use serverUrl; the unset LINEAR_API_KEY stays a placeholder.
+    assert_eq!(
+        cfg["mcpServers"]["linear"],
+        json!({"serverUrl": "https://mcp.linear.app/mcp", "headers": {"Authorization": "Bearer ${LINEAR_API_KEY}"}})
+    );
+    assert!(p.missing_env.contains("LINEAR_API_KEY"));
+    let md = planned(&p, &sb.home().join(".gemini/GEMINI.md")).unwrap();
+    assert!(md.contains("<!-- kitbag:begin team -->") && md.contains("Use British English."));
+    assert!(!md.contains("kitbag:rule"), "rules are not supported yet");
+    assert!(p.notes.iter().any(|n| n.target == "antigravity"
+        && n.message.contains("not supported")
+        && n.message.contains("1 rules")
+        && n.message.contains("1 commands")));
+    assert_eq!(p.changes.len(), 2, "{:?}", p.changes);
+}
+
+#[test]
+fn antigravity_apply_project_keeps_placeholders_with_secrets_never() {
+    let sb = Sandbox::empty();
+    let env = sb.env_with(Scope::Project, &[("GITHUB_TOKEN", "ghp_FAKEvalue123")]);
+    let prof = sample();
+    let mut o = opts(&prof);
+    o.secrets = kitbag::adapters::SecretsMode::Never;
+    let p = kitbag::engine::plan(&prof, &targets(&["antigravity"]), &env, &o).unwrap();
+    let cfg = planned(&p, &sb.project().join(".agents/mcp_config.json")).unwrap();
+    assert!(cfg.contains("${GITHUB_TOKEN}") && !cfg.contains("ghp_FAKE"));
+    assert!(p.sensitive.is_empty());
+    assert!(
+        planned(&p, &sb.project().join("AGENTS.md"))
+            .unwrap()
+            .contains("Use British English.")
+    );
+}
+
+#[test]
+fn antigravity_apply_merges_into_existing_servers() {
+    let sb = Sandbox::empty();
+    let cfg = sb.home().join(".gemini/config/mcp_config.json");
+    std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+    std::fs::write(
+        &cfg,
+        r#"{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "disabledTools": ["delete_repo"]
+    },
+    "linear": { "url": "https://mcp.linear.app/mcp", "timeoutSeconds": 30 },
+    "mine": { "command": "my-mcp" }
+  }
+}
+"#,
+    )
+    .unwrap();
+    let mut prof = sample();
+    prof.mcp_servers.get_mut("github").unwrap().disabled = true;
+    prof.mcp_servers.insert(
+        "events".into(),
+        McpServer {
+            url: Some("https://events.example.com/sse".into()),
+            transport: Some(Transport::Sse),
+            ..Default::default()
+        },
+    );
+    let p = plan(&prof, &["antigravity"], &sb.env(Scope::User));
+    let doc: serde_json::Value = serde_json::from_str(&planned(&p, &cfg).unwrap()).unwrap();
+    let s = &doc["mcpServers"];
+    assert_eq!(s["github"]["disabled"], true);
+    assert_eq!(s["github"]["disabledTools"], json!(["delete_repo"]));
+    // Same URL: the old `url` key gives way to serverUrl, timeoutSeconds stays.
+    assert_eq!(
+        s["linear"],
+        json!({"timeoutSeconds": 30, "serverUrl": "https://mcp.linear.app/mcp", "headers": {"Authorization": "Bearer ${LINEAR_API_KEY}"}})
+    );
+    assert_eq!(s["mine"], json!({"command": "my-mcp"}));
+    // SSE isn't something Antigravity connects to.
+    assert!(s.get("events").is_none());
+    assert!(
+        p.notes
+            .iter()
+            .any(|n| n.message.contains("events skipped") && n.message.contains("SSE"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn antigravity_config_holding_a_resolved_secret_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::empty();
+    let env = sb.env_with(Scope::User, &[("GITHUB_TOKEN", "ghp_FAKEvalue123")]);
+    apply(&sb, &sample(), &["antigravity"], &env);
+    let cfg = sb.home().join(".gemini/config/mcp_config.json");
+    let mode = std::fs::metadata(&cfg).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+/// Gemini CLI and Antigravity both read `~/.gemini/GEMINI.md`: applying to
+/// both must leave one managed block, in either order, and undo cleanly.
+#[test]
+fn gemini_and_antigravity_share_one_block_in_gemini_md() {
+    let count = |text: &str| text.matches("<!-- kitbag:begin team -->").count();
+    let prof = sample();
+
+    // Together, in one apply.
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::User);
+    let gemini_md = sb.home().join(".gemini/GEMINI.md");
+    std::fs::create_dir_all(gemini_md.parent().unwrap()).unwrap();
+    std::fs::write(&gemini_md, "My own notes.\n").unwrap();
+    let p = apply(&sb, &prof, &["gemini-cli", "antigravity"], &env);
+    assert_eq!(
+        p.changes.iter().filter(|c| c.path == gemini_md).count(),
+        1,
+        "GEMINI.md is planned once"
+    );
+    let text = std::fs::read_to_string(&gemini_md).unwrap();
+    assert_eq!(count(&text), 1, "{text}");
+    assert_eq!(text.matches("Use British English.").count(), 1, "{text}");
+    assert!(text.starts_with("My own notes.") && text.contains("kitbag:begin team:rules"));
+    for ids in [
+        &["antigravity"][..],
+        &["gemini-cli"],
+        &["antigravity", "gemini-cli"],
+    ] {
+        let again = plan(&prof, ids, &env);
+        assert!(again.changes.is_empty(), "{ids:?}: {:?}", again.changes);
+    }
+    Store::new(sb.state()).undo(None, false).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&gemini_md).unwrap(),
+        "My own notes.\n"
+    );
+    assert!(!sb.home().join(".gemini/config").exists());
+
+    // One after the other, each order.
+    for order in [["antigravity", "gemini-cli"], ["gemini-cli", "antigravity"]] {
+        let sb = Sandbox::empty();
+        let env = sb.env(Scope::User);
+        apply(&sb, &prof, &[order[0]], &env);
+        apply(&sb, &prof, &[order[1]], &env);
+        let text = sb.read("home/.gemini/GEMINI.md");
+        assert_eq!(count(&text), 1, "{order:?}: {text}");
+        assert_eq!(text.matches("Use British English.").count(), 1, "{order:?}");
+        let again = plan(&prof, &order, &env);
+        assert!(again.changes.is_empty(), "{order:?}: {:?}", again.changes);
+    }
+}
+
+/// In a project, AGENTS.md is shared with Codex and Cursor.
+#[test]
+fn antigravity_codex_and_cursor_share_agents_md() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::Project);
+    let prof = sample();
+    apply(&sb, &prof, &["codex", "cursor", "antigravity"], &env);
+    let text = sb.read("project/AGENTS.md");
+    assert_eq!(
+        text.matches("<!-- kitbag:begin team -->").count(),
+        1,
+        "{text}"
+    );
+    assert!(plan(&prof, &["antigravity"], &env).changes.is_empty());
 }

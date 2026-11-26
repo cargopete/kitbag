@@ -34,6 +34,7 @@ Examples:
   kitbag diff ~/dotagents --to codex
   kitbag apply github:you/dotagents --to all
   kitbag apply ~/dotagents --project . --to cursor,codex
+  kitbag apply ~/dotagents --to gemini-cli,antigravity
   kitbag status ~/dotagents
   kitbag sync ~/dotagents --from claude-code
   kitbag undo";
@@ -174,7 +175,8 @@ struct Place {
 
 #[derive(Args, Debug, Clone)]
 struct TargetArgs {
-    /// Targets to write: ids (comma-separated), 'all' or 'detected'
+    /// Targets to write: ids (comma-separated: claude-code, cursor, codex, gemini-cli,
+    /// claude-desktop, antigravity), 'all' or 'detected'
     #[arg(long, value_name = "IDS", default_value = "detected")]
     to: String,
     #[command(flatten)]
@@ -182,6 +184,10 @@ struct TargetArgs {
     /// Profile directory inside a git repository
     #[arg(long, value_name = "SUBDIR")]
     path: Option<String>,
+    /// Accept a git source over cleartext http:// or git://, which anyone on
+    /// the network could tamper with
+    #[arg(long)]
+    allow_insecure_source: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -195,6 +201,10 @@ struct StatusArgs {
     /// Profile directory inside a git repository
     #[arg(long, value_name = "SUBDIR")]
     path: Option<String>,
+    /// Accept a git source over cleartext http:// or git://, which anyone on
+    /// the network could tamper with
+    #[arg(long)]
+    allow_insecure_source: bool,
     /// Exit with status 1 when anything drifted
     #[arg(long)]
     exit_code: bool,
@@ -732,8 +742,12 @@ enum Mode {
     Diff { exit_code: bool },
 }
 
-fn load_source(src: &str, path: Option<&str>) -> Result<(source::Resolved, Profile)> {
-    let resolved = source::resolve(src, path)?;
+fn load_source(
+    src: &str,
+    path: Option<&str>,
+    allow_insecure: bool,
+) -> Result<(source::Resolved, Profile)> {
+    let resolved = source::resolve(src, path, allow_insecure)?;
     let profile = profile_io::load(&resolved.dir)?;
     Ok((resolved, profile))
 }
@@ -858,7 +872,7 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
 }
 
 fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) -> Result<i32> {
-    let (resolved, profile) = load_source(src, t.path.as_deref())?;
+    let (resolved, profile) = load_source(src, t.path.as_deref(), t.allow_insecure_source)?;
     let targets = select_targets(&t.to, &ctx.env, "to")?;
     let (profile, plan) = plan_apply(ctx, &resolved, profile, &targets, a)?;
     present(ctx, &resolved, &profile, &plan, mode)
@@ -1347,7 +1361,7 @@ fn cmd_status(ctx: &Ctx, src: Option<&str>, s: &StatusArgs) -> Result<i32> {
     let mut rows: Vec<StatusRow> = Vec::new();
     match src {
         Some(src) => {
-            let (resolved, profile) = load_source(src, s.path.as_deref())?;
+            let (resolved, profile) = load_source(src, s.path.as_deref(), s.allow_insecure_source)?;
             let targets = select_targets(s.to.as_deref().unwrap_or("detected"), env, "to")?;
             let loaded = profile.clone();
             let (profile, plan) =
@@ -1451,7 +1465,7 @@ fn cmd_status(ctx: &Ctx, src: Option<&str>, s: &StatusArgs) -> Result<i32> {
 
 fn cmd_sync(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, s: &SyncArgs) -> Result<i32> {
     let env = &ctx.env;
-    let (resolved, loaded) = load_source(src, t.path.as_deref())?;
+    let (resolved, loaded) = load_source(src, t.path.as_deref(), t.allow_insecure_source)?;
     if resolved.remote && s.from.is_some() {
         bail!(
             "--from can't be used with a git source: kitbag can't write edits back into a repository it cloned. Clone it, sync the local directory with --from, then commit and push"
@@ -1539,7 +1553,7 @@ fn cmd_undo(ctx: &Ctx, id: Option<&str>, force: bool) -> Result<i32> {
         "{} {} ({})",
         paint(GREEN, "Undid"),
         visible_line(&tx.id),
-        visible_line(&tx.description)
+        visible_line(&source::strip_url_credentials(&tx.description))
     );
     for e in &tx.entries {
         if done.refused.iter().any(|r| r.path == e.path) {
@@ -1566,6 +1580,13 @@ fn cmd_undo(ctx: &Ctx, id: Option<&str>, force: bool) -> Result<i32> {
             );
         }
     }
+    for t in &done.tampered {
+        println!(
+            "  {}  {}: restored from a backup that changed after the apply (--force)",
+            paint(YELLOW, "warning"),
+            tildify(&t.path, &ctx.env.home)
+        );
+    }
     if done.refused.is_empty() {
         Ok(0)
     } else {
@@ -1586,7 +1607,7 @@ fn cmd_history(ctx: &Ctx, as_json: bool) -> Result<i32> {
             .map(|t| {
                 json!({
                     "id": t.id, "created": t.created_at(), "status": t.status,
-                    "description": t.description, "targets": t.targets,
+                    "description": source::strip_url_credentials(&t.description), "targets": t.targets,
                     "files": t.entries.iter().map(|e| e.path.display().to_string()).collect::<Vec<_>>(),
                 })
             })
@@ -1614,7 +1635,7 @@ fn cmd_history(ctx: &Ctx, as_json: bool) -> Result<i32> {
             t.created_at(),
             status,
             t.entries.len(),
-            visible_line(&t.description)
+            visible_line(&source::strip_url_credentials(&t.description))
         );
     }
     Ok(0)
@@ -1715,7 +1736,7 @@ fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
 
     if let Some(src) = src {
         println!("\n{}", paint(BOLD, "Profile"));
-        match load_source(src, t.path.as_deref()) {
+        match load_source(src, t.path.as_deref(), t.allow_insecure_source) {
             Err(e) => {
                 problems += 1;
                 println!("  {} {}", paint(RED, "error"), visible(&format!("{e:#}")));

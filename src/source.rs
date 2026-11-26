@@ -33,6 +33,38 @@ static HOSTED: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^https://(github\.com|gitlab\.com|bitbucket\.org)/[\w.-]+/[\w.-]+/?$")
         .expect("valid regex")
 });
+/// `scheme://userinfo@` anywhere in a text. The userinfo runs to the last `@`
+/// before the path, so a raw `@` inside a password is covered too.
+static URL_USERINFO: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b([a-z][a-z0-9+.-]*://)([^\s/?#]*)@").expect("valid regex"));
+
+/// `text` with the credentials of every URL in it removed:
+/// `https://user:token@host/x` becomes `https://host/x`, and so does
+/// `https://token@host/x`, since a token often stands in for the username.
+/// An SSH URL keeps its username (`ssh://git@host/x`), which is not a secret,
+/// but loses any password. Used for every source URL kitbag prints or stores.
+pub fn strip_url_credentials(text: &str) -> String {
+    URL_USERINFO
+        .replace_all(text, |c: &regex::Captures| {
+            let scheme = &c[1];
+            let ssh = ["ssh://", "git+ssh://"]
+                .iter()
+                .any(|p| scheme.eq_ignore_ascii_case(p));
+            match (ssh, c[2].split_once(':')) {
+                (true, None) => c[0].to_string(),
+                (true, Some((user, _))) => format!("{scheme}{user}@"),
+                (false, _) => scheme.to_string(),
+            }
+        })
+        .into_owned()
+}
+
+/// Is `url` fetched without encryption (`http://`, `git://`)? Anyone on the
+/// network path could then swap the profile for their own.
+fn cleartext(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    u.starts_with("http://") || u.starts_with("git://")
+}
 
 /// Recognise git sources:
 ///
@@ -120,8 +152,10 @@ fn safe_subdir(sub: &str) -> Result<PathBuf> {
     Ok(p.to_path_buf())
 }
 
-/// Turn a command-line argument into a local profile directory, cloning git sources.
-pub fn resolve(src: &str, subdir: Option<&str>) -> Result<Resolved> {
+/// Turn a command-line argument into a local profile directory, cloning git
+/// sources. Cleartext `http://` and `git://` sources are refused unless
+/// `allow_insecure`.
+pub fn resolve(src: &str, subdir: Option<&str>, allow_insecure: bool) -> Result<Resolved> {
     let local = Path::new(src);
     if local.exists() {
         let dir = if local.is_dir() {
@@ -146,18 +180,19 @@ pub fn resolve(src: &str, subdir: Option<&str>) -> Result<Resolved> {
     }
     let Some(git) = parse_git_source(src) else {
         bail!(
-            "'{src}' is neither a local directory nor a git URL (try ./path, github:owner/repo or https://.../repo.git)"
+            "'{}' is neither a local directory nor a git URL (try ./path, github:owner/repo or https://.../repo.git)",
+            strip_url_credentials(src)
         );
     };
-    let tmp = tempfile::Builder::new().prefix("kitbag-").tempdir()?;
-    let mut cmd = Command::new("git");
-    cmd.args(["clone", "--depth", "1", "--quiet", "--no-tags"]);
-    if let Some(r) = &git.reference {
-        cmd.args(["--branch", r]);
+    // Credentials in the URL go to git, and nowhere else.
+    let shown = strip_url_credentials(&git.url);
+    if cleartext(&git.url) && !allow_insecure {
+        bail!(
+            "refusing to fetch {shown} without encryption: anyone on the network could replace the profile. Use an https:// or SSH URL, or pass --allow-insecure-source if you trust the network"
+        );
     }
-    cmd.arg("--").arg(&git.url).arg(tmp.path());
-    cmd.env("GIT_TERMINAL_PROMPT", "0");
-    let out = match cmd.output() {
+    let tmp = tempfile::Builder::new().prefix("kitbag-").tempdir()?;
+    let out = match clone_command(&git, tmp.path(), allow_insecure).output() {
         Ok(o) => o,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             bail!("git is required to apply a profile from a URL, but it was not found on PATH")
@@ -166,13 +201,12 @@ pub fn resolve(src: &str, subdir: Option<&str>) -> Result<Resolved> {
     };
     if !out.status.success() {
         bail!(
-            "could not clone {}{}: {}",
-            git.url,
+            "could not clone {shown}{}: {}",
             git.reference
                 .as_ref()
                 .map(|r| format!(" (ref {r})"))
                 .unwrap_or_default(),
-            String::from_utf8_lossy(&out.stderr).trim()
+            strip_url_credentials(String::from_utf8_lossy(&out.stderr).trim())
         );
     }
     let sub = subdir.map(str::to_string).or(git.subdir.clone());
@@ -193,8 +227,7 @@ pub fn resolve(src: &str, subdir: Option<&str>) -> Result<Resolved> {
     };
     if !dir.join(MANIFEST).exists() {
         bail!(
-            "no {MANIFEST} found in {}{}",
-            git.url,
+            "no {MANIFEST} found in {shown}{}",
             sub.as_ref().map(|s| format!(" ({s})")).unwrap_or_default()
         );
     }
@@ -207,7 +240,7 @@ pub fn resolve(src: &str, subdir: Option<&str>) -> Result<Resolved> {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
-    let mut origin = git.url.clone();
+    let mut origin = shown;
     if let Some(r) = &git.reference {
         origin.push_str(&format!("#{r}"));
     }
@@ -225,9 +258,66 @@ pub fn resolve(src: &str, subdir: Option<&str>) -> Result<Resolved> {
     })
 }
 
+/// The `git clone` for `git` into `dest`. Unless `allow_insecure`, git may
+/// not fetch over `http` or `git` even when an https server redirects there
+/// or a `url.<base>.insteadOf` rewrite points there.
+fn clone_command(git: &GitSource, dest: &Path, allow_insecure: bool) -> Command {
+    let mut cmd = Command::new("git");
+    if !allow_insecure {
+        cmd.args([
+            "-c",
+            "protocol.http.allow=never",
+            "-c",
+            "protocol.git.allow=never",
+        ]);
+        // GIT_ALLOW_PROTOCOL, when set, overrides every protocol.*.allow
+        // setting, `-c` included. Config from the environment
+        // (GIT_CONFIG_COUNT, GIT_CONFIG_PARAMETERS) does not: `-c` wins.
+        cmd.env_remove("GIT_ALLOW_PROTOCOL");
+    }
+    cmd.args(["clone", "--depth", "1", "--quiet", "--no-tags"]);
+    if let Some(r) = &git.reference {
+        cmd.args(["--branch", r]);
+    }
+    cmd.arg("--").arg(&git.url).arg(dest);
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clones_refuse_cleartext_transports_unless_allowed() {
+        let src = parse_git_source("https://example.com/o/r.git").unwrap();
+        let args = |c: &Command| -> Vec<String> {
+            c.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let removes_allow_list = |c: &Command| {
+            c.get_envs()
+                .any(|(k, v)| k == "GIT_ALLOW_PROTOCOL" && v.is_none())
+        };
+        let strict = clone_command(&src, Path::new("dest"), false);
+        let a = args(&strict);
+        assert_eq!(
+            a[..5],
+            [
+                "-c",
+                "protocol.http.allow=never",
+                "-c",
+                "protocol.git.allow=never",
+                "clone"
+            ]
+        );
+        assert!(removes_allow_list(&strict));
+        let loose = clone_command(&src, Path::new("dest"), true);
+        assert!(!args(&loose).iter().any(|a| a.starts_with("protocol.")));
+        assert!(!removes_allow_list(&loose));
+        assert!(args(&loose).ends_with(&["--".into(), src.url.clone(), "dest".into()]));
+    }
 
     fn g(url: &str, r: Option<&str>, s: Option<&str>) -> Option<GitSource> {
         Some(GitSource {
@@ -281,6 +371,44 @@ mod tests {
         );
         assert_eq!(parse_git_source("./my-profile"), None);
         assert_eq!(parse_git_source("https://example.com/page"), None);
+    }
+
+    #[test]
+    fn url_credentials_are_stripped() {
+        let s = strip_url_credentials;
+        assert_eq!(s("https://bob:pw@h/x.git"), "https://h/x.git");
+        assert_eq!(s("https://ghp_faketoken@h/x.git"), "https://h/x.git");
+        assert_eq!(s("file://bob:pw@/srv/x"), "file:///srv/x");
+        assert_eq!(
+            s("https://bob:p@ss@h/x"),
+            "https://h/x",
+            "raw @ in a password"
+        );
+        assert_eq!(s("ssh://git@h/x.git"), "ssh://git@h/x.git");
+        assert_eq!(s("git+ssh://git:pw@h/x.git"), "git+ssh://git@h/x.git");
+        assert_eq!(
+            s("fatal: unable to access 'https://bob:pw@h/x.git/': 403"),
+            "fatal: unable to access 'https://h/x.git/': 403"
+        );
+        // Untouched: no userinfo, scp-style SSH, an @ only in the path.
+        for same in [
+            "https://h/x.git",
+            "git@github.com:me/x.git",
+            "https://h/@scope/pkg",
+            "apply ./p -> codex (user scope)",
+        ] {
+            assert_eq!(s(same), same);
+        }
+    }
+
+    #[test]
+    fn cleartext_urls_are_recognised() {
+        assert!(cleartext("http://h/x.git"));
+        assert!(cleartext("HTTP://h/x.git"));
+        assert!(cleartext("git://h/x.git"));
+        for ok in ["https://h/x.git", "ssh://h/x", "git@h:x.git", "file:///x"] {
+            assert!(!cleartext(ok), "{ok}");
+        }
     }
 
     #[test]
