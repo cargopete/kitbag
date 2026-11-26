@@ -109,8 +109,8 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
             m.kitbag
         ));
     }
-    if m.name.trim().is_empty() {
-        issues.push("'name' must not be empty".into());
+    if let Err(why) = check_profile_name(&m.name) {
+        issues.push(format!("'name' {why}"));
     }
     for (name, s) in &m.mcp_servers {
         if !is_valid_name(name) {
@@ -135,6 +135,20 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
         settings: m.settings,
         ..Profile::default()
     })
+}
+
+/// Why a profile `name` (as written, before trimming) is unusable, if it is:
+/// empty, or holding control characters (a newline, tab, escape ...) that
+/// would end up in `history` and in what kitbag prints.
+pub fn check_profile_name(name: &str) -> std::result::Result<(), &'static str> {
+    let name = name.trim();
+    if name.is_empty() {
+        Err("must not be empty")
+    } else if name.chars().any(char::is_control) {
+        Err("must not contain control characters")
+    } else {
+        Ok(())
+    }
 }
 
 /// Read a file from an (untrusted) profile directory: no symlinks, bounded

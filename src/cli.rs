@@ -556,6 +556,16 @@ const STARTER_RULE: &str = "---\ndescription: Example rule, scoped to Rust files
 
 const STARTER_COMMAND: &str = "---\ndescription: Review the staged changes\nargument-hint: \"[focus]\"\n---\n\nReview the staged diff for bugs and unclear code. Focus on: $ARGUMENTS\n";
 
+/// Refuses a `--name` the profile could not be loaded with.
+fn check_name_flag(name: Option<&str>) -> Result<()> {
+    if let Some(n) = name
+        && let Err(why) = profile_io::check_profile_name(n)
+    {
+        bail!("--name {why}");
+    }
+    Ok(())
+}
+
 fn cmd_init(dir: &Path, name: Option<String>, force: bool) -> Result<i32> {
     let starter = [
         MANIFEST,
@@ -579,6 +589,7 @@ fn cmd_init(dir: &Path, name: Option<String>, force: bool) -> Result<i32> {
             dir.display()
         );
     }
+    check_name_flag(name.as_deref())?;
     let name = name.unwrap_or_else(|| {
         let base = std::path::absolute(dir)
             .ok()
@@ -630,6 +641,7 @@ fn cmd_capture(
     dry_run: bool,
 ) -> Result<i32> {
     let env = &ctx.env;
+    check_name_flag(name.as_deref())?;
     let targets = select_targets(from, env, "from")?;
     let name = name.unwrap_or_else(|| {
         let base = std::path::absolute(out)

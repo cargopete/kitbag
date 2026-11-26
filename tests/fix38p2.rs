@@ -200,3 +200,46 @@ fn home_without_state_dir_keeps_state_under_that_home() {
         .success();
     assert!(sb.state().join("backups").is_dir());
 }
+
+#[test]
+fn profile_names_with_control_characters_are_refused() {
+    let sb = Sandbox::empty();
+    fs::create_dir_all(sb.path("p")).unwrap();
+    fs::write(sb.path("p/instructions.md"), "Be brief.\n").unwrap();
+    for name in ["me\\nnow", "me\\tnow", "me\\u001b[2Jnow", "\\u0007"] {
+        fs::write(
+            sb.path("p/kitbag.toml"),
+            format!("kitbag = 1\nname = \"{name}\"\n"),
+        )
+        .unwrap();
+        sb.cli()
+            .args(["apply", "p", "--to", "claude-code", "--yes"])
+            .assert()
+            .failure()
+            .stderr(contains("'name' must not contain control characters"));
+    }
+    assert!(!sb.home().join(".claude/CLAUDE.md").exists());
+    // Surrounding whitespace is still trimmed, as before.
+    fs::write(sb.path("p/kitbag.toml"), "kitbag = 1\nname = \"  me  \"\n").unwrap();
+    sb.cli()
+        .args(["apply", "p", "--to", "claude-code", "--dry-run"])
+        .assert()
+        .success();
+
+    // init and capture refuse such a --name before writing anything.
+    sb.cli()
+        .args(["init", "fresh", "--name", "me\nnow"])
+        .assert()
+        .failure()
+        .stderr(contains("--name must not contain control characters"));
+    assert!(!sb.path("fresh").exists());
+    fs::create_dir_all(sb.home().join(".claude")).unwrap();
+    fs::write(sb.home().join(".claude/CLAUDE.md"), "Be kind.\n").unwrap();
+    sb.cli()
+        .args(["capture", "--from", "claude-code", "-o", "prof"])
+        .args(["--name", "me\u{1b}[2Jnow"])
+        .assert()
+        .failure()
+        .stderr(contains("--name must not contain control characters"));
+    assert!(!sb.path("prof").exists());
+}
