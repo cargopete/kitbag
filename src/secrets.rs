@@ -8,6 +8,7 @@
 //! targets without interpolation support, resolved from the environment.
 
 use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
 use std::sync::LazyLock;
 
 use regex::{Captures, Regex};
@@ -1441,6 +1442,38 @@ const SENSITIVE_FILE_NAMES: &[&str] = &[
 ];
 const SENSITIVE_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx", "jks", "keystore", "ppk"];
 
+/// Text files read as prose (like instructions and rules), not as config or code.
+const PROSE_EXTENSIONS: &[&str] = &[
+    "md", "markdown", "mdx", "txt", "text", "rst", "adoc", "html", "htm",
+];
+/// Config formats checked line by line for `name = value` and `name: value`.
+const CONFIG_EXTENSIONS: &[&str] = &[
+    "toml",
+    "yaml",
+    "yml",
+    "ini",
+    "cfg",
+    "conf",
+    "cnf",
+    "config",
+    "properties",
+    "env",
+    "hcl",
+    "tf",
+    "tfvars",
+];
+
+fn extension(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    name.rsplit_once('.')
+        .map(|(_, e)| e.to_string())
+        .unwrap_or_default()
+}
+
+fn prose_file(path: &str) -> bool {
+    PROSE_EXTENSIONS.contains(&extension(path).as_str())
+}
+
 fn json_has_secret(v: &serde_json::Value, key: Option<&str>) -> bool {
     match v {
         serde_json::Value::String(s) => named_secret(key, s),
@@ -1448,6 +1481,118 @@ fn json_has_secret(v: &serde_json::Value, key: Option<&str>) -> bool {
         serde_json::Value::Object(m) => m.iter().any(|(k, x)| json_has_secret(x, Some(k))),
         _ => false,
     }
+}
+
+/// Where in `v` a string sits under a secret-sounding key (at any depth) or
+/// has a known token format: `ui.apiToken`, `hooks[0].env.PASSWORD`. Values
+/// capture already redacted (`[REDACTED]`) don't count.
+pub fn json_secret_fields(v: &serde_json::Value) -> Vec<String> {
+    fn walk(v: &serde_json::Value, key: Option<&str>, at: &str, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::String(s) => {
+                if named_secret(key, s) && !has_redaction_marker(s) {
+                    out.push(at.to_string());
+                }
+            }
+            serde_json::Value::Array(a) => {
+                for (i, x) in a.iter().enumerate() {
+                    walk(x, key, &format!("{at}[{i}]"), out);
+                }
+            }
+            serde_json::Value::Object(m) => {
+                for (k, x) in m {
+                    let at = if at.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{at}.{k}")
+                    };
+                    walk(x, Some(k), &at, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(v, None, "", &mut out);
+    out
+}
+
+/// [`json_secret_fields`], replaced by `[REDACTED]` markers. `key` is the
+/// name `v` is stored under. Returns whether anything was replaced.
+pub fn redact_secret_fields(v: &mut serde_json::Value, key: Option<&str>) -> bool {
+    match v {
+        serde_json::Value::String(s) => {
+            if named_secret(key, s) && !has_redaction_marker(s) {
+                *s = "[REDACTED:secret-named-field]".to_string();
+                true
+            } else {
+                false
+            }
+        }
+        serde_json::Value::Array(a) => a
+            .iter_mut()
+            .fold(false, |hit, x| redact_secret_fields(x, key) | hit),
+        serde_json::Value::Object(m) => m
+            .iter_mut()
+            .fold(false, |hit, (k, x)| redact_secret_fields(x, Some(k)) | hit),
+        _ => false,
+    }
+}
+
+/// `API_KEY = "..."`, `password: '...'`, `"token": "..."`, `export SECRET="..."`:
+/// a quoted value assigned to a name, in a script or config file of any kind.
+static QUOTED_ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?:^|[^A-Za-z0-9_.-])["']?([A-Za-z_][A-Za-z0-9_.-]*)["']?[ \t]*(?::=|=>|=|:)[ \t]*(?:"((?:[^"\\\n]|\\.)*)"|'([^'\n]*)')"#,
+    )
+    .expect("valid regex")
+});
+
+/// Byte ranges of quoted values assigned to secret-sounding names. Shell
+/// expansions (`"$(cat f)"`, `"$TOKEN"`), placeholders (`"<token>"`,
+/// `"YOUR_KEY"`) and values with spaces (prompts, messages) don't count.
+fn quoted_assignment_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for c in QUOTED_ASSIGN.captures_iter(text) {
+        let Some(value) = c.get(2).or_else(|| c.get(3)) else {
+            continue;
+        };
+        let v = value.as_str();
+        if named_secret(Some(&c[1]), v)
+            && !v.starts_with('$')
+            && !v.contains(char::is_whitespace)
+            && !placeholder_value(v)
+            && !has_redaction_marker(v)
+        {
+            out.push((value.start(), value.end()));
+        }
+    }
+    out
+}
+
+/// Redact a text file inside a skill: like [`redact_text`], and for scripts
+/// and config files (anything but prose such as `.md`, whatever the
+/// extension) also quoted values assigned to secret-sounding names, which
+/// free text only catches when they mix letters and digits.
+pub fn redact_support_file(path: &str, text: &str) -> (String, Vec<&'static str>) {
+    let (mut out, mut kinds) = redact_text(text);
+    if !prose_file(path) {
+        let spans = quoted_assignment_spans(&out);
+        if !spans.is_empty() {
+            for (a, b) in spans.into_iter().rev() {
+                out.replace_range(a..b, REDACTED_PASSWORD);
+            }
+            if !kinds.contains(&"secret-named-value") {
+                kinds.push("secret-named-value");
+            }
+        }
+    }
+    (out, kinds)
+}
+
+/// The kind of credential [`redact_support_file`] would replace, if any.
+pub fn support_file_secret_kind(path: &str, text: &str) -> Option<&'static str> {
+    redact_support_file(path, text).1.first().copied()
 }
 
 /// In structured files only names and known formats count; entropy alone
@@ -1465,7 +1610,8 @@ fn named_secret(key: Option<&str>, value: &str) -> bool {
 /// binary files containing a known token format.
 pub fn sensitive_file(path: &str, content: &[u8]) -> Option<String> {
     let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
-    let ext = name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    let ext = extension(path);
+    let ext = ext.as_str();
     if SENSITIVE_FILE_NAMES.contains(&name.as_str())
         || SENSITIVE_EXTENSIONS.contains(&ext)
         || name.starts_with(".env")
@@ -1482,20 +1628,23 @@ pub fn sensitive_file(path: &str, content: &[u8]) -> Option<String> {
         }
         return None;
     }
-    if ext == "json"
-        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+    // JSON whatever the extension (`.jsonc`, `.json5`, `settings.local`, none),
+    // with comments and trailing commas allowed.
+    let looks_json = matches!(ext, "json" | "jsonc" | "json5")
+        || (!prose_file(path) && text.trim_start().starts_with(['{', '[']));
+    if looks_json
+        && let Some(v) = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .or_else(|| crate::edit::json::parse_value(Some(&text), Path::new(path)).ok())
         && json_has_secret(&v, None)
     {
         return Some("contains secret values".to_string());
     }
-    if matches!(
-        ext,
-        "toml" | "yaml" | "yml" | "ini" | "cfg" | "conf" | "properties"
-    ) {
+    if CONFIG_EXTENSIONS.contains(&ext) {
         for line in text.lines() {
             if let Some((k, v)) = line.split_once(['=', ':']) {
                 let v = v.trim().trim_matches(['"', '\'', ',']);
-                if named_secret(Some(k.trim().trim_matches('"')), v) {
+                if named_secret(Some(k.trim().trim_matches(['"', '\''])), v) {
                     return Some("contains secret values".to_string());
                 }
             }
@@ -1985,6 +2134,88 @@ mod tests {
             classify(Some("DB_CONNECTION_STRING"), "Server=db;Password=x1y2z3"),
             Some("secret-named-field")
         );
+    }
+
+    #[test]
+    fn structured_checks_cover_any_extension_and_quoted_keys() {
+        let secret = |path: &str, text: &str| sensitive_file(path, text.as_bytes());
+        // JSON with comments, or under an extension that isn't `.json`.
+        assert!(
+            secret(
+                "settings.jsonc",
+                "{\n  // mine\n  \"apiToken\": \"correcthorse\",\n}\n"
+            )
+            .is_some()
+        );
+        assert!(secret("config.json5", r#"{"password": "correcthorse"}"#).is_some());
+        assert!(secret("settings.local", r#"{"ui": {"authToken": "correcthorse"}}"#).is_some());
+        // More config formats, and single-quoted keys.
+        assert!(secret("my.cnf", "[client]\npassword=correcthorse\n").is_some());
+        assert!(secret("prod.env", "DB_PASSWORD=correcthorse\n").is_some());
+        assert!(secret("vars.tfvars", "api_key = \"correcthorse\"\n").is_some());
+        assert!(secret("c.yaml", "'api_key': 'correcthorse'\n").is_some());
+        // Prose is read as free text, not parsed as config.
+        assert_eq!(secret("README.md", r#"{"password": "string"}"#), None);
+        assert_eq!(secret("settings.local", r#"{"theme": "dark"}"#), None);
+    }
+
+    #[test]
+    fn quoted_assignments_in_scripts_are_redacted() {
+        let (red, kinds) = redact_support_file(
+            "scripts/deploy.sh",
+            "export DB_PASSWORD=\"correcthorse\"\nclient_secret = 'battery'\n",
+        );
+        assert!(
+            !red.contains("correcthorse") && !red.contains("battery"),
+            "{red}"
+        );
+        assert!(red.contains("DB_PASSWORD=\"[REDACTED]\""), "{red}");
+        assert_eq!(kinds, ["secret-named-value"]);
+        assert_eq!(
+            support_file_secret_kind("x.py", "API_TOKEN = \"staple\""),
+            Some("secret-named-value")
+        );
+        assert_eq!(
+            support_file_secret_kind("x", "\"token\": \"staple\""),
+            Some("secret-named-value")
+        );
+        // Shell expansions, placeholders, prompts and settings about a secret.
+        for kept in [
+            "TOKEN=\"$(cat ~/.token)\"",
+            "API_KEY=\"${API_KEY}\"",
+            "API_KEY = \"YOUR_API_KEY\"",
+            "api_key: \"<your key>\"",
+            "password = \"Enter your password\"",
+            "TOKEN_TTL = \"3600s\"",
+            "PASSWORD = \"[REDACTED]\"",
+            "auth_url = \"https://auth.example.com/token\"",
+        ] {
+            assert_eq!(support_file_secret_kind("run.sh", kept), None, "{kept}");
+        }
+        // Prose keeps the free-text rules: letters-only values aren't secrets.
+        assert_eq!(
+            support_file_secret_kind("SKILL.md", "export DB_PASSWORD=\"correcthorse\""),
+            None
+        );
+    }
+
+    #[test]
+    fn secret_fields_are_found_at_any_depth() {
+        let v = serde_json::json!({
+            "ui": {"theme": "dark", "apiToken": "correcthorse"},
+            "hooks": [{"env": {"PASSWORD": "staple", "TOKEN": "${TOKEN}"}}],
+            "done": {"secret": "[REDACTED:secret-named-field]"},
+        });
+        assert_eq!(
+            json_secret_fields(&v),
+            ["ui.apiToken", "hooks[0].env.PASSWORD"]
+        );
+        let mut red = v.clone();
+        assert!(redact_secret_fields(&mut red, None));
+        assert!(json_secret_fields(&red).is_empty());
+        assert_eq!(red["ui"]["theme"], "dark");
+        assert_eq!(red["hooks"][0]["env"]["TOKEN"], "${TOKEN}");
+        assert!(!red.to_string().contains("correcthorse"));
     }
 
     #[test]

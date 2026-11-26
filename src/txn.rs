@@ -4,6 +4,11 @@
 //! state directory. Writes are atomic (temp file + rename) and a failure
 //! part-way through rolls back what was already written. `kitbag undo`
 //! replays a transaction backwards, refusing to clobber files edited since.
+//!
+//! A transaction stays `pending` while its files are written. One that is
+//! still pending afterwards was interrupted (the process was killed, the
+//! machine lost power): `kitbag doctor` reports it and `kitbag undo <id>`
+//! puts back the files it had written and leaves the rest alone.
 
 use std::fs;
 use std::io::{self, Write};
@@ -86,6 +91,41 @@ pub struct WriteOptions {
     pub private: std::collections::BTreeSet<PathBuf>,
     /// Files written with the executable bits added (skill scripts).
     pub executable: std::collections::BTreeSet<PathBuf>,
+    /// The project directory of a project-scope apply, as given and in its
+    /// canonical form. Every write to a path in it must really land inside it.
+    /// Checked before anything is written and again before each write, so a
+    /// symbolic link that changed after the plan was made can't redirect a
+    /// write elsewhere. Paths outside it (the profile files `sync --from`
+    /// updates) are not project writes and aren't checked.
+    pub confine_to: Option<(PathBuf, PathBuf)>,
+}
+
+/// Why writing `path`, if it is in the project `(base, root)`, would land
+/// outside it.
+fn escapes(path: &Path, (base, root): &(PathBuf, PathBuf)) -> Option<String> {
+    if !path.starts_with(base) && !path.starts_with(root) {
+        return None;
+    }
+    match real_location(path) {
+        Ok(real)
+            if real.strip_prefix(root).is_ok_and(|rest| {
+                rest.components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+            }) =>
+        {
+            None
+        }
+        Ok(real) => Some(format!(
+            "{} now resolves to {}, outside {}; a symbolic link changed after the plan was made",
+            path.display(),
+            real.display(),
+            root.display()
+        )),
+        Err(e) => Some(format!(
+            "{} can't be resolved ({e}); a symbolic link there may dangle",
+            path.display()
+        )),
+    }
 }
 
 /// Write `content` to `path` atomically, preserving `mode` when given.
@@ -353,6 +393,13 @@ impl Store {
         Self::create_private_dir(&self.backups())?;
         Self::create_private_dir(&self.tx_dir(&tx.id))?;
 
+        // 0. Every write still lands where the plan said (project confinement).
+        if let Some(root) = &opts.confine_to
+            && let Some(why) = changes.iter().find_map(|c| escapes(&c.path, root))
+        {
+            let _ = fs::remove_dir_all(self.tx_dir(&tx.id));
+            bail!("{why}; nothing was written");
+        }
         // 1. Snapshot everything first, and make sure nothing changed since planning.
         if let Err(e) = self.snapshot(&mut tx, changes) {
             let _ = fs::remove_dir_all(self.tx_dir(&tx.id));
@@ -364,6 +411,11 @@ impl Store {
         let mut done = 0;
         let result: Result<()> = (|| {
             for (i, c) in changes.iter().enumerate() {
+                if let Some(root) = &opts.confine_to
+                    && let Some(why) = escapes(&c.path, root)
+                {
+                    bail!("{why}");
+                }
                 match &c.after {
                     None => match fs::remove_file(&c.path) {
                         Err(e) if e.kind() != io::ErrorKind::NotFound => {
@@ -375,7 +427,13 @@ impl Store {
                     Some(content) => {
                         let dest = &c.path;
                         let parent = dest.parent().context("path has no parent")?;
+                        let known = tx.created_dirs.len();
                         mkdirp(parent, &mut tx.created_dirs)?;
+                        // Record new directories before writing into them, so
+                        // undoing an interrupted apply removes them too.
+                        if tx.created_dirs.len() > known {
+                            self.save(&tx)?;
+                        }
                         // Files holding secrets are private even if they weren't before.
                         let mode = if opts.private.contains(&c.path) {
                             Some(0o600)
@@ -484,6 +542,17 @@ impl Store {
         Ok(())
     }
 
+    /// Transactions that were interrupted part-way through writing (still
+    /// `pending`), oldest first. One may also belong to an apply that is
+    /// running right now.
+    pub fn interrupted(&self) -> Result<Vec<Transaction>> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .filter(|t| t.status == Status::Pending)
+            .collect())
+    }
+
     /// All transactions, oldest first.
     pub fn list(&self) -> Result<Vec<Transaction>> {
         let rd = match fs::read_dir(self.backups()) {
@@ -557,6 +626,11 @@ impl Store {
 
     /// Undo transaction `id` (default: the most recent applied one).
     ///
+    /// An interrupted (`pending`) transaction can be undone when named by
+    /// `id`: files it hadn't written yet (still as they were before it) are
+    /// left alone and listed in [`Undone::untouched`]; the rest are undone as
+    /// for an applied one.
+    ///
     /// A file whose directory now resolves somewhere else than where it was
     /// written (a symbolic link appeared or changed), or that is now a link
     /// itself, is left alone even with `force`, and reported in
@@ -610,7 +684,8 @@ impl Store {
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("nothing to undo"))?,
         };
-        if tx.status != Status::Applied {
+        let interrupted = tx.status == Status::Pending;
+        if tx.status != Status::Applied && !interrupted {
             bail!("transaction {} is {:?}, not applied", tx.id, tx.status);
         }
         let later: Vec<&str> = all
@@ -640,6 +715,21 @@ impl Store {
                 }),
                 None => entries.push(e.clone()),
             }
+        }
+        // An interrupted apply wrote some files and not others. One that still
+        // holds what it held before was never written: nothing to put back.
+        let mut untouched = Vec::new();
+        if interrupted {
+            let mut written = Vec::new();
+            for e in entries {
+                let cur = sha256(read_opt(&e.path)?.as_deref());
+                if cur == e.before_sha256 && cur != e.after_sha256 {
+                    untouched.push(e.path);
+                } else {
+                    written.push(e);
+                }
+            }
+            entries = written;
         }
         let drifted = self.drift_in(&entries)?;
         if !drifted.is_empty() && !force {
@@ -674,8 +764,10 @@ impl Store {
         self.save(&tx)?;
         Ok(Undone {
             tx,
+            interrupted,
             refused,
             tampered,
+            untouched,
         })
     }
 }
@@ -684,10 +776,14 @@ impl Store {
 #[derive(Debug)]
 pub struct Undone {
     pub tx: Transaction,
+    /// The transaction was interrupted (`pending`), not fully applied.
+    pub interrupted: bool,
     /// Files left alone because they are no longer where kitbag wrote them.
     pub refused: Vec<Refused>,
     /// Files restored with `force` from a backup that changed since the apply.
     pub tampered: Vec<Tampered>,
+    /// Files of an interrupted transaction it never wrote, left as they are.
+    pub untouched: Vec<PathBuf>,
 }
 
 /// A backup whose content no longer matches the hash recorded at apply time.
@@ -904,6 +1000,117 @@ mod tests {
         let done = store.undo(None, false).unwrap();
         assert!(done.tampered.is_empty());
         assert_eq!(fs::read_to_string(&f).unwrap(), "original");
+    }
+
+    /// Make `tx` look like an apply killed part-way through: still pending,
+    /// without the fields only written once every file is in place, and with
+    /// `unwritten` back as they were before.
+    fn interrupt(store: &Store, tx: &Transaction, unwritten: &[&Path]) {
+        let file = store.tx_dir(&tx.id).join("transaction.json");
+        let mut v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        v["status"] = "pending".into();
+        for e in v["entries"].as_array_mut().unwrap() {
+            e.as_object_mut().unwrap().remove("real_parent");
+        }
+        fs::write(&file, v.to_string()).unwrap();
+        for path in unwritten {
+            let e = tx.entries.iter().find(|e| e.path == *path).unwrap();
+            match &e.backup {
+                Some(b) => fs::copy(store.tx_dir(&tx.id).join(b), path).map(drop),
+                None => fs::remove_file(path),
+            }
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn undo_puts_back_an_interrupted_apply() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path().join("state"));
+        let written = root.path().join("written.json");
+        let unwritten = root.path().join("unwritten.json");
+        fs::write(&written, "{}").unwrap();
+        fs::write(&unwritten, "{\"mine\":1}").unwrap();
+        let created = root.path().join("new/dir/b.md");
+        let tx = store
+            .commit(
+                &[
+                    change(&written, Some("{\"x\":1}")),
+                    change(&created, Some("hi")),
+                    change(&unwritten, Some("{\"x\":2}")),
+                ],
+                "apply ./p -> codex (user scope)",
+                &["codex".into()],
+                &WriteOptions::default(),
+            )
+            .unwrap();
+        assert!(store.interrupted().unwrap().is_empty());
+        interrupt(&store, &tx, &[&unwritten]);
+        let pending = store.interrupted().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, tx.id);
+
+        // Plain `undo` only picks applied transactions; this one is named.
+        let e = store.undo(None, false).unwrap_err().to_string();
+        assert!(e.contains("nothing to undo"), "{e}");
+        let done = store
+            .undo_with_home(Some(&tx.id), false, Some(root.path()))
+            .unwrap();
+        assert!(done.interrupted);
+        assert!(done.refused.is_empty() && done.tampered.is_empty());
+        assert_eq!(done.untouched, std::slice::from_ref(&unwritten));
+        assert_eq!(fs::read_to_string(&written).unwrap(), "{}");
+        assert_eq!(fs::read_to_string(&unwritten).unwrap(), "{\"mine\":1}");
+        assert!(!created.exists());
+        assert!(!root.path().join("new").exists(), "created directories go");
+        assert_eq!(store.list().unwrap()[0].status, Status::Undone);
+        assert!(store.interrupted().unwrap().is_empty());
+    }
+
+    #[test]
+    fn undo_of_an_interrupted_apply_keeps_later_edits_without_force() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path().join("state"));
+        let f = root.path().join("f.txt");
+        let g = root.path().join("g.txt");
+        fs::write(&f, "original").unwrap();
+        let tx = store
+            .commit(
+                &[change(&f, Some("kitbag")), change(&g, Some("new"))],
+                "t",
+                &[],
+                &WriteOptions::default(),
+            )
+            .unwrap();
+        interrupt(&store, &tx, &[]);
+        fs::write(&f, "user edit").unwrap();
+        let e = store
+            .undo_with_home(Some(&tx.id), false, Some(root.path()))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("modified after"), "{e}");
+        assert_eq!(fs::read_to_string(&f).unwrap(), "user edit");
+        assert!(g.exists(), "nothing undone");
+        assert_eq!(store.interrupted().unwrap().len(), 1);
+        store
+            .undo_with_home(Some(&tx.id), true, Some(root.path()))
+            .unwrap();
+        assert_eq!(fs::read_to_string(&f).unwrap(), "original");
+        assert!(!g.exists());
+    }
+
+    #[test]
+    fn rolled_back_and_undone_transactions_are_not_undone_again() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path().join("state"));
+        let f = root.path().join("f.txt");
+        let tx = store
+            .commit(&[change(&f, Some("x"))], "t", &[], &WriteOptions::default())
+            .unwrap();
+        store.undo(None, false).unwrap();
+        let e = store.undo(Some(&tx.id), false).unwrap_err().to_string();
+        assert!(e.contains("not applied"), "{e}");
     }
 
     #[test]

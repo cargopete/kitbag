@@ -324,6 +324,12 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
    frontmatter included, and so are values given to secret-sounding names there
    (`DB_PASSWORD=…`, `X-Api-Key: …`, `--token …`, `Bearer …`). Claude Code permission rules
    in `settings.json` get the same treatment; a rule with a redacted part is not applied back.
+   Settings values under a secret-sounding name are redacted at any depth (`ui.apiToken`). In
+   skill scripts and config files (anything but prose such as `.md`), a quoted value given to
+   a secret-sounding name (`export DB_PASSWORD="…"`, `api_key = '…'`) is redacted however it
+   looks; a skill file that is JSON (under any extension, comments allowed) or a config format
+   (`.toml`, `.yaml`, `.ini`, `.env`, `.cnf`, `.tfvars` …) holding such a value is left out of the
+   profile, with a warning.
    In free text, secret-named query values and webhook path tokens are replaced too.
    There, a token becomes `[REDACTED:<kind>]`, and in a URL only the password is replaced
    (`postgres://admin:[REDACTED]@db/app`), so the Markdown around it survives. Placeholder
@@ -389,7 +395,9 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
 - **Symlinks are respected, and confined.** At user scope, a config file that is a symlink
   (say into a dotfiles repo) is written through: the plan names the real file, and the link
   stays a link, including after undo. At project scope, where the files may come from someone
-  else's repository, kitbag refuses to write through links that leave the project or dangle.
+  else's repository, kitbag refuses to write through links that leave the project or dangle,
+  and checks again just before writing, so a link that changes while the plan waits for
+  confirmation stops the apply before anything is written.
 - **Backups and undo.** Every apply is a transaction. The originals are copied to the state
   directory first, writes are atomic, and a failure part-way through rolls back.
   `kitbag history` lists applies, and `kitbag undo [id]` restores them byte for byte. Undo
@@ -399,6 +407,9 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
   resolves somewhere else (a symbolic link appeared or changed since the apply), or that is
   now a link itself, is left alone even with `--force`: undo reverts the rest, names it and
   exits with status 1. If a file changes between planning and writing, the apply is refused.
+  An apply that is killed part-way through (power loss, `kill -9`) stays `pending` in
+  `kitbag history`; `kitbag doctor` reports it, and `kitbag undo <id>` puts back the files it
+  had written and leaves the rest alone.
 - **Profile directories.** `init --force` and `capture --force` replace a symbolic link inside
   the profile directory (a file or a sub-directory) with a regular file or directory; they
   never write through it.
@@ -512,9 +523,9 @@ What keeps a profile portable:
 | `kitbag apply <SOURCE> [--to IDS] [--yes] [--dry-run]` | Plan, confirm, write with backups |
 | `kitbag status [SOURCE] [--to IDS] [--exit-code] [--json]` | Which managed instructions and rules differ from the profile, or changed since the last apply; never writes |
 | `kitbag sync <SOURCE> [--to IDS] [--from ID \| --overwrite]` | Apply without overwriting instructions edited in a tool; pull an edit back with `--from` |
-| `kitbag undo [ID] [--force]` | Revert the latest (or a specific) apply |
+| `kitbag undo [ID] [--force]` | Revert the latest (or a specific) apply; with an ID, also an interrupted one |
 | `kitbag history [--json]` | List applies |
-| `kitbag doctor [SOURCE]` | Check installed tools' configs, a profile, required env vars, risky settings |
+| `kitbag doctor [SOURCE]` | Check installed tools' configs, a profile, required env vars, risky settings, interrupted applies |
 | `kitbag list-targets [--json]` | Targets, what they support, which are detected, file locations |
 
 Common options:
@@ -550,11 +561,17 @@ without them.
   `cargo install --git https://github.com/cargopete/kitbag kitbag`, or `cargo install --path .` from a checkout.
 - **Prebuilt binaries:** static builds for Linux (x86_64/aarch64, musl), macOS (Intel and
   Apple Silicon) and Windows (x86_64/arm64) are attached to each
-  [GitHub Release](https://github.com/cargopete/kitbag/releases), with SHA-256 checksums.
+  [GitHub Release](https://github.com/cargopete/kitbag/releases), with SHA-256 checksums and
+  a signed build provenance attestation; check an archive with
+  `gh attestation verify kitbag-<target>.tar.gz -R cargopete/kitbag`.
 - **Script:** `curl -fsSL https://raw.githubusercontent.com/cargopete/kitbag/main/install.sh | sh`.
-  It verifies the checksum and installs to `~/.local/bin`. Set `KITBAG_VERSION` or
+  It verifies the checksum (and stops if it can't), replaces an existing binary in one rename,
+  and installs to `~/.local/bin`. Set `KITBAG_VERSION` or
   `KITBAG_INSTALL_DIR` to change either. On Windows, use
   `irm https://raw.githubusercontent.com/cargopete/kitbag/main/install.ps1 | iex`.
+  The same scripts are attached to each [GitHub Release](https://github.com/cargopete/kitbag/releases),
+  so you can pin the installer to a tag:
+  `curl -fsSL https://github.com/cargopete/kitbag/releases/download/vX.Y.Z/install.sh | sh`.
 
 Building needs Rust 1.88 or newer.
 

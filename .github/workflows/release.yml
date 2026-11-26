@@ -1,15 +1,21 @@
 # Builds static binaries for every platform and attaches them, with SHA-256
 # checksums, to a GitHub Release when a version tag (v*) is pushed.
 # Asset names match what install.sh / install.ps1 download:
-#   kitbag-<target>.tar.gz (.zip on Windows) and kitbag-<target>.<ext>.sha256
+#   kitbag-<target>.tar.gz (.zip on Windows) and kitbag-<target>.sha256
+# Each release also attaches install.sh and install.ps1.
+# Each archive also gets a signed build provenance attestation; check one with
+#   gh attestation verify kitbag-<target>.tar.gz -R cargopete/kitbag
+#
+# Third-party actions are pinned to a full commit SHA, with the release tag it
+# was taken from in the trailing comment. Bump both together.
 name: Release
 
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
 
-permissions:
-  contents: write
+# Nothing by default; each job asks for what it needs.
+permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,8 +23,12 @@ env:
 jobs:
   create-release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the draft release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Check the tag matches Cargo.toml
         run: |
           version="$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)"
@@ -28,7 +38,7 @@ jobs:
             "v$version" | "v$version"-*) ;;
             *) echo "tag ${GITHUB_REF_NAME} != v$version"; exit 1 ;;
           esac
-      - uses: taiki-e/create-gh-release-action@v1
+      - uses: taiki-e/create-gh-release-action@045e5c0ed9c50cc1f96de7e891a09ad3daea245f # v1.12.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: true
@@ -37,6 +47,10 @@ jobs:
     needs: create-release
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write # upload the archives and checksums to the release
+      id-token: write # sign the build provenance attestation
+      attestations: write # store the attestation
     strategy:
       fail-fast: false
       matrix:
@@ -48,9 +62,13 @@ jobs:
           - { target: x86_64-pc-windows-msvc, os: windows-latest }
           - { target: aarch64-pc-windows-msvc, os: windows-latest }
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/setup-cross-toolchain-action@v1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
+        with:
+          toolchain: stable
+      - uses: taiki-e/setup-cross-toolchain-action@0375eb1d01bea430aa3202965839a7092960a23b # v1.43.1
         with:
           target: ${{ matrix.target }}
         if: contains(matrix.target, 'linux')
@@ -58,7 +76,8 @@ jobs:
         if: contains(matrix.target, 'windows')
         shell: bash
         run: echo "RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
-      - uses: taiki-e/upload-rust-binary-action@v1
+      - id: upload
+        uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
         with:
           bin: kitbag
           target: ${{ matrix.target }}
@@ -69,3 +88,21 @@ jobs:
           include: README.md,LICENSE
           profile: dist
           token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          # The archive the step above built and uploaded (.tar.gz, or .zip on Windows).
+          subject-path: ${{ steps.upload.outputs.tar || steps.upload.outputs.zip }}
+
+  install-scripts:
+    needs: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # attach install.sh and install.ps1 to the release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Upload install scripts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF_NAME}" install.sh install.ps1 --clobber
