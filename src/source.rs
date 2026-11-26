@@ -141,6 +141,10 @@ pub struct Resolved {
     pub origin: String,
     /// True when the profile came from a git URL rather than a local directory.
     pub remote: bool,
+    /// Where the profile comes from, stable across applies: the local
+    /// directory, or the git URL without credentials (and the sub-directory,
+    /// if any), without the ref or commit.
+    pub source: String,
     _tmp: Option<TempDir>,
 }
 
@@ -171,8 +175,10 @@ pub fn resolve(src: &str, subdir: Option<&str>, allow_insecure: bool) -> Result<
             bail!("{} does not exist", dir.display());
         }
         let dir = std::path::absolute(&dir)?;
+        let source = dir.canonicalize().unwrap_or_else(|_| dir.clone());
         return Ok(Resolved {
             origin: dir.display().to_string(),
+            source: source.display().to_string(),
             dir,
             remote: false,
             _tmp: None,
@@ -240,6 +246,10 @@ pub fn resolve(src: &str, subdir: Option<&str>, allow_insecure: bool) -> Result<
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
+    let mut source = shown.clone();
+    if let Some(s) = &sub {
+        source.push_str(&format!("//{s}"));
+    }
     let mut origin = shown;
     if let Some(r) = &git.reference {
         origin.push_str(&format!("#{r}"));
@@ -253,6 +263,7 @@ pub fn resolve(src: &str, subdir: Option<&str>, allow_insecure: bool) -> Result<
     Ok(Resolved {
         dir,
         origin,
+        source,
         remote: true,
         _tmp: Some(tmp),
     })

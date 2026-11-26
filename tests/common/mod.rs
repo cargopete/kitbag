@@ -193,6 +193,9 @@ pub fn opts(profile: &Profile) -> ApplyOptions {
         overwrite: true,
         secrets: SecretsMode::Resolve,
         block_id: kitbag::model::slugify(&profile.name),
+        applied_servers: Vec::new(),
+        source: None,
+        git_removals: None,
     }
 }
 

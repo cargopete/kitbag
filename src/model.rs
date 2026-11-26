@@ -71,12 +71,19 @@ pub struct McpServer {
     /// HTTP headers for remote servers. Values may contain `${VAR}` references.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
-    /// Only apply this server to these target ids.
+    /// Only apply this server to these target ids (an allow-list).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targets: Option<Vec<String>>,
+    /// Never apply this server to these target ids (a deny-list).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub only: Vec<String>,
-    /// Never apply this server to these target ids.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub except: Vec<String>,
+    pub disabled_on: Vec<String>,
+    /// The older name of `targets`, read but never written. Loading a profile
+    /// moves it into `targets` (see [`McpServer::take_legacy_targeting`]).
+    #[serde(default, skip_serializing)]
+    pub only: Option<Vec<String>>,
+    /// The older name of `disabled_on`, read but never written.
+    #[serde(default, skip_serializing)]
+    pub except: Option<Vec<String>>,
     /// Keep the definition but mark it disabled where the target supports that.
     #[serde(default, skip_serializing_if = "is_false")]
     pub disabled: bool,
@@ -92,10 +99,88 @@ impl McpServer {
     }
 
     pub fn applies_to(&self, target: &str) -> bool {
-        if !self.only.is_empty() && !self.only.iter().any(|t| t == target) {
-            return false;
+        self.skip_reason(target).is_none()
+    }
+
+    /// Why this server is not applied to `target`, or `None` when it is.
+    pub fn skip_reason(&self, target: &str) -> Option<&'static str> {
+        if let Some(only) = &self.targets
+            && !only.iter().any(|t| t == target)
+        {
+            return Some("not in its 'targets'");
         }
-        !self.except.iter().any(|t| t == target)
+        self.disabled_on
+            .iter()
+            .any(|t| t == target)
+            .then_some("listed in 'disabled_on'")
+    }
+
+    /// Move the older `only` / `except` fields into `targets` / `disabled_on`.
+    /// Returns (errors, warnings). An empty `only` keeps its old meaning, no
+    /// restriction, with a warning; setting a field under both names is an error.
+    pub fn take_legacy_targeting(&mut self) -> (Vec<String>, Vec<String>) {
+        let (mut errors, mut warnings) = (Vec::new(), Vec::new());
+        if let Some(only) = self.only.take() {
+            if self.targets.is_some() {
+                errors.push(
+                    "both 'only' and 'targets' are set; 'only' is the older name of 'targets', keep one"
+                        .into(),
+                );
+            } else if only.is_empty() {
+                warnings.push(
+                    "'only' is empty, which means no restriction: the server applies to every tool; remove it, or list tools in 'targets'"
+                        .into(),
+                );
+            } else {
+                self.targets = Some(only);
+            }
+        }
+        if let Some(except) = self.except.take() {
+            if !self.disabled_on.is_empty() {
+                errors.push(
+                    "both 'except' and 'disabled_on' are set; 'except' is the older name of 'disabled_on', keep one"
+                        .into(),
+                );
+            } else {
+                self.disabled_on = except;
+            }
+        }
+        (errors, warnings)
+    }
+
+    /// Problems with `targets` / `disabled_on`, given the valid target ids, as
+    /// (errors, warnings). An unknown target is only a warning, so a profile
+    /// naming a tool from a newer kitbag still loads; the name matches no
+    /// target here, so it is in effect ignored.
+    pub fn targeting_issues(&self, valid: &[&str]) -> (Vec<String>, Vec<String>) {
+        let (mut errors, mut warnings) = (Vec::new(), Vec::new());
+        if self.targets.is_some() && !self.disabled_on.is_empty() {
+            errors.push(
+                "set either 'targets' (only these tools) or 'disabled_on' (all but these), not both ('only' / 'except' are their older names)"
+                    .into(),
+            );
+        }
+        if self.targets.as_ref().is_some_and(Vec::is_empty) {
+            errors.push(
+                "'targets' is empty, so the server would apply nowhere; list at least one target, or remove the server"
+                    .into(),
+            );
+        }
+        let lists = [
+            ("targets", self.targets.as_deref().unwrap_or_default()),
+            ("disabled_on", self.disabled_on.as_slice()),
+        ];
+        for (field, ids) in lists {
+            for id in ids {
+                if !valid.contains(&id.as_str()) {
+                    warnings.push(format!(
+                        "unknown target '{id}' in '{field}' is ignored (from a newer kitbag, or a typo?); valid targets: {}",
+                        valid.join(", ")
+                    ));
+                }
+            }
+        }
+        (errors, warnings)
     }
 
     /// Every string value in the definition, with a human-readable location.
@@ -265,6 +350,8 @@ pub struct Profile {
     pub rules: Vec<Rule>,
     pub commands: Vec<Command>,
     pub skills: Vec<Skill>,
+    /// Problems found while loading that don't stop the profile from loading.
+    pub warnings: Vec<String>,
 }
 
 impl Profile {
@@ -412,19 +499,97 @@ mod tests {
     }
 
     #[test]
-    fn only_and_except() {
+    fn targets_and_disabled_on() {
         let s = McpServer {
-            only: vec!["codex".into()],
+            targets: Some(vec!["codex".into()]),
             ..Default::default()
         };
         assert!(s.applies_to("codex"));
         assert!(!s.applies_to("cursor"));
+        assert_eq!(s.skip_reason("cursor"), Some("not in its 'targets'"));
         let s = McpServer {
-            except: vec!["codex".into()],
+            disabled_on: vec!["codex".into()],
             ..Default::default()
         };
         assert!(!s.applies_to("codex"));
         assert!(s.applies_to("cursor"));
+        assert_eq!(s.skip_reason("codex"), Some("listed in 'disabled_on'"));
+        assert!(McpServer::default().applies_to("codex"));
+    }
+
+    #[test]
+    fn targeting_issues() {
+        let valid = ["claude-code", "codex"];
+        let both = McpServer {
+            targets: Some(vec!["codex".into()]),
+            disabled_on: vec!["claude-code".into()],
+            ..Default::default()
+        };
+        let (errors, warnings) = both.targeting_issues(&valid);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("not both"));
+        assert!(warnings.is_empty());
+        let unknown = McpServer {
+            disabled_on: vec!["vscode".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            unknown.targeting_issues(&valid),
+            (
+                vec![],
+                vec![
+                    "unknown target 'vscode' in 'disabled_on' is ignored (from a newer kitbag, or a typo?); valid targets: claude-code, codex"
+                        .to_string()
+                ]
+            )
+        );
+        // An unknown name matches no target, so it changes nothing.
+        assert!(unknown.applies_to("codex"));
+        let empty = McpServer {
+            targets: Some(Vec::new()),
+            ..Default::default()
+        };
+        assert!(empty.targeting_issues(&valid).0[0].contains("'targets' is empty"));
+        assert_eq!(
+            McpServer::default().targeting_issues(&valid),
+            (vec![], vec![])
+        );
+    }
+
+    #[test]
+    fn legacy_targeting() {
+        let mut s = McpServer {
+            only: Some(vec!["codex".into()]),
+            except: Some(vec!["cursor".into()]),
+            ..Default::default()
+        };
+        assert_eq!(s.take_legacy_targeting(), (vec![], vec![]));
+        assert_eq!(s.targets, Some(vec!["codex".to_string()]));
+        assert_eq!(s.disabled_on, vec!["cursor".to_string()]);
+        assert_eq!((s.only, s.except), (None, None));
+
+        // An empty 'only' still means no restriction.
+        let mut s = McpServer {
+            only: Some(vec![]),
+            ..Default::default()
+        };
+        let (errors, warnings) = s.take_legacy_targeting();
+        assert!(errors.is_empty());
+        assert!(warnings[0].contains("'only' is empty"), "{warnings:?}");
+        assert_eq!(s.targets, None);
+        assert!(s.applies_to("cursor"));
+
+        let mut s = McpServer {
+            only: Some(vec!["codex".into()]),
+            targets: Some(vec!["cursor".into()]),
+            except: Some(vec!["codex".into()]),
+            disabled_on: vec!["cursor".into()],
+            ..Default::default()
+        };
+        let (errors, _) = s.take_legacy_targeting();
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors[0].contains("both 'only' and 'targets'"));
+        assert!(errors[1].contains("both 'except' and 'disabled_on'"));
     }
 
     #[test]

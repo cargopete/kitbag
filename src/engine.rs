@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::adapters::{Adapter, ApplyOptions, Env, Feature, Level, Note, Scope, Support, Work};
+use crate::adapters::{
+    Adapter, ApplyOptions, Env, Feature, Level, Note, Scope, ServerWrite, Support, Work,
+};
 use crate::model::Profile;
 use crate::plan_fs::{FileChange, PlanFs};
 use crate::policy;
@@ -249,6 +251,17 @@ pub struct Plan {
     pub items: Vec<Item>,
     /// (target, `command <name>` / `skill <name>`) of commands and skills the plan writes.
     pub changed_items: Vec<(String, String)>,
+    /// MCP servers the plan removes from a tool, because the profile now
+    /// disables them there (`targets` / `disabled_on`).
+    pub removed_servers: Vec<ServerReview>,
+    /// MCP servers a profile from a git source would remove from a tool, held
+    /// back like additions until `--allow-git-mcp` names them.
+    pub withheld_removals: Vec<ServerReview>,
+    /// MCP server entries the plan writes or removes, with the real config
+    /// file (recorded after a write, see [`crate::sync::record`]).
+    pub server_writes: Vec<ServerWrite>,
+    /// Where the profile comes from ([`ApplyOptions::source`]).
+    pub source: Option<String>,
 }
 
 /// One managed instructions item (see [`crate::adapters::Tracked`]).
@@ -282,6 +295,8 @@ pub fn plan(
             Scope::Project => PlanFs::rooted(&env.project, true),
             Scope::User => PlanFs::rooted(&env.home, false),
         },
+        profile: profile.name.clone(),
+        home: env.home.clone(),
         ..Work::default()
     };
     let mut applied = Vec::new();
@@ -327,35 +342,20 @@ pub fn plan(
         a.apply(profile, env, opts, &mut work)?;
         applied.push(a.id().to_string());
     }
-    let mut servers: Vec<ServerReview> = Vec::new();
-    for (target, name) in &work.changed_servers {
-        if let Some(r) = servers.iter_mut().find(|r| r.name == *name) {
-            if !r.targets.contains(target) {
-                r.targets.push(target.clone());
-            }
-            continue;
-        }
-        let Some(s) = profile.mcp_servers.get(name) else {
-            continue;
-        };
-        let endpoint = match &s.command {
-            Some(c) if s.url.is_none() || s.transport() == crate::model::Transport::Stdio => {
-                std::iter::once(c)
-                    .chain(&s.args)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            }
-            _ => s.url.clone().unwrap_or_default(),
-        };
-        servers.push(ServerReview {
-            name: name.clone(),
-            targets: vec![target.clone()],
-            endpoint,
-            env: s.env.keys().cloned().collect(),
-            headers: s.headers.keys().cloned().collect(),
-        });
-    }
+    let servers = review_servers(profile, &work.changed_servers);
+    let removed_servers = review_servers(profile, &work.removed_servers);
+    let withheld_removals = review_servers(profile, &work.withheld_removals);
+    let server_writes: Vec<ServerWrite> = work
+        .server_writes
+        .iter()
+        .map(|w| ServerWrite {
+            path: work
+                .fs
+                .real_path(&w.path)
+                .unwrap_or_else(|_| w.path.clone()),
+            ..w.clone()
+        })
+        .collect();
     // A fallback is written to disk wherever its variable is unset.
     for (n, s) in &profile.mcp_servers {
         if !applied.iter().any(|t| s.applies_to(t)) {
@@ -455,7 +455,45 @@ pub fn plan(
         risky,
         items,
         changed_items: work.changed_items,
+        removed_servers,
+        withheld_removals,
+        server_writes,
+        source: opts.source.clone(),
     })
+}
+
+/// The profile servers named in `entries` (target, name), with the targets of each.
+fn review_servers(profile: &Profile, entries: &[(String, String)]) -> Vec<ServerReview> {
+    let mut servers: Vec<ServerReview> = Vec::new();
+    for (target, name) in entries {
+        if let Some(r) = servers.iter_mut().find(|r| r.name == *name) {
+            if !r.targets.contains(target) {
+                r.targets.push(target.clone());
+            }
+            continue;
+        }
+        let Some(s) = profile.mcp_servers.get(name) else {
+            continue;
+        };
+        let endpoint = match &s.command {
+            Some(c) if s.url.is_none() || s.transport() == crate::model::Transport::Stdio => {
+                std::iter::once(c)
+                    .chain(&s.args)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }
+            _ => s.url.clone().unwrap_or_default(),
+        };
+        servers.push(ServerReview {
+            name: name.clone(),
+            targets: vec![target.clone()],
+            endpoint,
+            env: s.env.keys().cloned().collect(),
+            headers: s.headers.keys().cloned().collect(),
+        });
+    }
+    servers
 }
 
 /// Which MCP servers from a git source may be added or changed.
