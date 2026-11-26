@@ -401,6 +401,18 @@ fn plugin_manifest(
 ) -> Result<Option<(Option<String>, Option<String>)>> {
     for rel in PLUGIN_MANIFESTS {
         let path = dir.join(rel);
+        // `read_profile_file` only checks the file itself; a symlinked
+        // `.claude-plugin/` would read a manifest from outside the plugin.
+        if let Some(parent) = Path::new(rel)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            && fs::symlink_metadata(dir.join(parent)).is_ok_and(|m| m.file_type().is_symlink())
+        {
+            anyhow::bail!(
+                "symbolic links are not allowed in a profile: {}",
+                dir.join(parent).display()
+            );
+        }
         let Some(text) = read_profile_text(&path, budget)? else {
             continue;
         };
@@ -447,6 +459,12 @@ fn plugin_profile(dir: &Path, name_hint: Option<&str>, budget: &mut ReadBudget) 
             vec![],
         )
         .into());
+    }
+    if fs::symlink_metadata(dir.join("instructions.md")).is_ok() {
+        warnings.push(
+            "instructions.md is not read from a plugin; only rules/, commands/ and skills/ are"
+                .to_string(),
+        );
     }
     let (name, description) = manifest.unwrap_or_default();
     let name = name.unwrap_or_else(|| {
@@ -932,6 +950,11 @@ mod tests {
         write(&dir, "instructions.md", "Not part of a plugin.\n");
         let p = load(&dir).unwrap();
         assert_eq!(p.name, "my-plugin");
+        assert!(
+            p.warnings[0].contains("instructions.md is not read"),
+            "{:?}",
+            p.warnings
+        );
         assert_eq!(p.rules.len(), 1);
         assert_eq!(p.commands.len(), 1);
         assert_eq!(p.skills.len(), 1);
@@ -939,6 +962,7 @@ mod tests {
         assert!(!dir.join(MANIFEST).exists());
         assert!(is_plugin(&dir));
         assert_eq!(load_named(&dir, "Repo.Name").unwrap().name, "repo.name");
+        fs::remove_file(dir.join("instructions.md")).unwrap();
 
         // A plugin manifest's name wins; .claude-plugin/ before the root file.
         write(&dir, "plugin.json", r#"{"name": "root-name"}"#);
@@ -1238,6 +1262,29 @@ mod tests {
             e.to_string().contains("symbolic links are not allowed"),
             "{e}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plugin_manifests_behind_symlinks_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plug");
+        write(&dir, "rules/r.md", "R.\n");
+        let outside = tempfile::tempdir().unwrap();
+        write(outside.path(), "plugin.json", r#"{"name": "outside"}"#);
+        // A symlinked .claude-plugin/ directory is not followed.
+        std::os::unix::fs::symlink(outside.path(), dir.join(".claude-plugin")).unwrap();
+        let e = load(&dir).unwrap_err().to_string();
+        assert!(e.contains("symbolic links are not allowed"), "{e}");
+        assert!(e.contains(".claude-plugin"), "{e}");
+        // Nor is a symlinked root plugin.json.
+        fs::remove_file(dir.join(".claude-plugin")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("plugin.json"), dir.join("plugin.json"))
+            .unwrap();
+        let e = load(&dir).unwrap_err().to_string();
+        assert!(e.contains("symbolic links are not allowed"), "{e}");
+        fs::remove_file(dir.join("plugin.json")).unwrap();
+        assert_eq!(load(&dir).unwrap().name, "plug");
     }
 
     #[test]

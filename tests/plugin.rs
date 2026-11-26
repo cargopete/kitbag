@@ -376,6 +376,35 @@ fn plugins_from_git() {
         .assert()
         .code(2)
         .stderr(contains("git source"));
+    // A command that runs a shell snippet is withheld from a git plugin
+    // unless the source is trusted, as for a git profile.
+    let shell = sb.git_profile(
+        "shell-plugin",
+        &[
+            ("rules/r.md", "Rule r.\n"),
+            ("commands/run.md", "---\ndescription: run\n---\nRun !`id`\n"),
+        ],
+    );
+    sb.cli()
+        .args(["apply", &shell, "--to", "claude-code", "--yes"])
+        .assert()
+        .success()
+        .stdout(contains("command 'run'").and(contains("--allow-risky-settings")));
+    assert!(!sb.home().join(".claude/commands/run.md").exists());
+    assert!(sb.home().join(".claude/rules/r.md").exists());
+    sb.cli()
+        .args([
+            "apply",
+            &shell,
+            "--to",
+            "claude-code",
+            "--yes",
+            "--trust-source",
+        ])
+        .assert()
+        .success();
+    assert!(sb.read("home/.claude/commands/run.md").contains("!`id`"));
+
     // A directory with neither a kitbag.toml nor rules/ is refused.
     sb.cli()
         .args(["diff", &url, "--to", "codex"])

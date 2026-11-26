@@ -337,7 +337,8 @@ kitbag reads the plugin in memory and writes nothing into it. The plugin's name,
 managed block and in kitbag's records, is the `name` in `.claude-plugin/plugin.json` or a
 root `plugin.json`, if one is there; otherwise it is the directory's name (for a git URL, the
 sub-directory's or the repository's) as a slug, like `My Plugin` -> `my-plugin`. A plugin has
-no instructions, MCP servers or settings; `commands/` and `skills/` are read as in a profile.
+no instructions, MCP servers or settings (an `instructions.md` in it is not read, with a
+warning); `commands/` and `skills/` are read as in a profile.
 A plugin from a git URL is a git source, with the same rules as a git profile. `sync --from`
 doesn't work on a plugin, since that writes the edits into a profile. `kitbag undo` takes the
 plugin's rules out again (its own rule files and managed block, nothing you wrote), even
