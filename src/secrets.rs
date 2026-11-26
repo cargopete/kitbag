@@ -1657,7 +1657,12 @@ static JSON_PAIR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#""([^"\\]+)"(\s*:\s*)"((?:[^"\\]|\\.)*)""#).expect("valid regex")
 });
 static TOML_PAIR: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(^|[\s{,])([A-Za-z0-9_-]+|"[^"]+")(\s*=\s*)"((?:[^"\\]|\\.)*)""#)
+    Regex::new(r#"(^|[\s{,])([A-Za-z0-9_-]+|"[^"]+"|'[^']+')(\s*=\s*)"((?:[^"\\]|\\.)*)""#)
+        .expect("valid regex")
+});
+/// `key = 'value'`: a TOML literal string, which has no escapes.
+static TOML_LITERAL_PAIR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(^|[\s{,])([A-Za-z0-9_-]+|"[^"]+"|'[^']+')(\s*=\s*)'([^'\n]*)'"#)
         .expect("valid regex")
 });
 
@@ -1671,32 +1676,122 @@ static FLAG_PAIR: LazyLock<Regex> = LazyLock::new(|| {
 static FLAG_ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#""(--?[A-Za-z0-9][A-Za-z0-9_-]*)=((?:[^"\\]|\\.)*)""#).expect("valid regex")
 });
+/// `'--token', 'value'` in a TOML array of literal strings.
+static FLAG_LITERAL_PAIR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"'(--?[A-Za-z0-9][A-Za-z0-9_-]*)'(\s*,\s*)'([^'\n]*)'"#).expect("valid regex")
+});
+static FLAG_LITERAL_ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"'(--?[A-Za-z0-9][A-Za-z0-9_-]*)=([^'\n]*)'"#).expect("valid regex")
+});
+/// Any string on a line, double-quoted (JSON, TOML) or single-quoted (TOML).
+static QUOTED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#""((?:[^"\\]|\\.)*)"|'([^'\n]*)'"#).expect("valid regex"));
+/// A line ending in `"--token",`: a pretty-printed array whose next line
+/// holds the value.
+static TRAILING_FLAG: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?:"(--?[A-Za-z0-9][A-Za-z0-9_-]*)"|'(--?[A-Za-z0-9][A-Za-z0-9_-]*)')\s*,\s*$"#)
+        .expect("valid regex")
+});
+/// The string a line starts with.
+static LEADING_STRING: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^(\s*)(?:"((?:[^"\\]|\\.)*)"|'([^'\n]*)')"#).expect("valid regex")
+});
 
-/// For display: names and known formats only (no entropy guessing, which would
-/// hide ordinary ids and make diffs unreviewable).
+/// A JSON or TOML basic string's content, with `\"` and `\\` unescaped.
+fn unescape(value: &str) -> String {
+    value.replace("\\\"", "\"").replace("\\\\", "\\")
+}
+
+/// For display: a value capture would flag as random-looking (a high-entropy
+/// value), and that also has a run of 16 or more letters and digits mixing
+/// both, as tokens do. The second test keeps ordinary ids such as model names
+/// (`claude-sonnet-4-5-20250929`) and camel-case tool names visible.
+fn random_value(value: &str) -> bool {
+    if value.contains(MASK) {
+        return false;
+    }
+    let literal = strip_refs(value);
+    looks_random_token(&literal)
+        && literal
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|run| {
+                run.len() >= 16
+                    && run.chars().any(|c| c.is_ascii_digit())
+                    && run.chars().any(|c| c.is_ascii_alphabetic())
+            })
+}
+
+/// For display: known formats, values under a secret-sounding name, and
+/// random-looking values (see [`random_value`]). `value` is already unescaped.
 fn shown_secret(key: &str, value: &str) -> bool {
-    if value.contains("••••••••") {
+    if value.contains(MASK) {
         return false; // already masked
     }
-    let unescaped = value.replace("\\\"", "\"").replace("\\\\", "\\");
     // Like capture: under a secret-sounding name any literal counts, however
     // short, except configuration such as numbers, booleans, URLs and paths.
-    let literal = strip_refs(&unescaped);
+    let literal = strip_refs(value);
     let named = is_secret_name(key)
-        && sole_ref(&unescaped).is_none()
-        && (!has_ref(&unescaped) || substantial_literal(&literal))
+        && sole_ref(value).is_none()
+        && (!has_ref(value) || substantial_literal(&literal))
         && !obviously_not_secret(&literal);
-    strong_secret_kind(&unescaped).is_some()
+    strong_secret_kind(value).is_some()
         || named
         || BEARER
-            .captures(&unescaped)
+            .captures(value)
             .is_some_and(|c| !has_ref(&c[2]) && c[2].len() >= 6)
+        || random_value(value)
+}
+
+/// The value given to a flag (`"--token", "value"`), as capture judges it:
+/// by the flag's name, and never a value that is itself a flag.
+fn shown_flag_value(flag: &str, value: &str) -> bool {
+    !value.starts_with('-') && shown_secret(flag.trim_start_matches('-'), value)
+}
+
+/// For each line, the flag left waiting for its value by the line before it
+/// (skipping blank lines), as in a pretty-printed `args` array with
+/// `"--token",` on one line and the value on the next. Pass the result to
+/// [`mask_line_after`].
+pub fn pending_flags<'a>(lines: impl IntoIterator<Item = &'a str>) -> Vec<Option<String>> {
+    let mut out = Vec::new();
+    let mut pending: Option<String> = None;
+    for line in lines {
+        out.push(pending.clone());
+        if line.trim().is_empty() {
+            continue;
+        }
+        pending = TRAILING_FLAG.captures(line).map(|c| {
+            c.get(1)
+                .or_else(|| c.get(2))
+                .map_or_else(String::new, |m| m.as_str().to_string())
+        });
+    }
+    out
+}
+
+/// [`mask_line`] for a line that may hold the value of `flag`, given on the
+/// line before (see [`pending_flags`]).
+pub fn mask_line_after(line: &str, flag: Option<&str>) -> String {
+    if let Some(flag) = flag
+        && let Some(c) = LEADING_STRING.captures(line)
+    {
+        let (value, quote) = match (c.get(2), c.get(3)) {
+            (Some(v), _) => (unescape(v.as_str()), '"'),
+            (_, Some(v)) => (v.as_str().to_string(), '\''),
+            _ => (String::new(), '"'),
+        };
+        if shown_flag_value(flag, &value) {
+            let rest = &line[c.get(0).map_or(0, |m| m.end())..];
+            return mask_line(&format!("{}{quote}{MASK}{quote}{rest}", &c[1]));
+        }
+    }
+    mask_line(line)
 }
 
 /// Mask anything in one line of config text that looks like a credential:
-/// known token formats anywhere, and secret-looking values of JSON / TOML keys.
-/// Used for every line kitbag displays, so existing secrets in your files never
-/// show up in a diff.
+/// known token formats anywhere, secret-looking values of JSON / TOML keys and
+/// flags, and random-looking strings. Used for every line kitbag displays, so
+/// existing secrets in your files never show up in a diff.
 pub fn mask_line(line: &str) -> String {
     let mut out = URL_PASSWORD
         .replace_all(line, |c: &Captures| {
@@ -1720,18 +1815,28 @@ pub fn mask_line(line: &str) -> String {
     }
     out = JSON_PAIR
         .replace_all(&out, |c: &Captures| {
-            if shown_secret(&c[1], &c[3]) {
+            if shown_secret(&c[1], &unescape(&c[3])) {
                 format!("\"{}\"{}\"••••••••\"", &c[1], &c[2])
             } else {
                 c[0].to_string()
             }
         })
         .into_owned();
-    // `"--password", "value"` in args arrays, and `"--token=value"`.
+    // `"--password", "value"` in args arrays, and `"--token=value"`; in TOML
+    // also with single quotes.
     out = FLAG_PAIR
         .replace_all(&out, |c: &Captures| {
-            if shown_secret(c[1].trim_start_matches('-'), &c[3]) {
+            if shown_flag_value(&c[1], &unescape(&c[3])) {
                 format!("\"{}\"{}\"••••••••\"", &c[1], &c[2])
+            } else {
+                c[0].to_string()
+            }
+        })
+        .into_owned();
+    out = FLAG_LITERAL_PAIR
+        .replace_all(&out, |c: &Captures| {
+            if shown_flag_value(&c[1], &c[3]) {
+                format!("'{}'{}'••••••••'", &c[1], &c[2])
             } else {
                 c[0].to_string()
             }
@@ -1739,8 +1844,17 @@ pub fn mask_line(line: &str) -> String {
         .into_owned();
     out = FLAG_ASSIGN
         .replace_all(&out, |c: &Captures| {
-            if shown_secret(c[1].trim_start_matches('-'), &c[2]) {
+            if shown_secret(c[1].trim_start_matches('-'), &unescape(&c[2])) {
                 format!("\"{}=••••••••\"", &c[1])
+            } else {
+                c[0].to_string()
+            }
+        })
+        .into_owned();
+    out = FLAG_LITERAL_ASSIGN
+        .replace_all(&out, |c: &Captures| {
+            if shown_secret(c[1].trim_start_matches('-'), &c[2]) {
+                format!("'{}=••••••••'", &c[1])
             } else {
                 c[0].to_string()
             }
@@ -1748,11 +1862,29 @@ pub fn mask_line(line: &str) -> String {
         .into_owned();
     out = TOML_PAIR
         .replace_all(&out, |c: &Captures| {
-            if shown_secret(c[2].trim_matches('"'), &c[4]) {
+            if shown_secret(c[2].trim_matches(['"', '\'']), &unescape(&c[4])) {
                 format!("{}{}{}\"••••••••\"", &c[1], &c[2], &c[3])
             } else {
                 c[0].to_string()
             }
+        })
+        .into_owned();
+    out = TOML_LITERAL_PAIR
+        .replace_all(&out, |c: &Captures| {
+            if shown_secret(c[2].trim_matches(['"', '\'']), &c[4]) {
+                format!("{}{}{}'••••••••'", &c[1], &c[2], &c[3])
+            } else {
+                c[0].to_string()
+            }
+        })
+        .into_owned();
+    // Random-looking strings anywhere else, such as a token on its own in an
+    // `args` array, as capture redacts them from MCP servers.
+    out = QUOTED
+        .replace_all(&out, |c: &Captures| match (c.get(1), c.get(2)) {
+            (Some(v), _) if random_value(&unescape(v.as_str())) => "\"••••••••\"".to_string(),
+            (_, Some(v)) if random_value(v.as_str()) => "'••••••••'".to_string(),
+            _ => c[0].to_string(),
         })
         .into_owned();
     // Whatever capture would redact from free text (instructions, rules):
@@ -2536,7 +2668,6 @@ mod tests {
             r#""url": "postgres://u:••••••••@db/app", "x": 1"#
         );
         for keep in [
-            r#""PUBLIC_ID": "q8Zr2LkP0vXa7MnB4cTy9WdE""#,
             r#""command": "npx","#,
             r#"env = { API_KEY = "${API_KEY}" }"#,
             r#""LOG_LEVEL": "debug""#,
@@ -2580,6 +2711,130 @@ mod tests {
         ] {
             assert_eq!(mask_line(keep), keep);
         }
+    }
+
+    /// A random-looking value is masked whatever it is called, as capture
+    /// redacts it from an MCP server; ordinary ids stay readable.
+    #[test]
+    fn masks_random_looking_values_under_ordinary_names() {
+        for (line, gone) in [
+            (
+                r#""PUBLIC_ID": "q8Zr2LkP0vXa7MnB4cTy9WdE""#,
+                "q8Zr2LkP0vXa7MnB4cTy9WdE",
+            ),
+            (
+                r#"CLIENT_REF = "q8Zr2LkP0vXa7MnB4cTy9WdE""#,
+                "q8Zr2LkP0vXa7MnB4cTy9WdE",
+            ),
+            (
+                r#""args": ["-y", "svc", "Xk29fLq0Zp8RwT4vNm7Bc1Yd"]"#,
+                "Xk29fLq0Zp8RwT4vNm7Bc1Yd",
+            ),
+            (
+                r#""args": ["--client-ref=Xk29fLq0Zp8RwT4vNm7Bc1Yd"]"#,
+                "Xk29fLq0Zp8RwT4vNm7Bc1Yd",
+            ),
+            (
+                r#"      "Xk29fLq0Zp8RwT4vNm7Bc1Yd""#,
+                "Xk29fLq0Zp8RwT4vNm7Bc1Yd",
+            ),
+        ] {
+            let masked = mask_line(line);
+            assert!(!masked.contains(gone), "{line} -> {masked}");
+            assert!(masked.contains("••••••••"), "{line} -> {masked}");
+        }
+        assert_eq!(
+            mask_line(r#""args": ["--client-ref=Xk29fLq0Zp8RwT4vNm7Bc1Yd"]"#),
+            r#""args": ["--client-ref=••••••••"]"#
+        );
+        // Ordinary values, including long ids and names, are shown as they are.
+        for keep in [
+            r#""model": "claude-sonnet-4-5-20250929","#,
+            r#""allow": ["mcp__github__createPullRequest"],"#,
+            r#""args": ["-y", "@modelcontextprotocol/server-github"],"#,
+            r#""id": "123e4567-e89b-12d3-a456-426614174000","#,
+            r#""rev": "0123456789abcdef0123456789abcdef01234567","#,
+            r#""cwd": "/home/me/src/kitbag_2025_release_branch","#,
+            r#"description = 'Search the docs, then answer'"#,
+            "token-like words in prose such as Xk29fLq0Zp8RwT4vNm7Bc1Yd are left",
+        ] {
+            assert_eq!(mask_line(keep), keep);
+        }
+    }
+
+    /// TOML literal strings (`'...'`) are checked like basic strings.
+    #[test]
+    fn masks_single_quoted_toml_values() {
+        assert_eq!(
+            mask_line("API_KEY = 'abcdef123456'"),
+            "API_KEY = '••••••••'"
+        );
+        assert_eq!(
+            mask_line("env = { DB_PASSWORD = 'rootE', LOG_LEVEL = 'debug' }"),
+            "env = { DB_PASSWORD = '••••••••', LOG_LEVEL = 'debug' }"
+        );
+        assert_eq!(
+            mask_line("'API_TOKEN' = 'p\\w0rd1'"),
+            "'API_TOKEN' = '••••••••'"
+        );
+        assert_eq!(
+            mask_line("args = ['--token', 'hunter22x', '--port', '8080']"),
+            "args = ['--token', '••••••••', '--port', '8080']"
+        );
+        assert_eq!(
+            mask_line("args = ['--password=hunter22x']"),
+            "args = ['--password=••••••••']"
+        );
+        assert_eq!(
+            mask_line("bearer_token = 'ghp_FAKE0123456789abcdefghijklmnopqrstuv'"),
+            "bearer_token = '••••••••'"
+        );
+        for keep in [
+            "API_KEY = '${API_KEY}'",
+            "SESSION_TIMEOUT = '3600'",
+            "command = 'npx'",
+            "args = ['--token', '--verbose']",
+        ] {
+            assert_eq!(mask_line(keep), keep);
+        }
+    }
+
+    /// `"--token",` at the end of one line and its value on the next, as in a
+    /// pretty-printed `args` array.
+    #[test]
+    fn masks_flag_values_on_the_next_line() {
+        let text = "{\n  \"args\": [\n    \"--api-key\",\n    \"hunter22x\",\n\n    '--password',\n    'rootE'\n    \"--port\",\n    \"8080\",\n    \"--token\",\n    \"--verbose\"\n  ]\n}\n";
+        let lines: Vec<&str> = text.split_inclusive('\n').collect();
+        let flags = pending_flags(lines.iter().copied());
+        assert_eq!(flags.len(), lines.len());
+        let shown: String = lines
+            .iter()
+            .zip(&flags)
+            .map(|(l, f)| mask_line_after(l, f.as_deref()))
+            .collect();
+        assert!(!shown.contains("hunter22x"), "{shown}");
+        assert!(!shown.contains("rootE"), "{shown}");
+        assert!(shown.contains("    \"••••••••\",\n"), "{shown}");
+        assert!(shown.contains("    '••••••••'\n"), "{shown}");
+        // Not a secret flag, and a flag is never taken for a value.
+        assert!(shown.contains("\"8080\""), "{shown}");
+        assert!(shown.contains("\"--verbose\""), "{shown}");
+        assert_eq!(flags[3].as_deref(), Some("--api-key"));
+        assert_eq!(flags[6].as_deref(), Some("--password"), "{flags:?}");
+        assert_eq!(flags[1], None);
+        // CRLF line endings.
+        let crlf = "[\r\n  \"--token\",\r\n  \"hunter22x\"\r\n]\r\n";
+        let lines: Vec<&str> = crlf.split_inclusive('\n').collect();
+        let flags = pending_flags(lines.iter().copied());
+        assert_eq!(
+            mask_line_after(lines[2], flags[2].as_deref()),
+            "  \"••••••••\"\r\n"
+        );
+        // Without a flag before it, a short value is shown.
+        assert_eq!(
+            mask_line_after("    \"hunter22x\",", None),
+            "    \"hunter22x\","
+        );
     }
 
     #[test]

@@ -368,13 +368,14 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
    such as anything for Claude Desktop, or a Codex env var whose name differs from its source.
    kitbag resolves those from your environment at apply time and warns per field. The value is
    masked as `••••••••` in every diff. Diffs also mask what already looks like a credential
-   in your existing files, line by line: known token formats, private keys that span several
-   lines, passwords in URLs, `Bearer …`, double-quoted JSON and TOML values under a
-   secret-sounding name, a `"--token", "…"` or `"--token=…"` pair on one line, and whatever
-   capture would redact from free text. It is not as thorough as capture: a random-looking
-   value under an ordinary name, a flag whose value sits on the next line (as in a
-   pretty-printed `args` array) and single-quoted TOML values are shown as they are. New
-   files containing resolved values are created `0600`.
+   in your existing files: known token formats, private keys that span several lines,
+   passwords in URLs, `Bearer …`, JSON and TOML values (double- or single-quoted) under a
+   secret-sounding name, a `"--token", "…"` or `"--token=…"` pair, also when the value sits
+   on the next line as in a pretty-printed `args` array, a quoted random-looking value
+   whatever it is called (a long mix of letters and digits, as capture redacts from MCP
+   servers), and whatever capture would redact from free text. Ordinary values such as
+   model names, package names, paths and UUIDs are shown as they are. New files
+   containing resolved values are created `0600`.
    `--secrets never` keeps the `${VAR}` placeholder instead. It is the default for profiles
    from git sources, so your environment is never resolved into servers someone else defined
    unless you pass `--secrets resolve` (or `--trust-source`). Unset variables are reported and

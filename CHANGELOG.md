@@ -14,6 +14,7 @@ All notable changes to this project are documented here. The format follows
 
 - `copilot`: a bare `$VAR` in a project `.mcp.json` or `.github/mcp.json` is captured as a reference, as in the user file, since Copilot CLI expands it in `env`. The warning about references in `url` and `cwd` now says neither Copilot CLI's nor VS Code's docs say they expand there; the old one said Copilot CLI expands them (#22).
 
+
 ### Fixed
 
 - `kitbag undo` after an `apply` or `sync` that had nothing to write no longer leaves `status` saying `tool edited` where it should say `profile changed`. The no-op recorded every item again without a transaction, so undoing the earlier apply that wrote them couldn't set those records aside. Now an item whose last record already matches isn't recorded again, and any other is tied to the transaction of the record it replaces, so undo sets it aside too. A repeated `sync` that holds back an edited item, which records the tool's other items, hit this too (#63).
@@ -22,6 +23,10 @@ All notable changes to this project are documented here. The format follows
 - When `applied-servers.json` can't be read, the next apply that writes an MCP server still starts it afresh, but first keeps the old file as `applied-servers.json.bak` (`0600`), so its records can be recovered by hand; the warning names that file (#60).
 - README: says that a git source is matched by its URL as written (only shorthand such as `github:owner/repo` is expanded), so `https://github.com/o/r` and `https://github.com/o/r.git` count as different sources and a server one added is left in place when the other disables it, and that for tools that get resolved secrets (Claude Desktop, Antigravity, some Codex fields) the hash `applied-servers.json` keeps of each entry is taken over the resolved values (#60).
 
+
+### Security
+
+- Diffs mask three kinds of secret already in a tool's config that they used to show: a random-looking value under an ordinary name (`"CLIENT_REF": "q8Zr2LkP..."`, or a lone token in an `args` array), as capture redacts it from an MCP server; a flag whose value is on the next line of a pretty-printed `args` array (`"--api-key",` then the value); and single-quoted TOML values (`API_KEY = '...'`, `args = ['--token', '...']`). A changed secret still shows up as a changed line, masked on both sides. To keep diffs readable, a value only counts as random-looking when it also has a run of 16 or more letters and digits mixing both, so model names, camel-case tool names, package names, paths, UUIDs and commit hashes are still shown, and so is a value given to a flag that is itself a flag (`"--token", "--verbose"`) (#75).
 
 ## [0.1.4] - 2026-11-26
 

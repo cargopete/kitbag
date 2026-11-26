@@ -425,6 +425,47 @@ fn diffs_mask_private_keys_and_secrets_in_existing_files() {
         );
 }
 
+#[test]
+fn diffs_mask_secrets_already_in_tool_config() {
+    let sb = Sandbox::empty();
+    sb.cli().args(["init", "prof"]).assert().success();
+    fs::write(
+        sb.path("prof/kitbag.toml"),
+        "kitbag = 1\nname = \"prof\"\n\n[mcp_servers.docs]\nurl = \"https://docs.example.com/mcp\"\n",
+    )
+    .unwrap();
+    // A flag's value on the next line, a random-looking value under an
+    // ordinary name, and a single-quoted TOML value.
+    fs::create_dir_all(sb.home().join(".cursor")).unwrap();
+    fs::write(
+        sb.home().join(".cursor/mcp.json"),
+        "{\n  \"mcpServers\": {\n    \"old\": {\n      \"command\": \"old-mcp\",\n      \"args\": [\n        \"--password\",\n        \"FAKEpw123\"\n      ],\n      \"env\": {\n        \"CLIENT_REF\": \"FAKEq8Zr2LkP0vXa7MnB4cTy9WdE\",\n        \"LOG_LEVEL\": \"debug\"\n      }\n    }\n  }\n}\n",
+    )
+    .unwrap();
+    fs::create_dir_all(sb.home().join(".codex")).unwrap();
+    fs::write(
+        sb.home().join(".codex/config.toml"),
+        "[mcp_servers.old]\ncommand = 'old-mcp'\nargs = [\n  '--token',\n  'FAKEtok456'\n]\nenv = { API_KEY = 'FAKEkey789' }\n",
+    )
+    .unwrap();
+    let out = sb
+        .cli()
+        .args(["diff", "prof", "--to", "cursor,codex"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let out = String::from_utf8(out).unwrap();
+    assert!(!out.contains("FAKE"), "{out}");
+    assert!(out.contains("••••••••"), "{out}");
+    // Ordinary values are still shown.
+    assert!(out.contains("\"LOG_LEVEL\": \"debug\""), "{out}");
+    assert!(out.contains("\"CLIENT_REF\": \"••••••••\""), "{out}");
+    assert!(out.contains("   '••••••••'\n"), "{out}");
+    assert!(out.contains("env = { API_KEY = '••••••••' }"), "{out}");
+}
+
 /// A `~/...` display path with the platform's separator.
 fn shown(path: &str) -> String {
     path.replace('/', std::path::MAIN_SEPARATOR_STR)
