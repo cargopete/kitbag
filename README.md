@@ -263,7 +263,9 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
    Redaction covers env values, headers, URL credentials (`user:pass@` and `:pass@`), query
    parameters and the literal fallback of `${VAR:-fallback}` (it becomes `${VAR}`). URLs are
    checked wherever they appear (`url`, args, `--flag=URL`, env values): tokens in the path
-   (Slack and Discord webhooks, Zapier-style `/mcp/s/<token>/`, random-looking segments) and a
+   (Slack and Discord webhooks, Zapier-style `/mcp/s/<token>/`, random-looking segments, and
+   hex-only segments of 32 digits or more, except a commit SHA after `commit`, `blob`, `tree` and
+   the like) and a
    token used as the username (`https://<token>@host`) are replaced; `git@` or `bob@` stay. It also covers
    secrets passed through `args`, as in `--api-key=…`, `--token …`, `NAME=value` (e.g.
    `docker -e`), `Authorization: Bearer …` (e.g. `mcp-remote --header`) and URLs.

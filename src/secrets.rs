@@ -943,11 +943,42 @@ fn secret_path_segments(host: &str, segs: &[&str], entropy: bool) -> Vec<usize> 
             && seg.chars().any(|c| c.is_ascii_uppercase())
             && seg.chars().any(|c| c.is_ascii_lowercase())
             && seg.chars().any(|c| c.is_ascii_digit());
-        if known || strong_secret_kind(seg).is_some() || random {
+        let hex = entropy && hex_token(seg) && !names_a_commit(&host, prev(1));
+        if known || strong_secret_kind(seg).is_some() || random || hex {
             out.push(i);
         }
     }
     out
+}
+
+/// A hex-only token (`/mcp/3f9a...`, a classic 40-digit GitHub token), which
+/// the mixed-case test above can't catch. 32 hex digits is 128 bits, the
+/// usual size of a random API token, while numeric ids, short git SHAs (7 to
+/// 12 digits) and most other hex ids in paths are shorter. A long run of
+/// digits alone is a numeric id, so a letter and a digit are both required.
+fn hex_token(seg: &str) -> bool {
+    seg.len() >= 32
+        && seg.chars().all(|c| c.is_ascii_hexdigit())
+        && seg.chars().any(|c| c.is_ascii_digit())
+        && seg.chars().any(|c| c.is_ascii_alphabetic())
+}
+
+/// Full commit SHAs (40 hex digits, 64 for SHA-256 repositories) appear in
+/// paths where they name a commit, not a credential: after `commit`, `blob`,
+/// `tree`, `raw` and the like, and on hosts that serve files by commit
+/// (`raw.githubusercontent.com/<owner>/<repo>/<sha>/<file>`).
+fn names_a_commit(host: &str, prev: Option<&str>) -> bool {
+    const WORDS: &[&str] = &[
+        "commit", "commits", "tree", "blob", "raw", "blame", "src", "archive", "compare", "rev",
+        "revision", "sha", "ref", "refs",
+    ];
+    const HOSTS: &[&str] = &[
+        "raw.githubusercontent.com",
+        "gist.githubusercontent.com",
+        "codeload.github.com",
+    ];
+    prev.is_some_and(|p| WORDS.contains(&p.to_ascii_lowercase().as_str()))
+        || HOSTS.contains(&host.split(':').next().unwrap_or(host))
 }
 
 /// Replace the secret path segments `hits` of `segs` with `with(n)`. A Slack
@@ -2043,6 +2074,41 @@ mod tests {
         ] {
             assert_eq!(redact_text(keep), (keep.to_string(), vec![]), "{keep}");
         }
+    }
+
+    #[test]
+    fn hex_only_path_tokens_are_redacted() {
+        let tok32 = "3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c";
+        let tok40 = "0123456789abcdef0123456789abcdef01234567";
+        for url in [
+            format!("https://mcp.example.com/u/{tok32}/sse"),
+            format!("https://mcp.example.com/{}/sse", tok32.to_ascii_uppercase()),
+            // A 40-digit token outside a commit position.
+            format!("https://hooks.example.com/notify/{tok40}"),
+        ] {
+            let (v, found) = redact_url("s", &url);
+            assert!(v.contains("${S_URL_TOKEN}"), "{url} -> {v}");
+            assert!(!v.contains("3f9a8b") && !v.contains("3F9A8B") && !v.contains(tok40));
+            assert_eq!(found, vec![("S_URL_TOKEN".to_string(), "url-path-token")]);
+        }
+        for url in [
+            // One digit short of the threshold.
+            format!("https://x.example/u/{}/sse", &tok32[..31]),
+            // Short ids and short SHAs.
+            "https://x.example/items/1a2b3c4d/v/deadbeef0123".to_string(),
+            // A long numeric id.
+            "https://x.example/n/12345678901234567890123456789012".to_string(),
+            // Full commit SHAs where they name a commit.
+            format!("https://gitlab.com/o/r/-/blob/{tok40}/server.js"),
+            format!("https://github.com/o/r/tree/{tok40}/src"),
+            format!("https://raw.githubusercontent.com/o/r/{tok40}/server.js"),
+            format!("https://x.example/o/r/archive/{tok40}"),
+        ] {
+            assert_eq!(redact_url("s", &url), (url.clone(), vec![]), "{url}");
+        }
+        // Free text keeps to known shapes: prose has too many ids for a guess.
+        let prose = format!("See https://x.example/u/{tok32}/sse for details.");
+        assert_eq!(redact_text(&prose).0, prose);
     }
 
     #[test]

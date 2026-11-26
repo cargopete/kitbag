@@ -12,6 +12,7 @@ All notable changes to this project are documented here. The format follows
 - Git sources over cleartext `http://` or `git://` are refused, as is an `https://` server that redirects to one, unless `--allow-insecure-source` is given (#37).
 - `undo` checks every backup against the SHA-256 recorded when it was taken. If one changed since the apply, undo stops before restoring anything, names the file and its backup, and asks for `--force`; with `--force` it restores the backup and warns about it. Applies recorded by older versions carry the same hash and are checked too; an entry without one is restored as before (#37).
 - Diffs mask private keys that span lines (PEM `-----BEGIN ... PRIVATE KEY-----` blocks) in existing config and instruction files. Each key is shown as one line, `•••••••• (private key, sha256:1a2b3c4d)`, so a changed key still shows up as a change. Diffs and plans also mask whatever capture would redact from text (`export DB_PASSWORD=...`, `Bearer ...`, webhook and query tokens) and, as capture does, a value under a secret-sounding name however short (#37).
+- Capture redacts hex-only tokens in URL paths (32 hex digits or more, such as `https://mcp.example.com/u/3f9a.../sse` or a classic 40-digit GitHub token), which the random-looking-segment check missed because it needs upper and lower case. Numeric ids, short ids and SHAs, and full commit SHAs after `commit`, `blob`, `tree` and the like or on `raw.githubusercontent.com` are kept (#37).
 
 ## [0.1.2] - 2026-11-26
 
