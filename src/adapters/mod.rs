@@ -20,6 +20,7 @@ pub mod claude_code;
 pub mod claude_desktop;
 pub mod codex;
 pub mod common;
+pub mod copilot;
 pub mod cursor;
 pub mod gemini;
 pub mod opencode;
@@ -89,6 +90,7 @@ impl Env {
 pub const LOCATION_VARS: &[&str] = &[
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
+    "COPILOT_HOME",
     "XDG_CONFIG_HOME",
     "APPDATA",
 ];
@@ -223,6 +225,9 @@ pub struct Work {
     /// (target, `command <name>` / `skill <name>`) of every command and skill
     /// the plan writes.
     pub changed_items: Vec<(String, String)>,
+    /// Ids of the targets this plan applies, so a target sharing a file with
+    /// another knows whether that one is applied too.
+    pub targets: Vec<String>,
 }
 
 /// One MCP server entry a plan writes (`hash` is its [`crate::sync::entry_hash`])
@@ -403,6 +408,7 @@ pub fn all() -> &'static [&'static dyn Adapter] {
         &claude_desktop::ClaudeDesktop,
         &antigravity::Antigravity,
         &opencode::OpenCode,
+        &copilot::Copilot,
     ]
 }
 

@@ -998,3 +998,319 @@ fn opencode_notes_when_agents_md_hides_claude_md() {
         p.notes
     );
 }
+
+// ---------------------------------------------------------------- copilot
+
+#[test]
+fn copilot_capture_user() {
+    let sb = Sandbox::fixtures();
+    let r = capture(&["copilot"], &sb.env(Scope::User));
+    let p = &r.profile;
+    // `type: local` is Copilot CLI's older name for stdio.
+    let pw = &p.mcp_servers["playwright"];
+    assert_eq!(pw.command.as_deref(), Some("npx"));
+    assert_eq!(pw.transport(), Transport::Stdio);
+    let ctx = &p.mcp_servers["context7"];
+    assert_eq!(ctx.url.as_deref(), Some("https://mcp.context7.com/mcp"));
+    assert!(
+        !ctx.headers["CONTEXT7_API_KEY"].contains("ctx7_FAKE"),
+        "literal key is redacted: {:?}",
+        ctx.headers
+    );
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n.message.contains("'context7': tools not captured"))
+    );
+    // Copilot expands ${VAR:-default} itself, so it is kept.
+    assert_eq!(
+        p.mcp_servers["notes"].args,
+        vec!["--root", "${NOTES_DIR:-/tmp/notes}"]
+    );
+    // settings.json disabledMcpServers.
+    assert!(p.mcp_servers["old-time"].disabled);
+    assert!(!pw.disabled);
+    assert_eq!(
+        p.instructions.as_deref(),
+        Some("Answer in short paragraphs.")
+    );
+    assert_eq!(p.rules.len(), 1);
+    assert_eq!(p.rules[0].name, "go");
+    assert_eq!(p.rules[0].globs, vec!["**/*.go"]);
+}
+
+#[test]
+fn copilot_capture_project() {
+    let sb = Sandbox::fixtures();
+    let r = capture(&["copilot"], &sb.env(Scope::Project));
+    let p = &r.profile;
+    // .mcp.json (shared with Claude Code) wins over the older .vscode/mcp.json.
+    assert_eq!(
+        p.mcp_servers["playwright"].args,
+        vec!["@playwright/mcp@latest"]
+    );
+    // From .vscode/mcp.json: ${env:VAR} becomes ${VAR}.
+    assert_eq!(
+        p.mcp_servers["github"].headers["Authorization"],
+        "Bearer ${GITHUB_TOKEN}"
+    );
+    // ${input:...} can't be carried anywhere.
+    assert!(!p.mcp_servers.contains_key("perplexity"));
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n.message.contains("skipped MCP server 'perplexity'"))
+    );
+    assert!(p.instructions.as_deref().unwrap().contains("pnpm test"));
+    let sql = &p.rules[0];
+    assert_eq!(sql.name, "sql");
+    assert_eq!(
+        sql.description.as_deref(),
+        Some("Writing database migrations")
+    );
+    assert_eq!(sql.globs, vec!["db/**/*.sql", "migrations/**"]);
+}
+
+#[test]
+fn copilot_capture_reads_github_mcp_json_in_the_bare_format() {
+    let sb = Sandbox::empty();
+    let f = sb.project().join(".github/mcp.json");
+    std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+    std::fs::write(
+        &f,
+        r#"{
+  // bare format: each top-level key is a server
+  "playwright": { "type": "local", "command": "npx", "args": ["@playwright/mcp@latest"] },
+}
+"#,
+    )
+    .unwrap();
+    let p = capture(&["copilot"], &sb.env(Scope::Project)).profile;
+    assert_eq!(p.mcp_servers["playwright"].command.as_deref(), Some("npx"));
+}
+
+#[test]
+fn copilot_apply_user() {
+    let sb = Sandbox::empty();
+    let env = sb.env_with(Scope::User, &[("GITHUB_TOKEN", "ghp_FAKEvalue123")]);
+    let p = plan(&sample(), &["copilot"], &env);
+    let cfg: serde_json::Value =
+        serde_json::from_str(&planned(&p, &sb.home().join(".copilot/mcp-config.json")).unwrap())
+            .unwrap();
+    // Copilot expands ${VAR} itself: nothing is resolved.
+    assert_eq!(
+        cfg["mcpServers"]["github"],
+        json!({"type": "stdio", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": {"GITHUB_TOKEN": "${GITHUB_TOKEN}"}, "tools": ["*"]})
+    );
+    assert_eq!(
+        cfg["mcpServers"]["linear"],
+        json!({"type": "http", "url": "https://mcp.linear.app/mcp", "headers": {"Authorization": "Bearer ${LINEAR_API_KEY}"}, "tools": ["*"]})
+    );
+    assert!(p.sensitive.is_empty() && p.private.is_empty());
+    let md = planned(&p, &sb.home().join(".copilot/copilot-instructions.md")).unwrap();
+    assert!(md.contains("<!-- kitbag:begin team -->") && md.contains("Use British English."));
+    assert_eq!(
+        planned(
+            &p,
+            &sb.home().join(".copilot/instructions/ts.instructions.md")
+        )
+        .unwrap(),
+        "---\ndescription: TypeScript\napplyTo: \"src/**/*.ts\"\n---\n\nStrict mode.\n"
+    );
+    assert!(p.notes.iter().any(|n| n.target == "copilot"
+        && n.message.contains("not supported")
+        && n.message.contains("1 commands")));
+    assert_eq!(p.changes.len(), 3, "{:?}", p.changes);
+}
+
+#[test]
+fn copilot_home_relocates_the_user_files() {
+    let sb = Sandbox::empty();
+    let mut env = sb.env(Scope::User);
+    let dir = sb.path("elsewhere/copilot");
+    env.locations
+        .insert("COPILOT_HOME".into(), dir.to_string_lossy().into_owned());
+    let p = plan(&sample(), &["copilot"], &env);
+    assert!(planned(&p, &dir.join("mcp-config.json")).is_some());
+    assert!(planned(&p, &dir.join("copilot-instructions.md")).is_some());
+    assert!(planned(&p, &dir.join("instructions/ts.instructions.md")).is_some());
+    assert!(!sb.home().join(".copilot").exists());
+}
+
+#[test]
+fn copilot_apply_user_keeps_your_tool_lists_and_keys() {
+    let sb = Sandbox::empty();
+    let cfg = sb.home().join(".copilot/mcp-config.json");
+    std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+    std::fs::write(
+        &cfg,
+        r#"{
+  "mcpServers": {
+    // trimmed on purpose
+    "github": {
+      "type": "local",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "tools": ["list_issues"],
+      "timeout": 60000
+    },
+    "linear": { "type": "http", "url": "https://old.example.com/mcp", "tools": ["search"], "oauthClientId": "abc" },
+    "mine": { "command": "my-mcp", "args": [], "tools": ["*"] }
+  }
+}
+"#,
+    )
+    .unwrap();
+    let mut prof = sample();
+    prof.mcp_servers.get_mut("github").unwrap().cwd = Some("/srv/gh".into());
+    let p = plan(&prof, &["copilot"], &sb.env(Scope::User));
+    let text = planned(&p, &cfg).unwrap();
+    assert!(
+        text.contains("// trimmed on purpose"),
+        "comments are kept: {text}"
+    );
+    let doc: serde_json::Value =
+        serde_json::from_str(&text.replace("// trimmed on purpose", "")).unwrap();
+    let s = &doc["mcpServers"];
+    // Same server: your tool list and timeout stay; cwd is written at user scope.
+    assert_eq!(s["github"]["tools"], json!(["list_issues"]));
+    assert_eq!(s["github"]["timeout"], 60000);
+    assert_eq!(s["github"]["type"], "stdio");
+    assert_eq!(s["github"]["cwd"], "/srv/gh");
+    // A different URL is a different server: its tool list and OAuth client go.
+    assert_eq!(
+        s["linear"],
+        json!({"type": "http", "url": "https://mcp.linear.app/mcp", "headers": {"Authorization": "Bearer ${LINEAR_API_KEY}"}, "tools": ["*"]})
+    );
+    assert!(
+        p.notes
+            .iter()
+            .any(|n| n.message.contains("'linear'") && n.message.contains("oauthClientId"))
+    );
+    assert_eq!(
+        s["mine"],
+        json!({"command": "my-mcp", "args": [], "tools": ["*"]})
+    );
+    let again = {
+        apply(&sb, &prof, &["copilot"], &sb.env(Scope::User));
+        plan(&prof, &["copilot"], &sb.env(Scope::User))
+    };
+    assert!(again.changes.is_empty(), "{:?}", again.changes);
+}
+
+#[test]
+fn copilot_apply_project_writes_claude_codes_shape() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::Project);
+    let mut prof = sample();
+    prof.mcp_servers.get_mut("github").unwrap().cwd = Some("tools".into());
+    let p = plan(&prof, &["copilot"], &env);
+    let mcp: serde_json::Value =
+        serde_json::from_str(&planned(&p, &sb.project().join(".mcp.json")).unwrap()).unwrap();
+    // No tools and no cwd: Claude Code reads this file too.
+    assert_eq!(
+        mcp["mcpServers"]["github"],
+        json!({"type": "stdio", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": {"GITHUB_TOKEN": "${GITHUB_TOKEN}"}})
+    );
+    assert!(
+        p.notes
+            .iter()
+            .any(|n| n.message.contains("'cwd' was dropped"))
+    );
+    assert!(
+        planned(&p, &sb.project().join(".github/copilot-instructions.md"))
+            .unwrap()
+            .contains("Use British English.")
+    );
+    assert!(
+        planned(
+            &p,
+            &sb.project().join(".github/instructions/ts.instructions.md")
+        )
+        .is_some()
+    );
+}
+
+#[test]
+fn copilot_leaves_a_bare_format_mcp_json_alone() {
+    let sb = Sandbox::empty();
+    let f = sb.project().join(".mcp.json");
+    let bare = "{ \"pw\": { \"command\": \"npx\", \"args\": [\"@playwright/mcp\"] } }\n";
+    std::fs::write(&f, bare).unwrap();
+    let p = plan(&sample(), &["copilot"], &sb.env(Scope::Project));
+    assert!(planned(&p, &f).is_none());
+    assert!(
+        p.notes
+            .iter()
+            .any(|n| n.message.contains("without mcpServers"))
+    );
+}
+
+/// Claude Code and Copilot both read the project `.mcp.json`: applying to
+/// both, together or one after the other, writes each entry once and neither
+/// changes what the other wrote. Undo restores the file.
+#[test]
+fn claude_code_and_copilot_share_mcp_json() {
+    let prof = sample();
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::Project);
+    let mcp = sb.project().join(".mcp.json");
+    std::fs::write(
+        &mcp,
+        "{\n  \"mcpServers\": {\n    \"mine\": { \"command\": \"my-mcp\" }\n  }\n}\n",
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(&mcp).unwrap();
+    let p = apply(&sb, &prof, &["claude-code", "copilot"], &env);
+    assert_eq!(p.changes.iter().filter(|c| c.path == mcp).count(), 1);
+    let doc = sb.json("project/.mcp.json");
+    assert_eq!(doc["mcpServers"]["mine"], json!({"command": "my-mcp"}));
+    assert_eq!(doc["mcpServers"]["github"]["type"], "stdio");
+    assert!(doc["mcpServers"]["github"].get("tools").is_none());
+    for ids in [
+        &["copilot"][..],
+        &["claude-code"],
+        &["copilot", "claude-code"],
+    ] {
+        let again = plan(&prof, ids, &env);
+        assert!(again.changes.is_empty(), "{ids:?}: {:?}", again.changes);
+    }
+    Store::new(sb.state()).undo(None, false).unwrap();
+    assert_eq!(std::fs::read_to_string(&mcp).unwrap(), before);
+
+    for order in [["copilot", "claude-code"], ["claude-code", "copilot"]] {
+        let sb = Sandbox::empty();
+        let env = sb.env(Scope::Project);
+        apply(&sb, &prof, &[order[0]], &env);
+        let first = sb.read("project/.mcp.json");
+        let second = apply(&sb, &prof, &[order[1]], &env);
+        assert!(
+            !second.changes.iter().any(|c| c.path.ends_with(".mcp.json")),
+            "{order:?}: the second target leaves .mcp.json as the first wrote it"
+        );
+        assert_eq!(sb.read("project/.mcp.json"), first);
+    }
+}
+
+/// Copilot instructions and rules have their own files, so applying next to
+/// Codex and Claude Code adds no second block to AGENTS.md or CLAUDE.md.
+#[test]
+fn copilot_instructions_have_their_own_files() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::Project);
+    let prof = sample();
+    apply(&sb, &prof, &["codex", "claude-code", "copilot"], &env);
+    for f in [
+        "project/AGENTS.md",
+        "project/CLAUDE.md",
+        "project/.github/copilot-instructions.md",
+    ] {
+        let text = sb.read(f);
+        assert_eq!(
+            text.matches("<!-- kitbag:begin team -->").count(),
+            1,
+            "{f}: {text}"
+        );
+    }
+    assert!(plan(&prof, &["copilot"], &env).changes.is_empty());
+}

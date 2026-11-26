@@ -261,7 +261,8 @@ fn list_targets_json() {
             "gemini-cli",
             "claude-desktop",
             "antigravity",
-            "opencode"
+            "opencode",
+            "copilot"
         ]
     );
     assert_eq!(v[2]["support"]["rules"], "folded");

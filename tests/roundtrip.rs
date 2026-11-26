@@ -15,6 +15,7 @@ const ALL: &[&str] = &[
     "claude-desktop",
     "antigravity",
     "opencode",
+    "copilot",
 ];
 
 /// Capture `from` in a fixture sandbox, save + reload the profile, apply it to `to`

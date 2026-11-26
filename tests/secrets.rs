@@ -18,6 +18,7 @@ const FAKE_SECRETS: &[&str] = &[
     "sntrys_FAKE",
     "sk-ant-FAKE",
     "agy_FAKE",
+    "ctx7_FAKE",
 ];
 const ALL: &[&str] = &[
     "claude-code",
@@ -27,6 +28,7 @@ const ALL: &[&str] = &[
     "claude-desktop",
     "antigravity",
     "opencode",
+    "copilot",
 ];
 
 #[test]

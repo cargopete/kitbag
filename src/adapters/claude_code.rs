@@ -15,8 +15,8 @@ use serde_json::{Map, Value, json};
 
 use super::common::{
     MdKind, capture_instructions, capture_markdown_dir, capture_skills_dir, import_server,
-    merge_json_servers, merge_json_settings, pick_settings, render_server, safe_settings,
-    server_entries, server_from_json, servers_for, write_instructions, write_skill,
+    keep_shared_servers, merge_json_servers, merge_json_settings, pick_settings, render_server,
+    safe_settings, server_entries, server_from_json, servers_for, write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
@@ -26,9 +26,9 @@ use crate::plan_fs::{read_text_opt, walk_files};
 use crate::profile_io::command_to_markdown;
 use crate::secrets::RefStyle;
 
-const ID: &str = "claude-code";
+pub(crate) const ID: &str = "claude-code";
 /// Server keys kitbag writes; anything else in an existing entry is preserved.
-const MANAGED_KEYS: &[&str] = &["type", "command", "args", "env", "url", "headers"];
+pub(crate) const MANAGED_KEYS: &[&str] = &["type", "command", "args", "env", "url", "headers"];
 
 pub struct ClaudeCode;
 
@@ -98,7 +98,7 @@ pub fn claude_rule(r: &Rule) -> String {
     )
 }
 
-fn server_json(s: &McpServer) -> Value {
+pub(crate) fn server_json(s: &McpServer) -> Value {
     let mut def = Map::new();
     match s.transport() {
         Transport::Stdio => {
@@ -435,6 +435,10 @@ impl Adapter for ClaudeCode {
             }
             let s = render_server(s, RefStyle::Dollar, env, work);
             servers.push((name.clone(), server_json(&s)));
+        }
+        if env.scope == Scope::Project {
+            // GitHub Copilot reads the project .mcp.json too.
+            keep_shared_servers(work, profile, opts, ID, "copilot", "GitHub Copilot", &p.mcp);
         }
         merge_json_servers(
             work,

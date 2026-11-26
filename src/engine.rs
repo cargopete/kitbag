@@ -306,6 +306,11 @@ pub fn plan(
         },
         profile: profile.name.clone(),
         home: env.home.clone(),
+        targets: targets
+            .iter()
+            .filter(|a| a.scopes().contains(&env.scope))
+            .map(|a| a.id().to_string())
+            .collect(),
         ..Work::default()
     };
     let mut applied = Vec::new();
