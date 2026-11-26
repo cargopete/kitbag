@@ -21,6 +21,10 @@ use crate::secrets::{
 };
 
 pub const MANIFEST: &str = "kitbag.toml";
+/// The directory at a plugin's root that holds its rules, one `*.md` per rule.
+pub const PLUGIN_RULES: &str = "rules";
+/// Where a plugin may keep a manifest with its `name`, first match wins.
+const PLUGIN_MANIFESTS: &[&str] = &[".claude-plugin/plugin.json", "plugin.json"];
 /// Most files a skill may have. Capture and loading use the same limit.
 pub const MAX_SKILL_FILES: usize = 200;
 /// Largest file a profile may contain. Capture skips anything bigger, so it
@@ -369,31 +373,117 @@ fn read_skill_dir(
     Ok(())
 }
 
-/// Load a profile directory.
+/// Load a profile directory, or a plugin directory (see [`load_named`]) named
+/// after the directory.
 pub fn load(dir: &Path) -> Result<Profile> {
-    load_with_limit(dir, MAX_PROFILE_BYTES)
+    load_with_limit(dir, MAX_PROFILE_BYTES, None)
 }
 
-fn load_with_limit(dir: &Path, limit: u64) -> Result<Profile> {
-    let budget = &mut ReadBudget { dir, left: limit };
-    let manifest = dir.join(MANIFEST);
-    let text = read_profile_text(&manifest, budget)?.ok_or_else(|| {
-        ProfileError::new(
+/// Load a profile directory. A directory without a `kitbag.toml` but with a
+/// `rules/` directory at its root is loaded as a plugin: its rules, commands
+/// and skills, no instructions, MCP servers or settings, under the `name` in
+/// its `.claude-plugin/plugin.json` or `plugin.json`, else `name_hint` (or
+/// the directory's name) as a slug. Nothing is written into the directory.
+pub fn load_named(dir: &Path, name_hint: &str) -> Result<Profile> {
+    load_with_limit(dir, MAX_PROFILE_BYTES, Some(name_hint))
+}
+
+/// Is `dir` a plugin rather than a profile: no `kitbag.toml`, but `rules/`?
+pub fn is_plugin(dir: &Path) -> bool {
+    !dir.join(MANIFEST).exists() && dir.join(PLUGIN_RULES).is_dir()
+}
+
+/// The `name` and `description` in a plugin's manifest, if it has one.
+fn plugin_manifest(
+    dir: &Path,
+    budget: &mut ReadBudget,
+    warnings: &mut Vec<String>,
+) -> Result<Option<(Option<String>, Option<String>)>> {
+    for rel in PLUGIN_MANIFESTS {
+        let path = dir.join(rel);
+        let Some(text) = read_profile_text(&path, budget)? else {
+            continue;
+        };
+        let Ok(Value::Object(m)) = serde_json::from_str::<Value>(&text) else {
+            warnings.push(format!(
+                "{rel} is not a JSON object; the plugin is named after its directory"
+            ));
+            return Ok(Some((None, None)));
+        };
+        let name = string(m.get("name")).filter(|n| check_profile_name(n).is_ok());
+        if name.is_none() && m.contains_key("name") {
+            warnings.push(format!(
+                "{rel}: 'name' is not a usable name; the plugin is named after its directory"
+            ));
+        }
+        return Ok(Some((name, string(m.get("description")))));
+    }
+    Ok(None)
+}
+
+/// The profile for a plugin directory, without its rules, commands and skills.
+fn plugin_profile(dir: &Path, name_hint: Option<&str>, budget: &mut ReadBudget) -> Result<Profile> {
+    let rules = dir.join(PLUGIN_RULES);
+    // A symlinked `rules` is refused by `list_profile_dir`, a file is no plugin.
+    let rules_dir =
+        fs::symlink_metadata(&rules).is_ok_and(|m| m.is_dir() || m.file_type().is_symlink());
+    let has_rules = rules_dir
+        && list_profile_dir(&rules)?
+            .iter()
+            .any(|(f, is_dir)| !is_dir && (f.ends_with(".md") || f.ends_with(".mdc")));
+    let mut warnings = Vec::new();
+    let manifest = if rules_dir {
+        plugin_manifest(dir, budget, &mut warnings)?
+    } else {
+        None
+    };
+    if !has_rules && manifest.is_none() {
+        return Err(ProfileError::new(
             format!(
-                "no {MANIFEST} found in {} (create one with 'kitbag init')",
+                "no {MANIFEST} found in {}, and no rules in a {PLUGIN_RULES}/ directory at its root: \
+                 create a profile with 'kitbag init', or put a plugin's rules in {PLUGIN_RULES}/<name>.md",
                 dir.display()
             ),
             vec![],
         )
-    })?;
-    let mut p = parse_manifest(&text, &manifest)?;
-    if let Some(i) = read_profile_text(&dir.join("instructions.md"), budget)?
-        && !i.trim().is_empty()
-    {
-        p.instructions = Some(i.trim().to_string());
+        .into());
     }
+    let (name, description) = manifest.unwrap_or_default();
+    let name = name.unwrap_or_else(|| {
+        let fallback = match name_hint {
+            Some(h) => h.to_string(),
+            None => std::path::absolute(dir)
+                .ok()
+                .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .unwrap_or_default(),
+        };
+        crate::model::slugify(&fallback)
+    });
+    Ok(Profile {
+        name: name.trim().to_string(),
+        description: description.filter(|d| !d.trim().is_empty()),
+        warnings,
+        ..Profile::default()
+    })
+}
+
+fn load_with_limit(dir: &Path, limit: u64, name_hint: Option<&str>) -> Result<Profile> {
+    let budget = &mut ReadBudget { dir, left: limit };
+    let manifest = dir.join(MANIFEST);
+    let mut p = match read_profile_text(&manifest, budget)? {
+        Some(text) => {
+            let mut p = parse_manifest(&text, &manifest)?;
+            if let Some(i) = read_profile_text(&dir.join("instructions.md"), budget)?
+                && !i.trim().is_empty()
+            {
+                p.instructions = Some(i.trim().to_string());
+            }
+            p
+        }
+        None => plugin_profile(dir, name_hint, budget)?,
+    };
     let mut issues = Vec::new();
-    for (file, is_dir) in list_profile_dir(&dir.join("rules"))? {
+    for (file, is_dir) in list_profile_dir(&dir.join(PLUGIN_RULES))? {
         let Some(stem) = file
             .strip_suffix(".md")
             .or_else(|| file.strip_suffix(".mdc"))
@@ -407,7 +497,8 @@ fn load_with_limit(dir: &Path, limit: u64) -> Result<Profile> {
             issues.push(format!("rules/{file}: invalid file name"));
             continue;
         }
-        let text = read_profile_text(&dir.join("rules").join(&file), budget)?.unwrap_or_default();
+        let text =
+            read_profile_text(&dir.join(PLUGIN_RULES).join(&file), budget)?.unwrap_or_default();
         p.rules.push(rule_from_markdown(stem, &text));
     }
     for (file, is_dir) in list_profile_dir(&dir.join("commands"))? {
@@ -811,6 +902,111 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rule_glob_aliases_read_the_same() {
+        let want = vec!["src/**/*.ts".to_string(), "test/**/*.ts".to_string()];
+        for text in [
+            "---\nglobs: src/**/*.ts, test/**/*.ts\n---\nx\n",
+            "---\nglobs:\n  - src/**/*.ts\n  - test/**/*.ts\n---\nx\n",
+            "---\npaths:\n  - \"src/**/*.ts\"\n  - \"test/**/*.ts\"\n---\nx\n",
+            "---\napplyTo: \"src/**/*.ts,test/**/*.ts\"\n---\nx\n",
+        ] {
+            let r = rule_from_markdown("r", text);
+            assert_eq!(r.globs, want, "{text}");
+            assert_eq!(r.always_apply, None);
+        }
+    }
+
+    fn write(dir: &Path, rel: &str, text: &str) {
+        let p = dir.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, text).unwrap();
+    }
+
+    #[test]
+    fn plugins_load_without_a_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("My Plugin");
+        write(&dir, "rules/plain.md", "Plain.\n");
+        write(&dir, "commands/go.md", "Go.\n");
+        write(&dir, "skills/s/SKILL.md", "---\ndescription: S\n---\nS.\n");
+        write(&dir, "instructions.md", "Not part of a plugin.\n");
+        let p = load(&dir).unwrap();
+        assert_eq!(p.name, "my-plugin");
+        assert_eq!(p.rules.len(), 1);
+        assert_eq!(p.commands.len(), 1);
+        assert_eq!(p.skills.len(), 1);
+        assert!(p.instructions.is_none() && p.mcp_servers.is_empty() && p.settings.is_empty());
+        assert!(!dir.join(MANIFEST).exists());
+        assert!(is_plugin(&dir));
+        assert_eq!(load_named(&dir, "Repo.Name").unwrap().name, "repo.name");
+
+        // A plugin manifest's name wins; .claude-plugin/ before the root file.
+        write(&dir, "plugin.json", r#"{"name": "root-name"}"#);
+        assert_eq!(load(&dir).unwrap().name, "root-name");
+        write(
+            &dir,
+            ".claude-plugin/plugin.json",
+            r#"{"name": "claude-name", "description": "D"}"#,
+        );
+        let p = load_named(&dir, "hint").unwrap();
+        assert_eq!(p.name, "claude-name");
+        assert_eq!(p.description.as_deref(), Some("D"));
+        assert!(p.warnings.is_empty());
+
+        // A manifest that can't be used falls back to the directory, with a warning.
+        write(&dir, ".claude-plugin/plugin.json", "not json");
+        let p = load(&dir).unwrap();
+        assert_eq!(p.name, "my-plugin");
+        assert_eq!(p.warnings.len(), 1);
+        write(&dir, ".claude-plugin/plugin.json", r#"{"name": " "}"#);
+        let p = load(&dir).unwrap();
+        assert_eq!(p.name, "my-plugin");
+        assert!(p.warnings[0].contains("'name'"), "{:?}", p.warnings);
+    }
+
+    #[test]
+    fn neither_profile_nor_plugin_says_both() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        for setup in [
+            None,
+            Some(("README.md", "x")),
+            Some(("rules/notes.txt", "x")),
+            Some(("rules", "a file, not a directory")),
+        ] {
+            let _ = fs::remove_dir_all(dir.join("rules"));
+            let _ = fs::remove_file(dir.join("rules"));
+            if let Some((rel, text)) = setup {
+                write(dir, rel, text);
+            }
+            let err = load(dir).unwrap_err().to_string();
+            assert!(
+                err.contains("kitbag init") && err.contains("rules/"),
+                "{setup:?}: {err}"
+            );
+        }
+        // An empty rules/ is still a plugin if its manifest names it.
+        fs::remove_file(dir.join("rules")).unwrap();
+        fs::create_dir(dir.join("rules")).unwrap();
+        write(dir, "plugin.json", r#"{"name": "empty"}"#);
+        assert_eq!(load(dir).unwrap().name, "empty");
+    }
+
+    #[test]
+    fn profiles_with_a_manifest_load_as_before() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write(dir, MANIFEST, "kitbag = 1\nname = \"prof\"\n");
+        write(dir, "instructions.md", "Be brief.\n");
+        write(dir, "rules/r.md", "R.\n");
+        write(dir, "plugin.json", r#"{"name": "ignored"}"#);
+        let p = load_named(dir, "hint").unwrap();
+        assert_eq!(p.name, "prof");
+        assert_eq!(p.instructions.as_deref(), Some("Be brief."));
+        assert!(!is_plugin(dir));
+    }
+
+    #[test]
     fn total_profile_size_is_capped() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join(MANIFEST), "kitbag = 1\nname = \"me\"\n").unwrap();
@@ -819,8 +1015,10 @@ mod tests {
         for i in 0..4 {
             fs::write(dir.path().join(format!("skills/big/{i}.bin")), [b'x'; 1000]).unwrap();
         }
-        assert!(load_with_limit(dir.path(), 10_000).is_ok());
-        let err = load_with_limit(dir.path(), 3_000).unwrap_err().to_string();
+        assert!(load_with_limit(dir.path(), 10_000, None).is_ok());
+        let err = load_with_limit(dir.path(), 3_000, None)
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("in total, the most a profile may hold"),
             "{err}"
