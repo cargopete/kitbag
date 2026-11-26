@@ -915,7 +915,7 @@ fn secret_path_segments(host: &str, segs: &[&str], entropy: bool) -> Vec<usize> 
             && seg.chars().any(|c| c.is_ascii_uppercase())
             && seg.chars().any(|c| c.is_ascii_lowercase())
             && seg.chars().any(|c| c.is_ascii_digit());
-        let hex = entropy && hex_token(seg) && !names_a_commit(&host, prev(1));
+        let hex = entropy && hex_token(seg) && !names_a_commit(&host, prev(1), seg);
         if known || strong_secret_kind(seg).is_some() || random || hex {
             out.push(i);
         }
@@ -938,8 +938,9 @@ fn hex_token(seg: &str) -> bool {
 /// Full commit SHAs (40 hex digits, 64 for SHA-256 repositories) appear in
 /// paths where they name a commit, not a credential: after `commit`, `blob`,
 /// `tree`, `raw` and the like, and on hosts that serve files by commit
-/// (`raw.githubusercontent.com/<owner>/<repo>/<sha>/<file>`).
-fn names_a_commit(host: &str, prev: Option<&str>) -> bool {
+/// (`raw.githubusercontent.com/<owner>/<repo>/<sha>/<file>`). Any other
+/// length can't be a full SHA, so it is redacted wherever it appears.
+fn names_a_commit(host: &str, prev: Option<&str>, seg: &str) -> bool {
     const WORDS: &[&str] = &[
         "commit", "commits", "tree", "blob", "raw", "blame", "src", "archive", "compare", "rev",
         "revision", "sha", "ref", "refs",
@@ -949,6 +950,9 @@ fn names_a_commit(host: &str, prev: Option<&str>) -> bool {
         "gist.githubusercontent.com",
         "codeload.github.com",
     ];
+    if seg.len() != 40 && seg.len() != 64 {
+        return false;
+    }
     prev.is_some_and(|p| WORDS.contains(&p.to_ascii_lowercase().as_str()))
         || HOSTS.contains(&host.split(':').next().unwrap_or(host))
 }
@@ -2133,6 +2137,11 @@ mod tests {
             format!("https://mcp.example.com/{}/sse", tok32.to_ascii_uppercase()),
             // A 40-digit token outside a commit position.
             format!("https://hooks.example.com/notify/{tok40}"),
+            // A 32-digit token can't be a full SHA, even after a commit word
+            // or on a host that serves files by commit.
+            format!("https://mcp.example.com/src/{tok32}/sse"),
+            format!("https://mcp.example.com/raw/{tok32}/sse"),
+            format!("https://raw.githubusercontent.com/o/r/{tok32}/server.js"),
         ] {
             let (v, found) = redact_url("s", &url);
             assert!(v.contains("${S_URL_TOKEN}"), "{url} -> {v}");
@@ -2151,6 +2160,7 @@ mod tests {
             format!("https://github.com/o/r/tree/{tok40}/src"),
             format!("https://raw.githubusercontent.com/o/r/{tok40}/server.js"),
             format!("https://x.example/o/r/archive/{tok40}"),
+            format!("https://x.example/o/r/commit/{}", &tok40.repeat(2)[..64]),
         ] {
             assert_eq!(redact_url("s", &url), (url.clone(), vec![]), "{url}");
         }
