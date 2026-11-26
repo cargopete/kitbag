@@ -233,6 +233,8 @@ pub struct SkillFile {
     /// Path relative to the skill directory, `/`-separated.
     pub path: String,
     pub content: Vec<u8>,
+    /// Had the executable bit set (Unix); kept when the skill is applied.
+    pub executable: bool,
 }
 
 /// An agent skill: a directory with `SKILL.md` and optional supporting files.

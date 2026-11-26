@@ -265,6 +265,47 @@ impl ApplyArgs {
     }
 }
 
+/// Does this argument look like a profile source (path or git URL) rather
+/// than a list of MCP server names? A bare word only counts when it is a
+/// directory holding a `kitbag.toml`, so `--allow-git-mcp docs` keeps meaning
+/// the server `docs` even when the current directory has a `docs/` folder.
+fn looks_like_source(arg: &str) -> bool {
+    arg.contains(['/', '\\', ':'])
+        || arg.starts_with(['.', '~'])
+        || arg.ends_with(".git")
+        || std::path::Path::new(arg)
+            .join(crate::profile_io::MANIFEST)
+            .is_file()
+}
+
+/// A bare `--allow-git-mcp` followed by the profile source would otherwise
+/// swallow the source as a server name. Rewrite it to `--allow-git-mcp=*`
+/// (all servers) when the next argument looks like a source.
+pub fn normalize_args<I>(args: I) -> Vec<std::ffi::OsString>
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    let mut out: Vec<std::ffi::OsString> = Vec::new();
+    let mut args = args.into_iter().peekable();
+    while let Some(a) = args.next() {
+        if a == "--" {
+            out.push(a);
+            out.extend(args);
+            break;
+        }
+        if a == "--allow-git-mcp"
+            && args
+                .peek()
+                .is_some_and(|n| n.to_str().is_some_and(looks_like_source))
+        {
+            out.push("--allow-git-mcp=*".into());
+        } else {
+            out.push(a);
+        }
+    }
+    out
+}
+
 /// Target label of notes about the profile as a whole.
 const PROFILE_NOTE: &str = "profile";
 
@@ -820,6 +861,14 @@ fn plan_apply(
     } else {
         SecretsMode::Resolve
     });
+    // Skill scripts from someone else's repository are not made executable
+    // unless the source is trusted, like shell snippets.
+    let mut exec_dropped = false;
+    if untrusted {
+        for f in profile.skills.iter_mut().flat_map(|s| s.files.iter_mut()) {
+            exec_dropped |= std::mem::take(&mut f.executable);
+        }
+    }
     let opts = ApplyOptions {
         overwrite: !a.no_overwrite,
         secrets,
@@ -857,6 +906,13 @@ fn plan_apply(
             ),
         });
     }
+    if exec_dropped && !plan.targets.is_empty() {
+        plan.notes.push(adapters::Note {
+            level: adapters::Level::Info,
+            target: PROFILE_NOTE.to_string(),
+            message: "skill scripts are not marked executable, because the profile comes from a remote repository (pass --trust-source to keep the executable bit)".to_string(),
+        });
+    }
     for (target, d) in dropped {
         if plan.targets.contains(&target) || (target == PROFILE_NOTE && !plan.targets.is_empty()) {
             plan.notes.push(adapters::Note {
@@ -869,6 +925,16 @@ fn plan_apply(
         }
     }
     Ok((profile, plan))
+}
+
+fn print_skipped(plan: &Plan) {
+    if !plan.skipped.is_empty() {
+        println!(
+            "{} {} (see the notes below for why)",
+            paint(YELLOW, "Skipped:"),
+            plan.skipped.join(", ")
+        );
+    }
 }
 
 fn where_label(env: &Env) -> String {
@@ -906,11 +972,31 @@ fn present(
     if plan.changes.is_empty() {
         if plan.targets.is_empty() {
             println!("Nothing to apply.");
+            print_skipped(plan);
         } else if plan.withheld.is_empty() {
-            println!(
-                "{} every target already matches the profile.",
-                paint(GREEN, "Up to date:")
-            );
+            let kept = plan
+                .notes
+                .iter()
+                .filter(|n| n.message.contains("because --no-overwrite was given"))
+                .count();
+            if kept > 0 {
+                println!(
+                    "Nothing written; kept {kept} existing item(s) because of --no-overwrite."
+                );
+                print_skipped(plan);
+            } else if !plan.skipped.is_empty() {
+                println!(
+                    "{} {} already matches the profile.",
+                    paint(GREEN, "Up to date:"),
+                    plan.targets.join(", ")
+                );
+                print_skipped(plan);
+            } else {
+                println!(
+                    "{} every target already matches the profile.",
+                    paint(GREEN, "Up to date:")
+                );
+            }
         } else {
             println!("Nothing to write without the MCP servers listed below.");
         }
@@ -1344,6 +1430,7 @@ fn cmd_sync(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, s: &SyncArgs) -
         }
     }
     plan.notes.extend(pulled_notes);
+    plan.skipped.extend(skipped.iter().cloned());
     for id in &skipped {
         plan.notes.push(adapters::Note {
             level: adapters::Level::Warn,
@@ -1477,6 +1564,11 @@ fn check_file(path: &Path) -> Option<String> {
 
 fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
     let env = &ctx.env;
+    let chosen = if t.to == "detected" {
+        None
+    } else {
+        Some(select_targets(&t.to, env, "to")?)
+    };
     let mut problems = 0;
     println!(
         "{}",
@@ -1514,6 +1606,11 @@ fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
 
     println!("\n{}", paint(BOLD, "Tools"));
     for a in adapters::all() {
+        if let Some(chosen) = &chosen
+            && !chosen.iter().any(|c| c.id() == a.id())
+        {
+            continue;
+        }
         if !a.scopes().contains(&env.scope) {
             continue;
         }

@@ -46,6 +46,8 @@ struct Staged {
 pub struct PlanFs {
     staged: BTreeMap<PathBuf, Staged>,
     base: Option<PathBuf>,
+    /// Files to give the executable bit when written (Unix).
+    executable: std::collections::BTreeSet<PathBuf>,
     /// With confinement: the canonical form of `base`. Every write must land under it.
     root: Option<PathBuf>,
 }
@@ -392,6 +394,7 @@ impl PlanFs {
         PlanFs {
             staged: BTreeMap::new(),
             base: Some(base.to_path_buf()),
+            executable: Default::default(),
             root: confine.then(|| base.canonicalize().unwrap_or_else(|_| base.to_path_buf())),
         }
     }
@@ -531,6 +534,18 @@ impl PlanFs {
             },
         );
         Ok(())
+    }
+
+    /// Mark a file written by this plan as executable (Unix; ignored elsewhere).
+    pub fn mark_executable(&mut self, path: &Path) -> Result<()> {
+        let real = self.real_path(path)?;
+        self.executable.insert(real);
+        Ok(())
+    }
+
+    /// Files planned to be written with the executable bit.
+    pub fn executables(&self) -> std::collections::BTreeSet<PathBuf> {
+        self.executable.clone()
     }
 
     /// Planned changes, in path order, excluding no-op writes.

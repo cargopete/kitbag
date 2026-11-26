@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use serde_json::{Map, Value};
 
 use super::{ApplyOptions, Captured, Env, SecretsMode, Work};
@@ -220,6 +220,20 @@ pub fn skill_with_required_frontmatter(skill: &Skill) -> Skill {
     s
 }
 
+/// Whether a file has an executable bit set (always false off Unix).
+pub fn skill_file_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 pub fn write_skill(
     work: &mut Work,
     dir: &Path,
@@ -249,10 +263,27 @@ pub fn write_skill(
     for f in &skill.files {
         let path = join_rel(dir, &f.path);
         let cur = work.fs.read_bytes(&path)?;
+        if f.path != "SKILL.md"
+            && cur.is_some()
+            && cur.as_deref() != Some(f.content.as_slice())
+            && !opts.overwrite
+        {
+            work.warn(
+                target,
+                format!(
+                    "kept existing skill file {} because --no-overwrite was given",
+                    path.display()
+                ),
+            );
+            continue;
+        }
         if cur.as_deref() != Some(f.content.as_slice())
             && check_redacted(work, &path, cur.as_deref(), &f.content, target)
         {
             work.fs.write(&path, f.content.clone())?;
+            if f.executable {
+                work.fs.mark_executable(&path)?;
+            }
             wrote = true;
         }
     }
@@ -269,6 +300,7 @@ pub fn upsert_block_file(
     path: &Path,
     id: &str,
     content: Option<&str>,
+    overwrite: bool,
     target: &str,
 ) -> Result<()> {
     let cur = work.fs.read(path)?;
@@ -289,6 +321,19 @@ pub fn upsert_block_file(
     }
     let next = block::upsert(cur.as_deref(), id, content);
     if Some(next.as_str()) != cur.as_deref() {
+        let has_block = cur
+            .as_deref()
+            .is_some_and(|t| block::split(t).blocks.iter().any(|(b, _)| b == id));
+        if has_block && content.is_some() && !overwrite {
+            work.warn(
+                target,
+                format!(
+                    "kept existing kitbag block '{id}' in {} because --no-overwrite was given",
+                    path.display()
+                ),
+            );
+            return Ok(());
+        }
         if let Some(c) = content.filter(|c| has_redaction_marker(c)) {
             let _ = check_redacted(work, path, None, c.as_bytes(), target);
         }
@@ -317,12 +362,19 @@ pub fn write_instructions(
         .map(|i| block::without_paragraphs_in(i, &outside))
         .filter(|c| !c.trim().is_empty());
     work.track(target, path, Some(&opts.block_id), "instructions".into());
-    upsert_block_file(work, path, &opts.block_id, content.as_deref(), target)?;
+    upsert_block_file(
+        work,
+        path,
+        &opts.block_id,
+        content.as_deref(),
+        opts.overwrite,
+        target,
+    )?;
     if fold_rules {
         let folded = block::fold_rules(&profile.rules);
         let id = format!("{}{RULES_BLOCK_SUFFIX}", opts.block_id);
         work.track(target, path, Some(&id), "rules".into());
-        upsert_block_file(work, path, &id, folded.as_deref(), target)?;
+        upsert_block_file(work, path, &id, folded.as_deref(), opts.overwrite, target)?;
     }
     Ok(())
 }
@@ -1011,6 +1063,27 @@ pub fn add_command(cap: &mut Captured, mut c: Command, target: &str) {
     }
 }
 
+/// Remember which file a flattened name came from; two different files that
+/// flatten to the same name (`team-build.md`, `team/build.md`) are an error
+/// rather than one silently replacing the other.
+pub fn claim_name(
+    seen: &mut std::collections::BTreeMap<String, String>,
+    dir: &Path,
+    rel: &str,
+    name: &str,
+) -> Result<()> {
+    if let Some(prev) = seen.insert(name.to_string(), rel.to_string())
+        && prev != rel
+    {
+        bail!(
+            "{} and {} both flatten to the name '{name}'; rename one of them",
+            join_rel(dir, &prev).display(),
+            join_rel(dir, rel).display()
+        );
+    }
+    Ok(())
+}
+
 /// `frontend/component.md` -> `frontend-component`.
 pub fn name_from_rel(rel: &str, ext: &str) -> String {
     rel.strip_suffix(ext)
@@ -1043,6 +1116,7 @@ pub fn capture_markdown_dir(
     if cap.escapes(dir, target) {
         return Ok(());
     }
+    let mut seen = std::collections::BTreeMap::new();
     for rel in walk_files(dir, 500)? {
         if !rel.ends_with(ext) {
             continue;
@@ -1052,6 +1126,7 @@ pub fn capture_markdown_dir(
             continue;
         };
         let name = name_from_rel(&rel, ext);
+        claim_name(&mut seen, dir, &rel, &name)?;
         if !is_valid_name(&name) {
             cap.warn(
                 target,
@@ -1161,7 +1236,11 @@ pub fn capture_skills_dir(cap: &mut Captured, dir: &Path, target: &str) -> Resul
                 }
                 Err(e) => e.into_bytes(),
             };
-            files.push(SkillFile { path: rel, content });
+            files.push(SkillFile {
+                path: rel,
+                content,
+                executable: skill_file_executable(&path),
+            });
         }
         if broken {
             cap.warn(
@@ -1246,6 +1325,7 @@ mod tests {
             files: vec![SkillFile {
                 path: "SKILL.md".into(),
                 content: b"---\nlicense: MIT\n---\nBody\n".to_vec(),
+                executable: false,
             }],
         };
         let out = skill_with_required_frontmatter(&s);
