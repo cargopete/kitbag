@@ -285,7 +285,9 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
    is skipped with a warning. A skill directory that is itself a link (say into a git
    checkout) works as usual.
    Two servers with different secrets under the same key get separate variables
-   (`API_KEY`, `MONGO_API_KEY`), and identical secrets share one.
+   (`API_KEY`, `MONGO_API_KEY`), and identical secrets share one. Two different secrets
+   that would get the same name, in one server or across servers, get a numbered one
+   (`API_KEY_2`) instead of sharing it.
 2. **The profile is checked before it is written.** If anything still looks like a credential
    (the same checks as capture), kitbag refuses to write the profile at all. `kitbag doctor`
    runs the same check on any profile.

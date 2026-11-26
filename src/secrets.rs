@@ -590,24 +590,69 @@ static URL_USERINFO: LazyLock<Regex> = LazyLock::new(|| {
 static URL_QUERY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"([?&])([^=&#\s]+)=([^&#\s]*)").expect("valid regex"));
 
+/// SHA-256 of a redacted secret, so identical secrets can share one variable
+/// while different ones never do.
+pub fn fingerprint(secret: &str) -> String {
+    crate::txn::sha256(Some(secret.as_bytes())).unwrap_or_default()
+}
+
+/// The redactions of one MCP server, and the env var names given out so far.
+/// The same secret keeps its name; a different secret that would get a name
+/// already taken gets a numbered one (`API_KEY_2`), so two secrets never end
+/// up sharing a variable.
+#[derive(Default)]
+struct Found {
+    redactions: Vec<Redaction>,
+    /// Env var name -> fingerprint of the secret it stands for.
+    names: HashMap<String, String>,
+}
+
+impl Found {
+    /// Record that the secret at `location` is replaced by a reference to a
+    /// variable named like `want`; returns the variable's name.
+    fn add(&mut self, location: &str, want: String, reason: &'static str, secret: &str) -> String {
+        let fp = fingerprint(secret);
+        let mut name = want.clone();
+        let mut n = 1;
+        while let Some(taken) = self.names.get(&name) {
+            if *taken == fp {
+                break;
+            }
+            n += 1;
+            name = format!("{want}_{n}");
+        }
+        self.names.entry(name.clone()).or_insert_with(|| fp.clone());
+        self.redactions.push(Redaction {
+            location: location.to_string(),
+            env_var: name.clone(),
+            reason,
+            fingerprint: Some(fp),
+        });
+        name
+    }
+}
+
 /// Replace secret-looking values in an MCP server definition with env references.
 pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Redaction>) {
     let mut s = input.clone();
-    let mut out = Vec::new();
+    let mut found = Found::default();
     let loc = format!("mcp_servers.{server_name}");
 
     // `${API_KEY:-literal}`: the literal is written wherever API_KEY is unset.
+    // The variable keeps its name: it is the user's own.
     let locations: Vec<String> = s.strings().into_iter().map(|(l, _)| l).collect();
     for l in locations {
         s.map_string_at(&l, |v| {
             REF_RE
                 .replace_all(v, |c: &Captures| match c.get(2) {
                     Some(fb) if classify(Some(&c[1]), fb.as_str()).is_some() => {
-                        out.push(Redaction {
+                        let fp = fingerprint(fb.as_str());
+                        found.names.entry(c[1].to_string()).or_insert(fp.clone());
+                        found.redactions.push(Redaction {
                             location: format!("{loc}.{l}"),
                             env_var: c[1].to_string(),
                             reason: "secret-fallback",
-                            fingerprint: None,
+                            fingerprint: Some(fp),
                         });
                         reference(&c[1])
                     }
@@ -618,27 +663,13 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
     }
 
     for (k, v) in s.env.iter_mut() {
+        let at = format!("{loc}.env.{k}");
         if let Some(reason) = classify(Some(k), v) {
-            let env_var = env_var_name(&[k]);
+            let env_var = found.add(&at, env_var_name(&[k]), reason, v);
             *v = reference(&env_var);
-            out.push(Redaction {
-                location: format!("{loc}.env.{k}"),
-                env_var,
-                reason,
-                fingerprint: None,
-            });
         } else if URL_LIKE.is_match(v) {
             // `API_BASE = "https://x/v1?token=..."`: keep the URL, lose the token.
-            let (value, found) = redact_url(server_name, v);
-            *v = value;
-            for (env_var, reason) in found {
-                out.push(Redaction {
-                    location: format!("{loc}.env.{k}"),
-                    env_var,
-                    reason,
-                    fingerprint: None,
-                });
-            }
+            *v = redact_url_into(server_name, v, &at, &mut found);
         }
     }
 
@@ -660,34 +691,28 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
             } else {
                 k.as_str()
             };
-            let env_var = env_var_name(&[server_name, part]);
+            let env_var = found.add(
+                &format!("{loc}.headers.{k}"),
+                env_var_name(&[server_name, part]),
+                reason,
+                &raw,
+            );
             *v = match scheme {
                 Some(sc) => format!("{sc} {}", reference(&env_var)),
                 None => reference(&env_var),
             };
-            out.push(Redaction {
-                location: format!("{loc}.headers.{k}"),
-                env_var,
-                reason,
-                fingerprint: None,
-            });
         }
     }
 
     let mut n = 0;
     for i in 0..s.args.len() {
         let a = s.args[i].clone();
+        let at = format!("{loc}.args[{i}]");
         if let Some(c) = FLAG_EQ.captures(&a) {
             // `--header=Authorization: Bearer ...`
-            match redact_header_arg(server_name, &c[2]) {
-                HeaderArg::Redacted(new, env_var, reason) => {
+            match redact_header_arg(server_name, &c[2], &at, &mut found) {
+                HeaderArg::Redacted(new) => {
                     s.args[i] = format!("{}={new}", &c[1]);
-                    out.push(Redaction {
-                        location: format!("{loc}.args[{i}]"),
-                        env_var,
-                        reason,
-                        fingerprint: None,
-                    });
                     continue;
                 }
                 HeaderArg::Referenced => continue,
@@ -696,27 +721,13 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
             let flag = c[1].trim_start_matches('-').to_string();
             if URL_LIKE.is_match(&c[2]) && !is_secret_name(&flag) {
                 // `--endpoint=https://host/sse?api_key=...`
-                let (value, found) = redact_url(server_name, &c[2]);
+                let value = redact_url_into(server_name, &c[2], &at, &mut found);
                 s.args[i] = format!("{}={value}", &c[1]);
-                for (env_var, reason) in found {
-                    out.push(Redaction {
-                        location: format!("{loc}.args[{i}]"),
-                        env_var,
-                        reason,
-                        fingerprint: None,
-                    });
-                }
                 continue;
             }
             if let Some(reason) = classify(Some(&flag), &c[2]) {
-                let env_var = env_var_name(&[server_name, &flag]);
+                let env_var = found.add(&at, env_var_name(&[server_name, &flag]), reason, &c[2]);
                 s.args[i] = format!("{}={}", &c[1], reference(&env_var));
-                out.push(Redaction {
-                    location: format!("{loc}.args[{i}]"),
-                    env_var,
-                    reason,
-                    fingerprint: None,
-                });
             }
             continue;
         }
@@ -726,39 +737,19 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
         // `NAME=value` (docker -e, env-style wrappers).
         if let Some(c) = ASSIGN.captures(&a) {
             if let Some(reason) = classify(Some(&c[1]), &c[2]) {
-                let env_var = env_var_name(&[&c[1]]);
+                let env_var = found.add(&at, env_var_name(&[&c[1]]), reason, &c[2]);
                 s.args[i] = format!("{}={}", &c[1], reference(&env_var));
-                out.push(Redaction {
-                    location: format!("{loc}.args[{i}]"),
-                    env_var,
-                    reason,
-                    fingerprint: None,
-                });
             } else if URL_LIKE.is_match(&c[2]) {
-                let (value, found) = redact_url(server_name, &c[2]);
+                let value = redact_url_into(server_name, &c[2], &at, &mut found);
                 s.args[i] = format!("{}={value}", &c[1]);
-                for (env_var, reason) in found {
-                    out.push(Redaction {
-                        location: format!("{loc}.args[{i}]"),
-                        env_var,
-                        reason,
-                        fingerprint: None,
-                    });
-                }
             }
             continue;
         }
         // `Header-Name: value` (mcp-remote --header, curl-style wrappers).
         if !URL_LIKE.is_match(&a) {
-            match redact_header_arg(server_name, &a) {
-                HeaderArg::Redacted(new, env_var, reason) => {
+            match redact_header_arg(server_name, &a, &at, &mut found) {
+                HeaderArg::Redacted(new) => {
                     s.args[i] = new;
-                    out.push(Redaction {
-                        location: format!("{loc}.args[{i}]"),
-                        env_var,
-                        reason,
-                        fingerprint: None,
-                    });
                     continue;
                 }
                 // `X-Api-Key:${KEY}` is already safe; the entropy check below
@@ -769,17 +760,10 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
         }
         // URLs: credentials in userinfo or query parameters.
         if URL_LIKE.is_match(&a) {
-            let (value, found) = redact_url(server_name, &a);
-            if !found.is_empty() {
+            let before = found.redactions.len();
+            let value = redact_url_into(server_name, &a, &at, &mut found);
+            if found.redactions.len() > before {
                 s.args[i] = value;
-                for (env_var, reason) in found {
-                    out.push(Redaction {
-                        location: format!("{loc}.args[{i}]"),
-                        env_var,
-                        reason,
-                        fingerprint: None,
-                    });
-                }
                 continue;
             }
         }
@@ -787,53 +771,41 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
             .then(|| FLAG.captures(&s.args[i - 1]).map(|c| c[1].to_string()))
             .flatten();
         if let Some(reason) = classify(prev_flag.as_deref(), &a) {
-            let env_var = match &prev_flag {
+            let want = match &prev_flag {
                 Some(f) => env_var_name(&[server_name, f]),
                 None => {
                     n += 1;
                     env_var_name(&[server_name, &format!("secret_{n}")])
                 }
             };
+            let env_var = found.add(&at, want, reason, &a);
             s.args[i] = reference(&env_var);
-            out.push(Redaction {
-                location: format!("{loc}.args[{i}]"),
-                env_var,
-                reason,
-                fingerprint: None,
-            });
         }
     }
 
     if let Some(url) = s.url.clone() {
-        let (value, found) = redact_url(server_name, &url);
-        if !found.is_empty() {
+        let before = found.redactions.len();
+        let value = redact_url_into(server_name, &url, &format!("{loc}.url"), &mut found);
+        if found.redactions.len() > before {
             s.url = Some(value);
-            for (env_var, reason) in found {
-                out.push(Redaction {
-                    location: format!("{loc}.url"),
-                    env_var,
-                    reason,
-                    fingerprint: None,
-                });
-            }
         }
     }
 
     if let Some(cmd) = s.command.clone()
         && let Some(kind) = strong_secret_kind(&cmd)
     {
-        let env_var = env_var_name(&[server_name, "command_secret"]);
         let p = STRONG.iter().find(|p| p.kind == kind).expect("kind exists");
-        s.command = Some(p.re.replace_all(&cmd, reference(&env_var)).into_owned());
-        out.push(Redaction {
-            location: format!("{loc}.command"),
-            env_var,
-            reason: kind,
-            fingerprint: None,
-        });
+        let at = format!("{loc}.command");
+        let want = env_var_name(&[server_name, "command_secret"]);
+        let replaced =
+            p.re.replace_all(&cmd, |c: &Captures| {
+                reference(&found.add(&at, want.clone(), kind, &c[0]))
+            })
+            .into_owned();
+        s.command = Some(replaced);
     }
 
-    (s, out)
+    (s, found.redactions)
 }
 
 /// What [`redact_header_arg`] made of an argument.
@@ -842,12 +814,12 @@ enum HeaderArg {
     NotHeader,
     /// A header whose value already uses an env reference.
     Referenced,
-    /// (`Name: ${VAR}`, VAR, reason).
-    Redacted(String, String, &'static str),
+    /// `Name: ${VAR}`, recorded in the [`Found`] passed in.
+    Redacted(String),
 }
 
 /// `Name: value` with a secret value -> `Name: ${VAR}`.
-fn redact_header_arg(server_name: &str, arg: &str) -> HeaderArg {
+fn redact_header_arg(server_name: &str, arg: &str, at: &str, found: &mut Found) -> HeaderArg {
     let Some(c) = HEADER_ARG.captures(arg) else {
         return HeaderArg::NotHeader;
     };
@@ -877,13 +849,13 @@ fn redact_header_arg(server_name: &str, arg: &str) -> HeaderArg {
     } else {
         name.as_str()
     };
-    let env_var = env_var_name(&[server_name, part]);
+    let env_var = found.add(at, env_var_name(&[server_name, part]), reason, &raw);
     let v = match scheme {
         Some(sc) => format!("{sc} {}", reference(&env_var)),
         None => reference(&env_var),
     };
     // Keep the original separator: mcp-remote documents `Name:value` without a space.
-    HeaderArg::Redacted(format!("{name}{sep}{v}"), env_var, reason)
+    HeaderArg::Redacted(format!("{name}{sep}{v}"))
 }
 
 fn percent_decode(s: &str) -> String {
@@ -981,22 +953,24 @@ fn names_a_commit(host: &str, prev: Option<&str>) -> bool {
         || HOSTS.contains(&host.split(':').next().unwrap_or(host))
 }
 
-/// Replace the secret path segments `hits` of `segs` with `with(n)`. A Slack
-/// webhook's `T…/B…/<secret>` tail is one credential, so it becomes one value.
+/// Replace the secret path segments `hits` of `segs` with `with(n, secret)`.
+/// A Slack webhook's `T…/B…/<secret>` tail is one credential, so it becomes
+/// one value.
 fn replace_segments(
     host: &str,
     segs: &mut Vec<String>,
     hits: &[usize],
-    mut with: impl FnMut(usize) -> String,
+    mut with: impl FnMut(usize, &str) -> String,
 ) {
     let slack = host.eq_ignore_ascii_case("hooks.slack.com") && hits.len() > 1;
     if slack && hits.iter().enumerate().all(|(n, i)| *i == n + 1) {
+        let tail = segs[1..].join("/");
         segs.truncate(1);
-        segs.push(with(0));
+        segs.push(with(0, &tail));
         return;
     }
     for (n, i) in hits.iter().enumerate() {
-        segs[*i] = with(n);
+        segs[*i] = with(n, &segs[*i].clone());
     }
 }
 
@@ -1017,17 +991,35 @@ fn split_url(url: &str) -> Option<(&str, &str, &str)> {
     ))
 }
 
+/// `url` with its credentials replaced by env references, as (new URL,
+/// [(variable, reason)]). Used on its own in tests.
+#[cfg(test)]
 fn redact_url(server_name: &str, url: &str) -> (String, Vec<(String, &'static str)>) {
-    let mut found = Vec::new();
+    let mut found = Found::default();
+    let value = redact_url_into(server_name, url, "url", &mut found);
+    let list = found
+        .redactions
+        .into_iter()
+        .map(|r| (r.env_var, r.reason))
+        .collect();
+    (value, list)
+}
+
+/// `url` with its credentials replaced by env references, each recorded in
+/// `found` at location `at`.
+fn redact_url_into(server_name: &str, url: &str, at: &str, found: &mut Found) -> String {
     let value = URL_USERINFO
         .replace(url, |c: &Captures| {
             if strip_refs(&c[3]).is_empty() {
                 return c[0].to_string();
             }
-            let env_var = env_var_name(&[server_name, "password"]);
-            let r = format!("{}{}:{}@", &c[1], &c[2], reference(&env_var));
-            found.push((env_var, "url-credentials"));
-            r
+            let env_var = found.add(
+                at,
+                env_var_name(&[server_name, "password"]),
+                "url-credentials",
+                &c[3],
+            );
+            format!("{}{}:{}@", &c[1], &c[2], reference(&env_var))
         })
         .into_owned();
     let value = URL_TOKEN_USER
@@ -1035,10 +1027,13 @@ fn redact_url(server_name: &str, url: &str) -> (String, Vec<(String, &'static st
             if !token_username(&c[2]) {
                 return c[0].to_string();
             }
-            let env_var = env_var_name(&[server_name, "url_user_token"]);
-            let r = format!("{}{}@", &c[1], reference(&env_var));
-            found.push((env_var, "url-username-token"));
-            r
+            let env_var = found.add(
+                at,
+                env_var_name(&[server_name, "url_user_token"]),
+                "url-username-token",
+                &c[2],
+            );
+            format!("{}{}@", &c[1], reference(&env_var))
         })
         .into_owned();
     let value = match split_url(&value) {
@@ -1047,16 +1042,14 @@ fn redact_url(server_name: &str, url: &str) -> (String, Vec<(String, &'static st
             let mut segs: Vec<String> = path.split('/').skip(1).map(str::to_string).collect();
             let view: Vec<&str> = segs.iter().map(String::as_str).collect();
             let hits = secret_path_segments(host, &view, true);
-            replace_segments(host, &mut segs, &hits, |n| {
+            replace_segments(host, &mut segs, &hits, |n, secret| {
                 let suffix = if n == 0 {
                     String::new()
                 } else {
                     format!("_{}", n + 1)
                 };
-                let env_var = env_var_name(&[server_name, &format!("url_token{suffix}")]);
-                let r = reference(&env_var);
-                found.push((env_var, "url-path-token"));
-                r
+                let want = env_var_name(&[server_name, &format!("url_token{suffix}")]);
+                reference(&found.add(at, want, "url-path-token", secret))
             });
             if hits.is_empty() {
                 value.clone()
@@ -1067,21 +1060,19 @@ fn redact_url(server_name: &str, url: &str) -> (String, Vec<(String, &'static st
         }
         None => value,
     };
-    let value = URL_QUERY
+    URL_QUERY
         .replace_all(&value, |c: &Captures| {
             let decoded = percent_decode(&c[3]);
             match classify(Some(&c[2]), &decoded) {
                 Some(reason) => {
-                    let env_var = env_var_name(&[server_name, &c[2]]);
-                    let r = format!("{}{}={}", &c[1], &c[2], reference(&env_var));
-                    found.push((env_var, reason));
-                    r
+                    let env_var =
+                        found.add(at, env_var_name(&[server_name, &c[2]]), reason, &decoded);
+                    format!("{}{}={}", &c[1], &c[2], reference(&env_var))
                 }
                 None => c[0].to_string(),
             }
         })
-        .into_owned();
-    (value, found)
+        .into_owned()
 }
 
 static TEXT_URL: LazyLock<Regex> = LazyLock::new(|| {
@@ -1112,7 +1103,7 @@ fn redact_text_urls(text: &str, marker: &str) -> (String, bool) {
             let view: Vec<&str> = segs.iter().map(String::as_str).collect();
             let hits = secret_path_segments(host, &view, false);
             hit |= !hits.is_empty();
-            replace_segments(host, &mut segs, &hits, |_| marker.to_string());
+            replace_segments(host, &mut segs, &hits, |_, _| marker.to_string());
             let path: String = segs.iter().map(|s| format!("/{s}")).collect();
             let rest = URL_QUERY.replace_all(rest, |q: &Captures| {
                 let v = percent_decode(&q[3]);
@@ -1974,13 +1965,70 @@ mod tests {
         assert_eq!(r.args[3], "Authorization: Bearer ${REMOTE_TOKEN}");
         assert_eq!(r.args[5], "DB_PASSWORD=${DB_PASSWORD}");
         assert_eq!(r.args[7], "X-Api-Key:${REMOTE_X_API_KEY}");
-        assert_eq!(r.args[8], "--header=Authorization: Bearer ${REMOTE_TOKEN}");
+        // A different token than args[3], so a variable of its own.
+        assert_eq!(
+            r.args[8],
+            "--header=Authorization: Bearer ${REMOTE_TOKEN_2}"
+        );
         assert_eq!(r.args[9], "postgresql://admin:${REMOTE_PASSWORD}@db/app");
         assert_eq!(red.len(), 6);
         let flat = r.args.join(" ");
         for leak in ["a8f3kd93", "hunter2", "s3cr3t", "abcabc", "lowentropy"] {
             assert!(!flat.contains(leak), "{leak} in {flat}");
         }
+    }
+
+    #[test]
+    fn different_secrets_in_one_server_get_different_variables() {
+        let s = McpServer {
+            command: Some("docker".into()),
+            args: vec![
+                "-e".into(),
+                "API_KEY=FakeFirstSecret111".into(),
+                "postgres://u:FakePwOne1@db/a".into(),
+                "postgres://u:FakePwTwo2@db/b?password=FakePwThree3".into(),
+                "https://x.example/sse?token=FakeTokA1b2&token=FakeTokC3d4".into(),
+                // The same secret again shares its variable.
+                "--header=Authorization: Bearer FakeBearer123".into(),
+                "Authorization: Bearer FakeBearer123".into(),
+            ],
+            env: [("API_KEY".to_string(), "FakeSecondSecret22".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let (r, red) = redact_server("svc", &s);
+        assert_eq!(r.env["API_KEY"], "${API_KEY}");
+        assert_eq!(r.args[1], "API_KEY=${API_KEY_2}");
+        assert_eq!(r.args[2], "postgres://u:${SVC_PASSWORD}@db/a");
+        assert_eq!(
+            r.args[3],
+            "postgres://u:${SVC_PASSWORD_2}@db/b?password=${SVC_PASSWORD_3}"
+        );
+        assert_eq!(
+            r.args[4],
+            "https://x.example/sse?token=${SVC_TOKEN}&token=${SVC_TOKEN_2}"
+        );
+        assert_eq!(r.args[5], "--header=Authorization: Bearer ${SVC_TOKEN_3}");
+        assert_eq!(r.args[6], "Authorization: Bearer ${SVC_TOKEN_3}");
+        // One variable per secret, one fingerprint per variable.
+        let mut by_var: HashMap<&str, &Option<String>> = HashMap::new();
+        for x in &red {
+            assert!(x.fingerprint.is_some(), "{x:?}");
+            let prev = by_var.insert(&x.env_var, &x.fingerprint);
+            assert!(prev.is_none_or(|p| p == &x.fingerprint), "{x:?}");
+        }
+        assert_eq!(by_var.len(), 8);
+        // Two tokens of the same kind in the command.
+        let s = McpServer {
+            command: Some(format!("run ghp_{} ghp_{}", "A".repeat(36), "B".repeat(36))),
+            ..Default::default()
+        };
+        let (r, _) = redact_server("svc", &s);
+        assert_eq!(
+            r.command.as_deref(),
+            Some("run ${SVC_COMMAND_SECRET} ${SVC_COMMAND_SECRET_2}")
+        );
     }
 
     #[test]

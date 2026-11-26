@@ -84,6 +84,22 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
                     a.id(),
                     format!("MCP server '{n}' differs from the one already captured from another tool; kept the first"),
                 )),
+                // Alike once redacted, but holding other secrets: the profile's
+                // variables stand for the first tool's values.
+                Some(_) if {
+                    let prefix = format!("mcp_servers.{n}.");
+                    let fps = |list: &[Redaction]| -> Vec<(String, Option<String>)> {
+                        list.iter()
+                            .filter(|r| r.location.starts_with(&prefix))
+                            .map(|r| (r.location.clone(), r.fingerprint.clone()))
+                            .collect()
+                    };
+                    fps(&c.redactions) != fps(&out.redactions)
+                } => out.notes.push(note(
+                    Level::Warn,
+                    a.id(),
+                    format!("MCP server '{n}' holds different secret values than the one already captured from another tool; kept the first, so its variables stand for the first tool's values"),
+                )),
                 Some(_) => {}
             }
         }
@@ -175,7 +191,18 @@ fn dedupe_env_vars(out: &mut CaptureResult) {
             // The same secret value in two servers can share one variable.
             Some((_, Some(fp))) if r.fingerprint.as_ref() == Some(fp) => {}
             Some(_) => {
-                let new = env_var_name(&[&server, &r.env_var]);
+                // The prefixed name may be taken too (server `a` with `B_C`
+                // and server `a_b` with `C` both make `A_B_C`).
+                let base = env_var_name(&[&server, &r.env_var]);
+                let mut new = base.clone();
+                let mut n = 1;
+                while owner
+                    .get(&new)
+                    .is_some_and(|(o, fp)| *o != server || fp.is_none() || *fp != r.fingerprint)
+                {
+                    n += 1;
+                    new = format!("{base}_{n}");
+                }
                 let field = r.location[format!("mcp_servers.{server}.").len()..].to_string();
                 let (old_ref, new_ref) = (reference(&r.env_var), reference(&new));
                 if let Some(s) = out.profile.mcp_servers.get_mut(&server) {
