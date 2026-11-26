@@ -1026,6 +1026,115 @@ fn instruction_rows(ctx: &Ctx, plan: &Plan) -> Result<Vec<(StatusRow, engine::It
     Ok(rows)
 }
 
+/// MCP servers, commands and skills of `profile` (as loaded, before any
+/// remote restrictions) compared with each planned target: names only.
+fn inventory_rows(
+    env: &Env,
+    profile: &Profile,
+    plan: &Plan,
+    targets: &[&'static dyn Adapter],
+) -> Vec<StatusRow> {
+    use crate::sync::State;
+    let mut rows = Vec::new();
+    for a in targets {
+        let id = a.id();
+        if !plan.targets.iter().any(|t| t == id) {
+            continue;
+        }
+        // What the tool has now; without it, "added" and "changed" can't be told apart.
+        let present = a.capture(env).ok().map(|c| c.profile);
+        let changed_server = |n: &str| {
+            plan.servers
+                .iter()
+                .chain(&plan.withheld)
+                .any(|s| s.name == n && s.targets.iter().any(|t| t == id))
+        };
+        let changed_item =
+            |item: &str| plan.changed_items.iter().any(|(t, i)| t == id && i == item);
+        let mut add = |item: String, in_profile: bool, changed: bool, in_tool: Option<bool>| {
+            let state = match (in_profile, changed, in_tool) {
+                (true, true, Some(false)) => State::Added,
+                (true, true, _) => State::Changed,
+                (true, false, Some(false)) => return,
+                (true, false, _) => State::InSync,
+                (false, _, Some(true)) => State::Removed,
+                (false, _, _) => return,
+            };
+            rows.push(StatusRow {
+                target: id.to_string(),
+                item,
+                path: None,
+                state,
+                detail: None,
+            });
+        };
+        if a.supports(env.scope, Feature::Mcp) != adapters::Support::None {
+            let mut names: Vec<&String> = profile
+                .mcp_servers
+                .iter()
+                .filter(|(_, s)| s.applies_to(id))
+                .map(|(n, _)| n)
+                .collect();
+            if let Some(p) = &present {
+                names.extend(
+                    p.mcp_servers
+                        .keys()
+                        .filter(|n| !profile.mcp_servers.contains_key(*n)),
+                );
+            }
+            for n in names {
+                let in_profile = profile.mcp_servers.get(n).is_some_and(|s| s.applies_to(id));
+                let in_tool = present.as_ref().map(|p| p.mcp_servers.contains_key(n));
+                add(format!("mcp {n}"), in_profile, changed_server(n), in_tool);
+            }
+        }
+        for (feature, kind, wanted, have) in [
+            (
+                Feature::Commands,
+                "command",
+                profile
+                    .commands
+                    .iter()
+                    .map(|c| c.name.clone())
+                    .collect::<Vec<_>>(),
+                present.as_ref().map(|p| {
+                    p.commands
+                        .iter()
+                        .map(|c| c.name.clone())
+                        .collect::<Vec<_>>()
+                }),
+            ),
+            (
+                Feature::Skills,
+                "skill",
+                profile.skills.iter().map(|s| s.name.clone()).collect(),
+                present
+                    .as_ref()
+                    .map(|p| p.skills.iter().map(|s| s.name.clone()).collect()),
+            ),
+        ] {
+            if a.supports(env.scope, feature) == adapters::Support::None {
+                continue;
+            }
+            let mut names = wanted.clone();
+            if let Some(h) = &have {
+                names.extend(h.iter().filter(|n| !wanted.contains(n)).cloned());
+            }
+            for n in names {
+                let item = format!("{kind} {n}");
+                let in_tool = have.as_ref().map(|h| h.contains(&n));
+                add(
+                    item.clone(),
+                    wanted.contains(&n),
+                    changed_item(&item),
+                    in_tool,
+                );
+            }
+        }
+    }
+    rows
+}
+
 fn print_status(rows: &[StatusRow], env: &Env, as_json: bool) -> Result<()> {
     if as_json {
         let v: Vec<_> = rows
@@ -1079,9 +1188,11 @@ fn cmd_status(ctx: &Ctx, src: Option<&str>, s: &StatusArgs) -> Result<i32> {
         Some(src) => {
             let (resolved, profile) = load_source(src, s.path.as_deref())?;
             let targets = select_targets(s.to.as_deref().unwrap_or("detected"), env, "to")?;
+            let loaded = profile.clone();
             let (profile, plan) =
                 plan_apply(ctx, &resolved, profile, &targets, &ApplyArgs::default())?;
             rows.extend(instruction_rows(ctx, &plan)?.into_iter().map(|(r, _)| r));
+            rows.extend(inventory_rows(env, &loaded, &plan, &targets));
             let has_text = profile.instructions.is_some() || !profile.rules.is_empty();
             for a in &targets {
                 if has_text
@@ -1147,6 +1258,24 @@ fn cmd_status(ctx: &Ctx, src: Option<&str>, s: &StatusArgs) -> Result<i32> {
     }
     let drift = rows.iter().any(|r| r.state.is_drift());
     print_status(&rows, env, s.json)?;
+    if !s.json
+        && rows.iter().any(|r| {
+            matches!(
+                r.state,
+                crate::sync::State::Added
+                    | crate::sync::State::Changed
+                    | crate::sync::State::Removed
+            )
+        })
+    {
+        println!(
+            "\n{}",
+            paint(
+                DIM,
+                "MCP servers, commands, skills: added = in the profile, not in the tool; changed = differs from the profile; removed = in the tool, not in the profile (sync leaves it)."
+            )
+        );
+    }
     if !s.json && rows.iter().any(|r| r.state.is_conflict()) {
         println!(
             "\n{}",

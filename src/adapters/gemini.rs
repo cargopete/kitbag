@@ -17,7 +17,7 @@ use super::common::{
     add_command, capture_instructions, capture_skills_dir, import_server, merge_json_servers,
     merge_json_settings, name_from_rel, pick_settings, read_text_item, render_server,
     safe_settings, server_entries, server_from_json, servers_for, skill_with_required_frontmatter,
-    str_of, write_instructions, write_owned, write_skill,
+    str_of, write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
@@ -248,13 +248,13 @@ impl Adapter for GeminiCli {
                 work.warn(ID, format!("command '{}' uses positional $N placeholders; Gemini CLI only supports {{{{args}}}}", c.name));
             }
             let path = p.commands.join(format!("{}.toml", c.name));
-            write_owned(
+            super::common::write_command(
                 work,
                 &path,
                 command_toml(c).as_bytes(),
                 opts,
                 ID,
-                &format!("command '{}'", c.name),
+                &c.name,
             )?;
         }
         for s in &profile.skills {

@@ -29,6 +29,7 @@ pub const RULES_BLOCK_SUFFIX: &str = ":rules";
 // Applying
 
 /// Write a whole file kitbag owns (one rule / command / skill file).
+/// Returns whether the plan writes it.
 pub fn write_owned(
     work: &mut Work,
     path: &Path,
@@ -36,11 +37,11 @@ pub fn write_owned(
     opts: &ApplyOptions,
     target: &str,
     label: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let cur = work.fs.read_bytes(path)?;
     if cur.as_deref() == Some(content) || cur.as_deref().is_some_and(|c| same_markdown(c, content))
     {
-        return Ok(());
+        return Ok(false);
     }
     if cur.is_some() && !opts.overwrite {
         work.warn(
@@ -50,12 +51,36 @@ pub fn write_owned(
                 path.display()
             ),
         );
-        return Ok(());
+        return Ok(false);
     }
     if !check_redacted(work, path, cur.as_deref(), content, target) {
-        return Ok(());
+        return Ok(false);
     }
-    work.fs.write(path, content.to_vec())
+    work.fs.write(path, content.to_vec())?;
+    Ok(true)
+}
+
+/// Write one command (or Codex prompt) file, noting it for `kitbag status`.
+pub fn write_command(
+    work: &mut Work,
+    path: &Path,
+    content: &[u8],
+    opts: &ApplyOptions,
+    target: &str,
+    name: &str,
+) -> Result<()> {
+    if write_owned(
+        work,
+        path,
+        content,
+        opts,
+        target,
+        &format!("command '{name}'"),
+    )? {
+        work.changed_items
+            .push((target.to_string(), format!("command {name}")));
+    }
+    Ok(())
 }
 
 /// Markdown files that differ only in frontmatter formatting (quoting, key
@@ -220,6 +245,7 @@ pub fn write_skill(
         );
         return Ok(());
     }
+    let mut wrote = false;
     for f in &skill.files {
         let path = join_rel(dir, &f.path);
         let cur = work.fs.read_bytes(&path)?;
@@ -227,7 +253,12 @@ pub fn write_skill(
             && check_redacted(work, &path, cur.as_deref(), &f.content, target)
         {
             work.fs.write(&path, f.content.clone())?;
+            wrote = true;
         }
+    }
+    if wrote {
+        work.changed_items
+            .push((target.to_string(), format!("skill {}", skill.name)));
     }
     Ok(())
 }
@@ -306,7 +337,8 @@ pub fn write_rule(
     name: &str,
 ) -> Result<()> {
     work.track(target, path, None, format!("rule {name}"));
-    write_owned(work, path, content, opts, target, &format!("rule '{name}'"))
+    write_owned(work, path, content, opts, target, &format!("rule '{name}'"))?;
+    Ok(())
 }
 
 /// Copy of `s` with every string rendered in `style`.
@@ -808,6 +840,9 @@ pub fn import_server(
         return;
     }
     let mut s = server.map_strings(|v| normalize_refs(v, bare_dollar));
+    if let Some((home, os)) = &cap.home {
+        s = s.map_strings(|v| crate::portable::to_home_relative(v, home, *os));
+    }
     if s.command.is_none() && s.url.is_none() {
         cap.warn(
             target,
@@ -1153,6 +1188,9 @@ pub fn pick_settings(cap: &mut Captured, target: &str, doc: &Map<String, Value>)
         .filter(|(k, v)| keys.contains(&k.as_str()) && !v.is_null())
         .map(|(k, v)| (k.clone(), strip_nulls(v)))
         .collect();
+    if let Some((home, os)) = &cap.home {
+        crate::portable::capture_settings(target, &mut picked, home, *os);
+    }
     // Permission rules such as `Bash(curl -H 'X-Api-Key: ...' *)` can embed secrets.
     let mut kinds = Vec::new();
     for v in picked.values_mut() {

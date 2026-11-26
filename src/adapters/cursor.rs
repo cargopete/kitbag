@@ -18,7 +18,7 @@ use serde_json::{Map, Value, json};
 use super::common::{
     add_command, add_instructions, add_rule, capture_instructions, capture_skills_dir,
     import_server, merge_json_servers, name_from_rel, read_text_item, render_server,
-    server_entries, server_from_json, servers_for, write_instructions, write_owned, write_skill,
+    server_entries, server_from_json, servers_for, write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::block;
@@ -355,14 +355,7 @@ impl Adapter for Cursor {
             // Cursor commands are plain markdown: the body is the prompt.
             let path = p.commands.join(format!("{}.md", c.name));
             let body = format!("{}\n", c.body.trim());
-            write_owned(
-                work,
-                &path,
-                body.as_bytes(),
-                opts,
-                ID,
-                &format!("command '{}'", c.name),
-            )?;
+            super::common::write_command(work, &path, body.as_bytes(), opts, ID, &c.name)?;
         }
         for s in &profile.skills {
             let s = super::common::skill_with_required_frontmatter(s);

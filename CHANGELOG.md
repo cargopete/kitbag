@@ -10,6 +10,7 @@ All notable changes to this project are documented here. The format follows
 
 - `kitbag status [PROFILE]` shows, per tool, whether each managed instructions block and rule file is `in sync`, `tool edited`, `profile changed`, `both changed`, `not applied` or `unsupported` (Cursor user rules live in app storage). Applies now record a hash of each one in the state directory. Without a profile it shows what changed since the last apply. `--exit-code` exits 1 on drift, `--json` prints rows (#32).
 - `kitbag sync PROFILE` applies profile changes but leaves a tool whose managed instructions were edited by hand alone, and says so. `--from <target>` pulls that tool's edits back into the profile (redacted like capture, refused if anything still looks like a secret) and applies them to the others, in one undoable transaction; `--overwrite` replaces the edits, with backups. From a git source, `--from` is refused (#32).
+- Second-machine sync: capture writes paths under the home directory as `~/...` in MCP server commands, arguments, env values and `cwd` and in Claude Code `permissions`, and apply expands them for the machine it runs on. Re-applying to the original machine changes nothing. `kitbag status PROFILE` also lists MCP servers, commands and skills that were added, changed or exist only in the tool, by name. The README has a "Second machine / dotfiles" section with the recommended flow (#31).
 
 ### Security
 

@@ -188,6 +188,9 @@ pub struct Work {
     /// Instruction blocks and rule files kitbag manages, written or not, for
     /// drift detection (`kitbag status`).
     pub tracked: Vec<Tracked>,
+    /// (target, `command <name>` / `skill <name>`) of every command and skill
+    /// the plan writes.
+    pub changed_items: Vec<(String, String)>,
 }
 
 /// One instructions item kitbag manages in a tool: a managed block in a
@@ -241,6 +244,9 @@ pub struct Captured {
     /// At project scope: the project root as given and canonicalised. Files
     /// under it are only read if their real location is inside it too.
     pub project: Option<(PathBuf, PathBuf)>,
+    /// This machine's home directory and OS: paths under it are captured as
+    /// `~/...` (see [`crate::portable`]).
+    pub home: Option<(PathBuf, Os)>,
 }
 
 impl Captured {
@@ -255,6 +261,7 @@ impl Captured {
         });
         Captured {
             project,
+            home: Some((env.home.clone(), env.os)),
             ..Self::default()
         }
     }

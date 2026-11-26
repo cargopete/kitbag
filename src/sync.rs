@@ -181,6 +181,13 @@ pub enum State {
     NotApplied,
     /// The tool keeps this somewhere kitbag can't read or write.
     Unsupported,
+    /// An MCP server, command or skill in the profile, not in the tool yet.
+    Added,
+    /// An MCP server, command or skill that differs from the profile.
+    Changed,
+    /// An MCP server, command or skill in the tool but not in the profile
+    /// (apply is additive, so sync leaves it; not counted as drift).
+    Removed,
 }
 
 impl State {
@@ -192,12 +199,15 @@ impl State {
             State::BothChanged => "both changed",
             State::NotApplied => "not applied",
             State::Unsupported => "unsupported",
+            State::Added => "added",
+            State::Changed => "changed",
+            State::Removed => "removed",
         }
     }
 
     /// Does this differ from the profile (or, without one, from the last apply)?
     pub fn is_drift(self) -> bool {
-        !matches!(self, State::InSync | State::Unsupported)
+        !matches!(self, State::InSync | State::Unsupported | State::Removed)
     }
 
     /// Would syncing this overwrite an edit made in the tool?

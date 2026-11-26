@@ -17,6 +17,7 @@ pub mod frontmatter;
 pub mod model;
 pub mod plan_fs;
 pub mod policy;
+pub mod portable;
 pub mod profile_io;
 pub mod secrets;
 pub mod source;

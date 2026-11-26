@@ -23,7 +23,7 @@ use super::common::{
     MdKind, Resolver, capture_instructions, capture_markdown_dir, capture_skills_dir,
     import_server, merge_server_def, safe_settings, server_entries, servers_for,
     skill_with_required_frontmatter, str_of, string_list, string_map, write_instructions,
-    write_owned, write_skill,
+    write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::toml::{
@@ -454,7 +454,7 @@ impl Adapter for Codex {
                     for c in &profile.commands {
                         let path = dir.join(format!("{}.md", c.name));
                         let body = command_to_markdown(c, false);
-                        write_owned(work, &path, body.as_bytes(), opts, ID, &format!("prompt '{}'", c.name))?;
+                        super::common::write_command(work, &path, body.as_bytes(), opts, ID, &c.name)?;
                     }
                     work.info(ID, "commands were written as Codex custom prompts (/prompts:<name>); Codex now recommends skills for reusable workflows");
                 }

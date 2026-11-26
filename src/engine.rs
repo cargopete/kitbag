@@ -227,6 +227,8 @@ pub struct Plan {
     /// The instruction blocks and rule files kitbag manages, as they are now
     /// and as the plan leaves them (for `status` and `sync`).
     pub items: Vec<Item>,
+    /// (target, `command <name>` / `skill <name>`) of commands and skills the plan writes.
+    pub changed_items: Vec<(String, String)>,
 }
 
 /// One managed instructions item (see [`crate::adapters::Tracked`]).
@@ -250,6 +252,9 @@ pub fn plan(
     env: &Env,
     opts: &ApplyOptions,
 ) -> Result<Plan> {
+    // `~/...` paths in the profile point into this machine's home directory.
+    let expanded = crate::portable::expand_profile(profile, env);
+    let profile = &expanded;
     // Project configs may come from someone else's repository: never let a
     // symlink in it redirect a write outside the project.
     let mut work = Work {
@@ -424,6 +429,7 @@ pub fn plan(
         withheld: Vec::new(),
         risky,
         items,
+        changed_items: work.changed_items,
     })
 }
 

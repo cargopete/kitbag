@@ -394,6 +394,50 @@ either:
 From a git source, `sync` works like `apply` with all the remote restrictions, and `--from`
 is refused, since kitbag can't write back into a repository it cloned.
 
+## Second machine / dotfiles
+
+The recommended way to keep several machines in step:
+
+1. On the machine that's set up, capture into a directory of your dotfiles (or a private)
+   repository and commit it:
+
+   ```sh
+   kitbag capture -o ~/dotfiles/kitbag
+   git -C ~/dotfiles add kitbag && git -C ~/dotfiles commit -m "agent setup"
+   ```
+
+2. On the other machine, clone the repository and sync from the clone:
+
+   ```sh
+   git clone git@github.com:you/dotfiles ~/dotfiles
+   kitbag sync ~/dotfiles/kitbag --to all
+   ```
+
+   A local clone is a local profile, so it is trusted like any directory you own: its MCP
+   servers, permission rules and hooks apply as written. Applying `github:you/dotfiles --path
+   kitbag` directly is treated as a remote profile instead: MCP servers need `--allow-git-mcp`
+   (or `--trust-source`, which also lifts the other remote restrictions).
+
+3. Later, `kitbag status ~/dotfiles/kitbag` shows what drifted on this machine: managed
+   instructions and rules (see [Keeping instructions in sync](#keeping-instructions-in-sync)),
+   and MCP servers, commands and skills that were `added` to the profile, `changed`, or exist
+   only in the tool (`removed`), by name only. If you edited `CLAUDE.md` on this machine,
+   `kitbag sync ~/dotfiles/kitbag --from claude-code` pulls the edit into the profile; commit
+   and push it from there.
+
+What keeps a profile portable:
+
+- **Home-relative paths.** Capture writes paths under your home directory as `~/...` in MCP
+  server commands, arguments (also `--flag=/home/you/x`), env values and `cwd`, and in Claude
+  Code's `permissions` (`Read(//home/you/notes/**)` becomes `Read(~/notes/**)`, which Claude
+  Code understands). Apply expands `~` to the home directory of the machine it runs on, with
+  that OS's separators, so a profile captured on macOS applies on Linux or Windows.
+- **No machine-specific state.** Only the keys in the settings allow-list are captured, so
+  Codex's `[projects."/abs/path"]` trust entries and Claude Code's per-project state in
+  `~/.claude.json` stay on the machine.
+- **Secrets travel separately.** The profile holds `${VAR}` references; set the variables on
+  each machine (`kitbag doctor ~/dotfiles/kitbag` lists the ones that are unset).
+
 ## Commands
 
 | Command | What it does |

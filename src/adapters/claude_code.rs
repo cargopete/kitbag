@@ -16,7 +16,7 @@ use serde_json::{Map, Value, json};
 use super::common::{
     MdKind, capture_instructions, capture_markdown_dir, capture_skills_dir, import_server,
     merge_json_servers, merge_json_settings, pick_settings, render_server, safe_settings,
-    server_entries, server_from_json, servers_for, write_instructions, write_owned, write_skill,
+    server_entries, server_from_json, servers_for, write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
@@ -224,6 +224,49 @@ fn note_not_carried(cap: &mut Captured, env: &Env) {
     }
 }
 
+/// Permission rules and directories the settings file already has in another
+/// spelling of the same home path (`Read(~/x)` and `Read(//home/me/x)`) are
+/// not added again: lists are merged as a union.
+fn drop_equivalent_paths(settings: &mut Map<String, Value>, existing: &Value, env: &Env) {
+    let Some(Value::Object(perms)) = settings.get_mut("permissions") else {
+        return;
+    };
+    let norm = |list: &str, v: &str| match list {
+        "additionalDirectories" => crate::portable::to_home_relative(v, &env.home, env.os),
+        _ => crate::portable::rule_to_home_relative(v, &env.home, env.os),
+    };
+    for list in ["allow", "ask", "deny", "additionalDirectories"] {
+        let have: Vec<String> = existing
+            .get("permissions")
+            .and_then(|p| p.get(list))
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(|v| norm(list, v))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(Value::Array(items)) = perms.get_mut(list) {
+            items.retain(|r| {
+                r.as_str().is_none_or(|v| {
+                    let n = norm(list, v);
+                    // Keep exact matches (a no-op in the merge); drop other spellings.
+                    !have.contains(&n) || existing_has_exact(existing, list, v)
+                })
+            });
+        }
+    }
+}
+
+fn existing_has_exact(existing: &Value, list: &str, v: &str) -> bool {
+    existing
+        .get("permissions")
+        .and_then(|p| p.get(list))
+        .and_then(Value::as_array)
+        .is_some_and(|a| a.iter().any(|x| x.as_str() == Some(v)))
+}
+
 /// A permission rule capture redacted (`Bash(curl -H 'X-Api-Key: [REDACTED]' *)`)
 /// no longer matches what it used to, so it isn't added.
 fn drop_redacted_rules(settings: &mut Map<String, Value>, work: &mut Work) {
@@ -418,14 +461,7 @@ impl Adapter for ClaudeCode {
         for c in &profile.commands {
             let path = p.commands.join(format!("{}.md", c.name));
             let body = command_to_markdown(c, true);
-            write_owned(
-                work,
-                &path,
-                body.as_bytes(),
-                opts,
-                ID,
-                &format!("command '{}'", c.name),
-            )?;
+            super::common::write_command(work, &path, body.as_bytes(), opts, ID, &c.name)?;
         }
         for s in &profile.skills {
             write_skill(work, &p.skills.join(&s.name), s, opts, ID)?;
@@ -433,6 +469,11 @@ impl Adapter for ClaudeCode {
 
         let mut settings = safe_settings(profile, ID, work);
         drop_redacted_rules(&mut settings, work);
+        let existing = work.fs.read(&p.settings)?;
+        if let Some(text) = existing {
+            let doc = parse_value(Some(&text), &p.settings)?;
+            drop_equivalent_paths(&mut settings, &doc, env);
+        }
         merge_json_settings(work, &p.settings, &settings, opts, ID)?;
         Ok(())
     }
