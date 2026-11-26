@@ -43,6 +43,8 @@ fn bare_allow_git_mcp_before_the_source_keeps_the_source() {
         .success();
     assert!(sb.read("home/.claude.json").contains("docs-mcp"));
     // Named servers before a source and after `=` still work.
+    // A plain directory with the same name as the server is not a source.
+    fs::create_dir_all(sb.path("docs")).unwrap();
     sb.cli()
         .args([
             "apply",
@@ -335,13 +337,7 @@ fn captured_skill_scripts_keep_the_bit_through_the_profile() {
         .args(["apply", "out", "--to", "codex", "--yes"])
         .assert()
         .success();
-    let applied = sb.path("home/.codex/skills/s/run.sh");
-    if applied.exists() {
-        assert_eq!(
-            fs::metadata(applied).unwrap().permissions().mode() & 0o111,
-            0o111
-        );
-    }
+    assert_eq!(mode("home/.agents/skills/s/run.sh") & 0o111, 0o111);
 }
 
 #[cfg(unix)]

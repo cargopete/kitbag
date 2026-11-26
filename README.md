@@ -195,14 +195,14 @@ machine whenever the tool starts, so servers that a git profile would add, or ch
 applied by default. The plan lists each one under "MCP servers not applied (from a git
 source)" with its command and arguments (or URL) and the names of its env vars and headers.
 Pass `--allow-git-mcp docs,search` (repeatable) to apply the ones you name, `--allow-git-mcp`
-with no value for all of them (a value that looks like a path or URL, or names an existing
-directory, is taken as the source, so `--allow-git-mcp github:me/profile` works; write
-`--allow-git-mcp=NAME` to be explicit), or `--trust-source`, which implies it. Servers already
+with no value for all of them (a value that looks like a path or URL, or names a directory
+with a `kitbag.toml`, is taken as the source, so `--allow-git-mcp github:me/profile` works;
+write `--allow-git-mcp=NAME` to be explicit), or `--trust-source`, which implies it. Servers already
 in place with the same definition are left as they are and aren't listed; servers from a local
 directory apply as written. From a git source, commands and skills that run shell snippets are
 skipped, `hooks` and `allowed-tools` are removed from the frontmatter of the rest, and skill
-scripts are not made executable, unless you pass the same flag. The warning for local profiles names broad rules, judged case-insensitively and ignoring
-extra whitespace: bare tools (`Bash`, `Write`), any command (`Bash(*:*)`), the whole file system
+scripts are not made executable, unless you pass the same flag. The warning for local profiles
+names broad rules, judged case-insensitively and ignoring extra whitespace: bare tools (`Bash`, `Write`), any command (`Bash(*:*)`), the whole file system
 (`Read(//**)`, `Edit(~/**)`), shells, interpreters, package runners and containers with open
 arguments (`Bash(npx:*)`, `Bash(docker run:*)`), and piping into a shell (`… | sh`).
 

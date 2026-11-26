@@ -266,12 +266,16 @@ impl ApplyArgs {
 }
 
 /// Does this argument look like a profile source (path or git URL) rather
-/// than a list of MCP server names?
+/// than a list of MCP server names? A bare word only counts when it is a
+/// directory holding a `kitbag.toml`, so `--allow-git-mcp docs` keeps meaning
+/// the server `docs` even when the current directory has a `docs/` folder.
 fn looks_like_source(arg: &str) -> bool {
     arg.contains(['/', '\\', ':'])
         || arg.starts_with(['.', '~'])
         || arg.ends_with(".git")
-        || std::path::Path::new(arg).is_dir()
+        || std::path::Path::new(arg)
+            .join(crate::profile_io::MANIFEST)
+            .is_file()
 }
 
 /// A bare `--allow-git-mcp` followed by the profile source would otherwise
