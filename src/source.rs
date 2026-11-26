@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use regex::Regex;
 use tempfile::TempDir;
 
-use crate::profile_io::MANIFEST;
+use crate::profile_io::{MANIFEST, PLUGIN_RULES};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitSource {
@@ -145,7 +145,19 @@ pub struct Resolved {
     /// directory, or the git URL without credentials (and the sub-directory,
     /// if any), without the ref or commit.
     pub source: String,
+    /// The name a plugin (a directory without a `kitbag.toml`) gets when its
+    /// manifest names none: the directory's name, or for a git source the
+    /// sub-directory's or repository's, never the temporary clone's.
+    pub name_hint: String,
     _tmp: Option<TempDir>,
+}
+
+/// The last part of a git URL's path, without `.git`: `repo` for
+/// `https://github.com/o/repo.git` or `git@host:o/repo`.
+fn repo_name(url: &str) -> String {
+    let path = url.trim_end_matches('/');
+    let last = path.rsplit(['/', ':']).next().unwrap_or(path);
+    last.strip_suffix(".git").unwrap_or(last).to_string()
 }
 
 fn safe_subdir(sub: &str) -> Result<PathBuf> {
@@ -176,9 +188,14 @@ pub fn resolve(src: &str, subdir: Option<&str>, allow_insecure: bool) -> Result<
         }
         let dir = std::path::absolute(&dir)?;
         let source = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+        let name_hint = source
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         return Ok(Resolved {
             origin: dir.display().to_string(),
             source: source.display().to_string(),
+            name_hint,
             dir,
             remote: false,
             _tmp: None,
@@ -231,12 +248,19 @@ pub fn resolve(src: &str, subdir: Option<&str>, allow_insecure: bool) -> Result<
         }
         None => tmp.path().to_path_buf(),
     };
-    if !dir.join(MANIFEST).exists() {
+    if !dir.join(MANIFEST).exists() && !dir.join(PLUGIN_RULES).is_dir() {
         bail!(
-            "no {MANIFEST} found in {shown}{}",
+            "no {MANIFEST} (a kitbag profile) or {PLUGIN_RULES}/ directory (a plugin) found in {shown}{}",
             sub.as_ref().map(|s| format!(" ({s})")).unwrap_or_default()
         );
     }
+    let name_hint = match &sub {
+        Some(s) => Path::new(s)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        None => repo_name(&shown),
+    };
     let commit = Command::new("git")
         .arg("-C")
         .arg(tmp.path())
@@ -264,6 +288,7 @@ pub fn resolve(src: &str, subdir: Option<&str>, allow_insecure: bool) -> Result<
         dir,
         origin,
         source,
+        name_hint,
         remote: true,
         _tmp: Some(tmp),
     })
@@ -420,6 +445,14 @@ mod tests {
         for ok in ["https://h/x.git", "ssh://h/x", "git@h:x.git", "file:///x"] {
             assert!(!cleartext(ok), "{ok}");
         }
+    }
+
+    #[test]
+    fn repo_names() {
+        assert_eq!(repo_name("https://github.com/o/plugin.git"), "plugin");
+        assert_eq!(repo_name("https://gitlab.com/o/plugin/"), "plugin");
+        assert_eq!(repo_name("git@github.com:o/plugin.git"), "plugin");
+        assert_eq!(repo_name("git@host:plugin"), "plugin");
     }
 
     #[test]

@@ -28,8 +28,10 @@ use crate::why;
 const ABOUT: &str = "Pack your AI agent setup once, unpack it into any coding tool.";
 
 const AFTER_HELP: &str = "\
-Sources (for apply / diff / doctor) are a profile directory or a git URL:
-  ./my-profile   github:you/dotagents   gh:you/dotfiles/agents#main
+Sources (for apply / diff / status / sync / doctor) are a profile directory, a
+plugin directory (rules/<name>.md at its root, no kitbag.toml), or a git URL to
+either:
+  ./my-profile   ./my-plugin   github:you/dotagents   gh:you/dotfiles/agents#main
   https://github.com/you/dotagents.git   git@github.com:you/dotagents.git
 
 Examples:
@@ -97,7 +99,7 @@ enum Cmd {
     },
     /// Apply a profile: shows the plan, then asks before writing anything
     Apply {
-        /// Profile directory or git URL
+        /// Profile or plugin directory, or a git URL to one
         source: String,
         #[command(flatten)]
         targets: TargetArgs,
@@ -112,7 +114,7 @@ enum Cmd {
     },
     /// Show exactly what 'apply' would change (never writes)
     Diff {
-        /// Profile directory or git URL
+        /// Profile or plugin directory, or a git URL to one
         source: String,
         #[command(flatten)]
         targets: TargetArgs,
@@ -125,7 +127,7 @@ enum Cmd {
     /// Show where the instructions and rules in each tool differ from the
     /// profile, or (without PROFILE) changed since the last apply. Never writes
     Status {
-        /// Profile directory or git URL to compare with
+        /// Profile or plugin directory, or a git URL to one, to compare with
         source: Option<String>,
         #[command(flatten)]
         args: StatusArgs,
@@ -133,7 +135,7 @@ enum Cmd {
     /// Apply a profile without overwriting instructions edited in the tool
     /// since the last apply (see 'kitbag status')
     Sync {
-        /// Profile directory or git URL
+        /// Profile or plugin directory, or a git URL to one
         source: String,
         #[command(flatten)]
         targets: TargetArgs,
@@ -158,7 +160,7 @@ enum Cmd {
     },
     /// Check a profile, your environment and the installed tools
     Doctor {
-        /// Profile directory or git URL to check
+        /// Profile or plugin directory, or a git URL to one, to check
         source: Option<String>,
         #[command(flatten)]
         targets: TargetArgs,
@@ -347,15 +349,16 @@ fn git_mcp(all: bool, names: &[String]) -> engine::GitMcp {
 
 /// Does this argument look like a profile source (path or git URL) rather
 /// than a list of MCP server names? A bare word only counts when it is a
-/// directory holding a `kitbag.toml`, so `--allow-git-mcp docs` keeps meaning
-/// the server `docs` even when the current directory has a `docs/` folder.
+/// directory holding a `kitbag.toml` or a plugin's `rules/`, so
+/// `--allow-git-mcp docs` keeps meaning the server `docs` even when the
+/// current directory has a `docs/` folder.
 fn looks_like_source(arg: &str) -> bool {
+    let dir = std::path::Path::new(arg);
     arg.contains(['/', '\\', ':'])
         || arg.starts_with(['.', '~'])
         || arg.ends_with(".git")
-        || std::path::Path::new(arg)
-            .join(crate::profile_io::MANIFEST)
-            .is_file()
+        || dir.join(crate::profile_io::MANIFEST).is_file()
+        || crate::profile_io::is_plugin(dir)
 }
 
 /// A bare `--allow-git-mcp` followed by the profile source would otherwise
@@ -884,7 +887,7 @@ fn load_source(
     allow_insecure: bool,
 ) -> Result<(source::Resolved, Profile)> {
     let resolved = source::resolve(src, path, allow_insecure)?;
-    let profile = profile_io::load(&resolved.dir)?;
+    let profile = profile_io::load_named(&resolved.dir, &resolved.name_hint)?;
     for w in &profile.warnings {
         eprintln!("{} {}", paint(YELLOW, "warning:"), visible_line(w));
     }
@@ -1701,6 +1704,12 @@ fn cmd_sync(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, s: &SyncArgs) -
             "--from can't be used with a git source: kitbag can't write edits back into a repository it cloned. Clone it, sync the local directory with --from, then commit and push"
         );
     }
+    if s.from.is_some() && profile_io::is_plugin(&resolved.dir) {
+        bail!(
+            "--from can't be used with a plugin: kitbag only writes edits back into a profile (a directory with {}). Edit the plugin's rules/ by hand",
+            profile_io::MANIFEST
+        );
+    }
     let targets = select_targets(&t.to, env, "to")?;
     let none = BTreeSet::new();
     let (mut profile, mut plan) = plan_apply(ctx, &resolved, loaded.clone(), &targets, a, &none)?;
@@ -2024,7 +2033,7 @@ fn cmd_doctor(
         println!("\n{}", paint(BOLD, "Profile"));
         // Not load_source: doctor lists the profile's warnings itself.
         let loaded = source::resolve(src, t.path.as_deref(), t.allow_insecure_source)
-            .and_then(|r| profile_io::load(&r.dir).map(|p| (r, p)));
+            .and_then(|r| profile_io::load_named(&r.dir, &r.name_hint).map(|p| (r, p)));
         match loaded {
             Err(e) => {
                 problems += 1;
