@@ -798,9 +798,11 @@ pub fn record_server_write(
 
 /// Should server `name`, which the profile disables for `target`, be removed
 /// from `path`, where its entry is `current`? Only if an earlier apply of the
-/// same profile put it there and it is unchanged since; anything else (added
-/// by hand, by another profile, or edited) stays, and the plan says why. A
-/// removal is noted and recorded.
+/// same profile (same name and source) put it there and it is unchanged
+/// since; anything else (added by hand, by another profile, or edited) stays,
+/// and the plan says why. A profile from a git source also needs the opt-in
+/// for adding servers; without it the removal is held back. A removal is
+/// noted and recorded.
 pub fn remove_skipped_server(
     work: &mut Work,
     opts: &ApplyOptions,
@@ -821,18 +823,28 @@ pub fn remove_skipped_server(
         .iter()
         .find(|r| r.target == target && r.path == real && r.name == name)
         .filter(|r| r.hash.is_some());
-    let file = path.display();
+    let remote = opts.git_removals.is_some();
+    let file = crate::ui::tildify(path, &work.home);
+    let disabled = format!("MCP server '{name}' is disabled for {target} in the profile");
     let keep = match rec {
         None => Some(format!(
-            "MCP server '{name}' is disabled for {target} in the profile, but kitbag has no record of adding it to {file}, so it was left in place; remove it by hand if you don't want it"
+            "{disabled}, but kitbag has no record of adding it to {file}, so it was left in place; remove it by hand if you don't want it"
         )),
         Some(r) if r.profile != work.profile => Some(format!(
-            "MCP server '{name}' is disabled for {target} in the profile, but profile '{}' added it to {file}, so it was left in place",
+            "{disabled}, but profile '{}' added it to {file}, so it was left in place",
             r.profile
+        )),
+        Some(r) if r.source.is_none() && remote => Some(format!(
+            "{disabled}, but kitbag's record of adding it to {file} doesn't say where the profile came from, and this one is from a git source, so it was left in place; remove it by hand if you don't want it"
+        )),
+        Some(r) if r.source.is_some() && r.source != opts.source => Some(format!(
+            "{disabled}, but a profile '{}' from {} added it to {file}, so it was left in place",
+            r.profile,
+            r.source.as_deref().unwrap_or_default()
         )),
         Some(r) if r.hash.as_deref() != Some(crate::sync::entry_hash(current).as_str()) => {
             Some(format!(
-                "MCP server '{name}' is disabled for {target} in the profile, but it was edited in {file} since kitbag added it, so it was left in place; remove it by hand if you don't want it"
+                "{disabled}, but it was edited in {file} since kitbag added it, so it was left in place; remove it by hand if you don't want it"
             ))
         }
         Some(_) if !opts.overwrite => Some(format!(
@@ -842,6 +854,17 @@ pub fn remove_skipped_server(
     };
     if let Some(msg) = keep {
         work.warn(target, msg);
+        return false;
+    }
+    if opts.git_removals.as_ref().is_some_and(|a| !a.allows(name)) {
+        work.warn(
+            target,
+            format!(
+                "{disabled}, but the profile comes from a git source, so it was not removed from {file} (pass --allow-git-mcp {name} to remove it)"
+            ),
+        );
+        work.withheld_removals
+            .push((target.to_string(), name.to_string()));
         return false;
     }
     work.info(

@@ -312,30 +312,43 @@ fn no_overwrite_keeps_disabled_servers() {
 }
 
 #[test]
-fn a_remote_profile_cannot_silently_re_enable_a_server() {
+fn a_remote_profile_needs_the_opt_in_to_remove_or_re_enable_a_server() {
     if !has_git() {
         return;
     }
     let sb = Sandbox::empty();
-    let v1 = sb.git_profile("v1", &[("kitbag.toml", &profile("shared", ""))]);
+    // Each version is a new commit in the same repository.
+    let v1 = sb.git_profile("repo", &[("kitbag.toml", &profile("shared", ""))]);
     let out = apply_remote(&sb, &v1, &["--allow-git-mcp", "heavy,light"]);
     assert!(out.contains("Wrote"), "{out}");
     assert!(cursor_has(&sb, "heavy"));
+    let rec = sb.read("state/applied-servers.json");
+    assert!(rec.contains("\"source\""), "{rec}");
 
-    // The repository now disables it for Cursor: removing it needs no opt-in.
+    // The repository now disables it for Cursor: removing it is held back
+    // until --allow-git-mcp names it, like an addition.
     let v2 = sb.git_profile(
-        "v2",
+        "repo",
         &[(
             "kitbag.toml",
             &profile("shared", "disabled_on = [\"cursor\"]\n"),
         )],
     );
     let out = apply_remote(&sb, &v2, &[]);
+    assert!(
+        out.contains("MCP servers not removed (disabled for these tools in the profile, which is from a git source)")
+            && out.contains("heavy  (cursor)")
+            && out.contains("--allow-git-mcp heavy"),
+        "{out}"
+    );
+    assert!(!out.contains("Up to date"), "{out}");
+    assert!(cursor_has(&sb, "heavy"));
+    let out = apply_remote(&sb, &v2, &["--allow-git-mcp", "heavy"]);
     assert!(out.contains("MCP server 'heavy' removed from"), "{out}");
     assert!(!cursor_has(&sb, "heavy"));
 
     // Enabling it again is an addition, held back like any other.
-    let v3 = sb.git_profile("v3", &[("kitbag.toml", &profile("shared", ""))]);
+    let v3 = sb.git_profile("repo", &[("kitbag.toml", &profile("shared", ""))]);
     let out = apply_remote(&sb, &v3, &[]);
     assert!(
         out.contains("MCP servers not applied (from a git source)") && out.contains("heavy"),
@@ -348,6 +361,108 @@ fn a_remote_profile_cannot_silently_re_enable_a_server() {
         "{out}"
     );
     assert!(cursor_has(&sb, "heavy"));
+}
+
+#[test]
+fn only_the_same_source_removes_a_server() {
+    // A git profile with the same name as a local one can't remove the
+    // servers the local one applied, even with the opt-in.
+    if has_git() {
+        let sb = Sandbox::empty();
+        write_profile(&sb, "p", &profile("shared", ""));
+        apply(&sb, "p", "cursor");
+        let url = sb.git_profile(
+            "r",
+            &[(
+                "kitbag.toml",
+                &profile("shared", "disabled_on = [\"cursor\"]\n"),
+            )],
+        );
+        let out = apply_remote(&sb, &url, &["--trust-source"]);
+        assert!(
+            out.contains("but a profile 'shared' from") && out.contains("left in place"),
+            "{out}"
+        );
+        assert!(cursor_has(&sb, "heavy"));
+    }
+
+    // Nor can another local directory whose profile has the same name.
+    let sb = Sandbox::empty();
+    write_profile(&sb, "p", &profile("shared", ""));
+    apply(&sb, "p", "cursor");
+    write_profile(&sb, "q", &profile("shared", "disabled_on = [\"cursor\"]\n"));
+    let out = apply(&sb, "q", "cursor");
+    assert!(out.contains("but a profile 'shared' from"), "{out}");
+    assert!(cursor_has(&sb, "heavy"));
+
+    // Records from before kitbag recorded the source still match by name
+    // for a local profile.
+    let rec = sb.path("state/applied-servers.json");
+    let mut v: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&rec).unwrap()).unwrap();
+    for r in v.as_array_mut().unwrap() {
+        r.as_object_mut().unwrap().remove("source");
+    }
+    fs::write(&rec, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    let out = apply(&sb, "q", "cursor");
+    assert!(out.contains("MCP server 'heavy' removed from ~"), "{out}");
+    assert!(!cursor_has(&sb, "heavy"));
+}
+
+#[test]
+fn unreadable_records_are_a_warning() {
+    let sb = Sandbox::empty();
+    write_profile(&sb, "p", &profile("shared", ""));
+    apply(&sb, "p", "cursor");
+    fs::write(sb.path("state/applied-servers.json"), "not json").unwrap();
+    write_profile(&sb, "p", &profile("shared", "disabled_on = [\"cursor\"]\n"));
+    let out = apply(&sb, "p", "cursor");
+    assert!(
+        out.contains("applied-servers.json (") && out.contains("so no MCP server is removed"),
+        "{out}"
+    );
+    assert!(out.contains("kitbag has no record of adding it"), "{out}");
+    assert!(cursor_has(&sb, "heavy"));
+}
+
+#[test]
+fn antigravity_servers_can_be_disabled_and_undone() {
+    const AG: &str = "home/.gemini/config/mcp_config.json";
+    let sb = Sandbox::empty();
+    write_profile(&sb, "p", &profile("shared", ""));
+    apply(&sb, "p", "antigravity,cursor");
+    assert!(sb.json(AG)["mcpServers"].get("heavy").is_some());
+    let before = sb.read(AG);
+
+    write_profile(
+        &sb,
+        "p",
+        &profile("shared", "disabled_on = [\"antigravity\"]\n"),
+    );
+    let out = apply(&sb, "p", "antigravity,cursor");
+    assert!(
+        out.contains("MCP server 'heavy' removed from ~")
+            && out.contains("disabled for antigravity in the profile"),
+        "{out}"
+    );
+    let ag = sb.json(AG);
+    assert!(ag["mcpServers"].get("heavy").is_none(), "{ag}");
+    assert!(ag["mcpServers"].get("light").is_some(), "{ag}");
+    assert!(cursor_has(&sb, "heavy"));
+
+    sb.cli().arg("undo").assert().success();
+    assert_eq!(sb.read(AG), before);
+
+    // The allow-list form keeps it out of Antigravity from the start.
+    let sb = Sandbox::empty();
+    write_profile(
+        &sb,
+        "p",
+        &profile("shared", "targets = [\"antigravity\"]\n"),
+    );
+    apply(&sb, "p", "antigravity,cursor");
+    assert!(sb.json(AG)["mcpServers"].get("heavy").is_some());
+    assert!(!cursor_has(&sb, "heavy"));
 }
 
 fn apply_remote(sb: &Sandbox, url: &str, extra: &[&str]) -> String {

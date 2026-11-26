@@ -172,6 +172,14 @@ pub struct ApplyOptions {
     /// [`crate::sync::applied_servers`]). A server the profile disables for a
     /// tool is only removed from it when one of these says kitbag put it there.
     pub applied_servers: Vec<crate::sync::ServerRecord>,
+    /// Where the profile comes from: its local directory, or its git URL
+    /// (without credentials). Recorded with the MCP server entries it writes,
+    /// and only that same source may remove them later.
+    pub source: Option<String>,
+    /// For a profile from a git source, the servers it may remove from a tool
+    /// (the same opt-in as adding them: `--allow-git-mcp` / `--trust-source`).
+    /// `None` for a local profile, which may remove any of its own.
+    pub git_removals: Option<crate::engine::GitMcp>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -192,11 +200,16 @@ pub struct Work {
     pub changed_servers: Vec<(String, String)>,
     /// Name of the profile being applied.
     pub profile: String,
+    /// The home directory, for `~/...` paths in notes.
+    pub home: PathBuf,
     /// (target, server name) of profile servers not applied to that target
     /// because of `targets` / `disabled_on`.
     pub skipped_servers: Vec<(String, String)>,
     /// (target, server name) of MCP server entries the plan removes.
     pub removed_servers: Vec<(String, String)>,
+    /// (target, server name) of MCP server entries a git-sourced profile
+    /// would remove, held back for lack of `--allow-git-mcp`.
+    pub withheld_removals: Vec<(String, String)>,
     /// MCP server entries the plan writes or removes, for the state records.
     pub server_writes: Vec<ServerWrite>,
     /// Instruction blocks and rule files kitbag manages, written or not, for

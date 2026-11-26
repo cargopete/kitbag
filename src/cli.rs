@@ -825,6 +825,31 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
             paint(BOLD, format!("--allow-git-mcp {}", names.join(",")))
         );
     }
+    if !plan.withheld_removals.is_empty() {
+        println!(
+            "\n{}",
+            paint(
+                YELLOW,
+                "MCP servers not removed (disabled for these tools in the profile, which is from a git source):"
+            )
+        );
+        for s in &plan.withheld_removals {
+            println!(
+                "  {}  {}",
+                shown(&s.name),
+                paint(DIM, format!("({})", s.targets.join(", ")))
+            );
+        }
+        let names: Vec<String> = plan
+            .withheld_removals
+            .iter()
+            .map(|s| shown(&s.name))
+            .collect();
+        println!(
+            "  To remove them, pass {} (or name fewer), or --trust-source for everything.",
+            paint(BOLD, format!("--allow-git-mcp {}", names.join(",")))
+        );
+    }
     if !plan.removed_servers.is_empty() {
         println!(
             "\n{}",
@@ -920,14 +945,17 @@ fn plan_apply(
             exec_dropped |= std::mem::take(&mut f.executable);
         }
     }
+    let (applied_servers, records_warning) = crate::sync::applied_servers(&ctx.state_dir, env)?;
+    let allow = a.git_mcp();
     let opts = ApplyOptions {
         overwrite: !a.no_overwrite,
         secrets,
         block_id: slugify(&profile.name),
-        applied_servers: crate::sync::applied_servers(&ctx.state_dir, env)?,
+        applied_servers,
+        source: Some(resolved.source.clone()),
+        git_removals: resolved.remote.then(|| allow.clone()),
     };
     let mut plan = if resolved.remote {
-        let allow = a.git_mcp();
         let unknown: Vec<String> = match &allow {
             engine::GitMcp::Only(names) => names
                 .iter()
@@ -948,6 +976,13 @@ fn plan_apply(
     } else {
         engine::plan(&profile, targets, env, &opts)?
     };
+    if let Some(w) = records_warning {
+        plan.notes.push(adapters::Note {
+            level: adapters::Level::Warn,
+            target: PROFILE_NOTE.to_string(),
+            message: w,
+        });
+    }
     if untrusted && a.secrets.is_none() && !plan.kept_env.is_empty() {
         plan.notes.push(adapters::Note {
             level: adapters::Level::Info,
@@ -1025,7 +1060,7 @@ fn present(
         if plan.targets.is_empty() {
             println!("Nothing to apply.");
             print_skipped(plan);
-        } else if plan.withheld.is_empty() {
+        } else if plan.withheld.is_empty() && plan.withheld_removals.is_empty() {
             let kept = plan
                 .notes
                 .iter()

@@ -189,6 +189,10 @@ pub struct ServerRecord {
     pub project: Option<PathBuf>,
     /// Name of the profile that was applied.
     pub profile: String,
+    /// Where that profile came from (see [`crate::source::Resolved::source`]).
+    /// Records written before kitbag recorded it have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// [`entry_hash`] of the entry as written; `None` when the apply removed it.
     pub hash: Option<String>,
     /// The transaction that wrote it.
@@ -219,18 +223,30 @@ pub fn entry_hash(v: &serde_json::Value) -> String {
     sha256(Some(sorted(v).to_string().as_bytes())).unwrap_or_default()
 }
 
-fn load_servers(state_dir: &Path) -> Result<Vec<ServerRecord>> {
+/// The server records, and a warning when the file can't be parsed (it is
+/// then treated as empty, so nothing is removed, and the next apply replaces it).
+fn load_servers(state_dir: &Path) -> Result<(Vec<ServerRecord>, Option<String>)> {
     let path = state_dir.join(SERVERS_FILE);
     match fs::read_to_string(&path) {
-        Ok(t) => Ok(serde_json::from_str(&t).unwrap_or_default()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Ok(t) => Ok(match serde_json::from_str(&t) {
+            Ok(v) => (v, None),
+            Err(e) => (
+                Vec::new(),
+                Some(format!(
+                    "could not read {} ({e}), so no MCP server is removed for being disabled in the profile; the next apply starts the file afresh",
+                    path.display()
+                )),
+            ),
+        }),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok((Vec::new(), None)),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
 }
 
 /// For every (target, file, server) at `env`'s scope (and project), the
-/// record of the latest apply that still stands (not undone).
-pub fn applied_servers(state_dir: &Path, env: &Env) -> Result<Vec<ServerRecord>> {
+/// record of the latest apply that still stands (not undone), and a warning
+/// if the records can't be read.
+pub fn applied_servers(state_dir: &Path, env: &Env) -> Result<(Vec<ServerRecord>, Option<String>)> {
     let undone: Vec<String> = Store::new(state_dir)
         .list()?
         .into_iter()
@@ -238,7 +254,8 @@ pub fn applied_servers(state_dir: &Path, env: &Env) -> Result<Vec<ServerRecord>>
         .map(|t| t.id)
         .collect();
     let mut latest: BTreeMap<(String, PathBuf, String), ServerRecord> = BTreeMap::new();
-    for r in load_servers(state_dir)? {
+    let (records, warning) = load_servers(state_dir)?;
+    for r in records {
         let matches = r.scope == env.scope.to_string()
             && (env.scope == Scope::User || r.project.as_deref() == Some(env.project.as_path()));
         // Only records of a written transaction count: without one, nothing was written.
@@ -247,7 +264,7 @@ pub fn applied_servers(state_dir: &Path, env: &Env) -> Result<Vec<ServerRecord>>
         }
         latest.insert((r.target.clone(), r.path.clone(), r.name.clone()), r);
     }
-    Ok(latest.into_values().collect())
+    Ok((latest.into_values().collect(), warning))
 }
 
 /// Remember the MCP server entries `plan` wrote or removed, once written as `tx`.
@@ -265,7 +282,7 @@ fn record_servers(
         return Ok(());
     }
     let now = now_ms();
-    let mut all = load_servers(state_dir)?;
+    let mut all = load_servers(state_dir)?.0;
     for w in &plan.server_writes {
         all.push(ServerRecord {
             target: w.target.clone(),
@@ -274,6 +291,7 @@ fn record_servers(
             scope: env.scope.to_string(),
             project: (env.scope == Scope::Project).then(|| env.project.clone()),
             profile: profile.to_string(),
+            source: plan.source.clone(),
             hash: w.hash.clone(),
             tx: Some(tx.to_string()),
             at_ms: now,

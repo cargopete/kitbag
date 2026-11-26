@@ -254,9 +254,14 @@ pub struct Plan {
     /// MCP servers the plan removes from a tool, because the profile now
     /// disables them there (`targets` / `disabled_on`).
     pub removed_servers: Vec<ServerReview>,
+    /// MCP servers a profile from a git source would remove from a tool, held
+    /// back like additions until `--allow-git-mcp` names them.
+    pub withheld_removals: Vec<ServerReview>,
     /// MCP server entries the plan writes or removes, with the real config
     /// file (recorded after a write, see [`crate::sync::record`]).
     pub server_writes: Vec<ServerWrite>,
+    /// Where the profile comes from ([`ApplyOptions::source`]).
+    pub source: Option<String>,
 }
 
 /// One managed instructions item (see [`crate::adapters::Tracked`]).
@@ -291,6 +296,7 @@ pub fn plan(
             Scope::User => PlanFs::rooted(&env.home, false),
         },
         profile: profile.name.clone(),
+        home: env.home.clone(),
         ..Work::default()
     };
     let mut applied = Vec::new();
@@ -338,6 +344,7 @@ pub fn plan(
     }
     let servers = review_servers(profile, &work.changed_servers);
     let removed_servers = review_servers(profile, &work.removed_servers);
+    let withheld_removals = review_servers(profile, &work.withheld_removals);
     let server_writes: Vec<ServerWrite> = work
         .server_writes
         .iter()
@@ -449,7 +456,9 @@ pub fn plan(
         items,
         changed_items: work.changed_items,
         removed_servers,
+        withheld_removals,
         server_writes,
+        source: opts.source.clone(),
     })
 }
 
