@@ -17,6 +17,10 @@ All notable changes to this project are documented here. The format follows
 
 - `capture --from` help lists the target ids like `--to` does, and when both `gemini-cli` and `antigravity` are targeted at user scope, the note that Antigravity skips rules also says it still reads Gemini CLI's rules block in `~/.gemini/GEMINI.md` (#58).
 
+### Fixed
+
+- A skill script that lost its executable bit (`chmod 644` on `~/.agents/skills/s/run.sh`) is no longer "Up to date" when its content matches: on Unix, `apply` and `diff` list it as modified (`+x`, with a note that the bit is set again), and `apply` sets the bit again in the usual undoable apply, so `undo` puts the old mode back. A script that is already executable stays up to date; Windows has no executable bit and is unchanged (#52).
+
 ### Security
 
 - Interrupted applies can be undone. An apply killed while writing (power loss, `kill -9`) used to leave its transaction `pending` with no way back but restoring the backups by hand. `doctor` now reports each one with the command to undo it, and `kitbag undo <id>` accepts it: files the apply hadn't written yet are left alone and listed as unchanged, the rest are restored as for a finished apply, with the same edited-since and backup checks. Directories an apply creates are recorded before it writes into them, so undo removes those too. A bare `kitbag undo` still means the latest finished apply (#37).

@@ -122,6 +122,11 @@ fn text_of(b: Option<&Vec<u8>>) -> Option<String> {
         .unwrap_or(Some(String::new()))
 }
 
+/// Whether a change keeps the content and only sets the executable bit.
+pub fn mode_only(c: &FileChange) -> bool {
+    c.before.is_some() && c.before == c.after
+}
+
 /// `(+added, -removed)` line counts.
 pub fn line_stats(c: &FileChange) -> Option<(usize, usize)> {
     let before = text_of(c.before.as_ref())?;
@@ -146,6 +151,12 @@ pub fn render_diff(
     sensitive: &BTreeSet<String>,
     max_lines: usize,
 ) -> String {
+    if mode_only(c) {
+        return format!(
+            "{}\n  (content unchanged; the executable bit is set again)\n",
+            paint(BOLD, visible_line(display_path))
+        );
+    }
     let (Some(before), Some(after)) = (text_of(c.before.as_ref()), text_of(c.after.as_ref()))
     else {
         let size = c.after.as_ref().map_or(0, Vec::len);
