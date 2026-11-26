@@ -413,14 +413,7 @@ impl Adapter for ClaudeCode {
                 );
             }
             let path = p.rules.join(format!("{}.md", r.name));
-            write_owned(
-                work,
-                &path,
-                claude_rule(r).as_bytes(),
-                opts,
-                ID,
-                &format!("rule '{}'", r.name),
-            )?;
+            super::common::write_rule(work, &path, claude_rule(r).as_bytes(), opts, ID, &r.name)?;
         }
         for c in &profile.commands {
             let path = p.commands.join(format!("{}.md", c.name));

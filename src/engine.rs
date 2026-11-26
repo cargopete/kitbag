@@ -224,6 +224,24 @@ pub struct Plan {
     /// Files that will hold secret values (from `sensitive`): written with
     /// mode 0600 on Unix, existing files included.
     pub private: BTreeSet<PathBuf>,
+    /// The instruction blocks and rule files kitbag manages, as they are now
+    /// and as the plan leaves them (for `status` and `sync`).
+    pub items: Vec<Item>,
+}
+
+/// One managed instructions item (see [`crate::adapters::Tracked`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Item {
+    pub target: String,
+    /// `instructions`, `rules` or `rule <name>`.
+    pub item: String,
+    /// The real file.
+    pub path: PathBuf,
+    pub block: Option<String>,
+    /// Its text on disk now (`None`: missing).
+    pub current: Option<String>,
+    /// Its text after this plan (`None`: the profile doesn't write it).
+    pub planned: Option<String>,
 }
 
 pub fn plan(
@@ -339,6 +357,33 @@ pub fn plan(
     if !applied.is_empty() {
         risky.extend(policy::risky_content(profile));
     }
+    let mut items: Vec<Item> = Vec::new();
+    for t in &work.tracked {
+        let path = work
+            .fs
+            .real_path(&t.path)
+            .unwrap_or_else(|_| t.path.clone());
+        if items
+            .iter()
+            .any(|i| i.target == t.target && i.path == path && i.block == t.block)
+        {
+            continue;
+        }
+        let block = t.block.as_deref();
+        let planned = crate::sync::item_text(work.fs.read_bytes(&t.path)?.as_deref(), block);
+        let current = crate::sync::item_text(crate::plan_fs::read_opt(&path)?.as_deref(), block);
+        if planned.is_none() && current.is_none() {
+            continue;
+        }
+        items.push(Item {
+            target: t.target.clone(),
+            item: t.item.clone(),
+            path,
+            block: t.block.clone(),
+            current,
+            planned,
+        });
+    }
     let changes = work.fs.changes();
     let private: BTreeSet<PathBuf> = changes
         .iter()
@@ -378,6 +423,7 @@ pub fn plan(
         servers,
         withheld: Vec::new(),
         risky,
+        items,
     })
 }
 

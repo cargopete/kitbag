@@ -350,6 +350,50 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
 Apply is additive: removing a server from the profile does not remove it from tools you
 already applied to. Use `kitbag undo`, or remove it in the tool.
 
+## Keeping instructions in sync
+
+Each tool reads its own instructions file (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`,
+`~/.gemini/GEMINI.md`, project `AGENTS.md`, rule files), and sooner or later one copy gets
+edited by hand. Every apply records a hash of each managed block and rule file it leaves in
+place (in the state directory, next to the backups), so kitbag can tell who changed what:
+
+```console
+$ kitbag status ~/dotagents
+  claude-code    instructions           tool edited      ~/.claude/CLAUDE.md
+  claude-code    rule rust              in sync          ~/.claude/rules/rust.md
+  codex          instructions           profile changed  ~/.codex/AGENTS.md
+  cursor         instructions           unsupported
+                 Cursor keeps user rules in its settings (app storage), not in files; ...
+```
+
+| State | Meaning |
+|---|---|
+| `in sync` | the tool has what the profile would write |
+| `tool edited` | edited in the tool since the last apply; the profile hasn't changed |
+| `profile changed` | the profile changed; the tool still has what was last applied |
+| `both changed` | both changed (or they differ and there is no record of an apply) |
+| `not applied` | in the profile, not in the tool yet |
+| `unsupported` | the tool keeps it where kitbag can't read or write (Cursor user rules) |
+
+Without a profile, `kitbag status` shows what changed in each tool since the last apply.
+`--exit-code` exits with status 1 on any drift, `--json` prints rows for scripts, and status
+never writes.
+
+`kitbag sync <profile>` is `apply` that won't clobber hand edits: it applies `profile changed`
+and `not applied` items (with the usual plan, diff, confirmation, backups and undo), but leaves
+a target whose instructions were edited in the tool alone and says so (exit status 1). Then
+either:
+
+- `kitbag sync <profile> --from claude-code` pulls that tool's edited block or rule back into
+  the profile (`instructions.md`, `rules/*.md`), redacted like `capture` and refused if it
+  still looks like it holds a secret, and applies it to the other targets. The profile files
+  are part of the same transaction, so `kitbag undo` reverts them too. Only the managed
+  block is pulled back, not your own text around it.
+- `kitbag sync <profile> --overwrite` replaces the edit with the profile's version (backed up).
+
+From a git source, `sync` works like `apply` with all the remote restrictions, and `--from`
+is refused, since kitbag can't write back into a repository it cloned.
+
 ## Commands
 
 | Command | What it does |
@@ -358,6 +402,8 @@ already applied to. Use `kitbag undo`, or remove it in the tool.
 | `kitbag capture [--from IDS] [-o DIR] [--dry-run] [--force]` | Read the current setup into a profile (secrets redacted). Writes only into a new or empty directory. `--force` replaces an existing profile's files and leaves anything else in the directory alone. With several tools, one whose config can't be read is reported and the rest are captured |
 | `kitbag diff <SOURCE> [--to IDS] [--exit-code]` | Show exactly what `apply` would change; never writes |
 | `kitbag apply <SOURCE> [--to IDS] [--yes] [--dry-run]` | Plan, confirm, write with backups |
+| `kitbag status [SOURCE] [--to IDS] [--exit-code] [--json]` | Which managed instructions and rules differ from the profile, or changed since the last apply; never writes |
+| `kitbag sync <SOURCE> [--to IDS] [--from ID \| --overwrite]` | Apply without overwriting instructions edited in a tool; pull an edit back with `--from` |
 | `kitbag undo [ID] [--force]` | Revert the latest (or a specific) apply |
 | `kitbag history [--json]` | List applies |
 | `kitbag doctor [SOURCE]` | Check installed tools' configs, a profile, required env vars, risky settings |

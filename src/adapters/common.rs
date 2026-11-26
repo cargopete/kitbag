@@ -285,13 +285,28 @@ pub fn write_instructions(
         .as_deref()
         .map(|i| block::without_paragraphs_in(i, &outside))
         .filter(|c| !c.trim().is_empty());
+    work.track(target, path, Some(&opts.block_id), "instructions".into());
     upsert_block_file(work, path, &opts.block_id, content.as_deref(), target)?;
     if fold_rules {
         let folded = block::fold_rules(&profile.rules);
         let id = format!("{}{RULES_BLOCK_SUFFIX}", opts.block_id);
+        work.track(target, path, Some(&id), "rules".into());
         upsert_block_file(work, path, &id, folded.as_deref(), target)?;
     }
     Ok(())
+}
+
+/// Write one rule file kitbag owns, tracked for drift detection.
+pub fn write_rule(
+    work: &mut Work,
+    path: &Path,
+    content: &[u8],
+    opts: &ApplyOptions,
+    target: &str,
+    name: &str,
+) -> Result<()> {
+    work.track(target, path, None, format!("rule {name}"));
+    write_owned(work, path, content, opts, target, &format!("rule '{name}'"))
 }
 
 /// Copy of `s` with every string rendered in `style`.

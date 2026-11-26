@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `kitbag status [PROFILE]` shows, per tool, whether each managed instructions block and rule file is `in sync`, `tool edited`, `profile changed`, `both changed`, `not applied` or `unsupported` (Cursor user rules live in app storage). Applies now record a hash of each one in the state directory. Without a profile it shows what changed since the last apply. `--exit-code` exits 1 on drift, `--json` prints rows (#32).
+- `kitbag sync PROFILE` applies profile changes but leaves a tool whose managed instructions were edited by hand alone, and says so. `--from <target>` pulls that tool's edits back into the profile (redacted like capture, refused if anything still looks like a secret) and applies them to the others, in one undoable transaction; `--overwrite` replaces the edits, with backups. From a git source, `--from` is refused (#32).
+
 ### Security
 
 - `undo --force` no longer follows a symbolic link that appeared or changed after the apply. Each apply records where every file's directory really was; undo leaves a file alone, even with `--force`, when its directory now resolves elsewhere or the file is now a link, reverts the rest and exits with status 1. Applies recorded by 0.1.1 are checked against the recorded path: any symbolic link in it is refused. `init --force` and `capture --force` replace symbolic links inside the profile directory instead of writing through them, and `init` without `--force` treats a dangling link as an existing file (#35).

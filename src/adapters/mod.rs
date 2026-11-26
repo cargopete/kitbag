@@ -185,6 +185,33 @@ pub struct Work {
     pub notes: Vec<Note>,
     /// (target, server name) of every MCP server entry the plan adds or changes.
     pub changed_servers: Vec<(String, String)>,
+    /// Instruction blocks and rule files kitbag manages, written or not, for
+    /// drift detection (`kitbag status`).
+    pub tracked: Vec<Tracked>,
+}
+
+/// One instructions item kitbag manages in a tool: a managed block in a
+/// shared file, or a whole rule file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tracked {
+    pub target: String,
+    /// As the adapter spelled it; the plan resolves it to the real file.
+    pub path: PathBuf,
+    /// Managed block id, or `None` for a whole file.
+    pub block: Option<String>,
+    /// `instructions`, `rules` (folded) or `rule <name>`.
+    pub item: String,
+}
+
+impl Work {
+    pub fn track(&mut self, target: &str, path: &Path, block: Option<&str>, item: String) {
+        self.tracked.push(Tracked {
+            target: target.to_string(),
+            path: path.to_path_buf(),
+            block: block.map(str::to_string),
+            item,
+        });
+    }
 }
 
 impl Work {

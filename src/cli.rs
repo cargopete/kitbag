@@ -34,6 +34,8 @@ Examples:
   kitbag diff ~/dotagents --to codex
   kitbag apply github:you/dotagents --to all
   kitbag apply ~/dotagents --project . --to cursor,codex
+  kitbag status ~/dotagents
+  kitbag sync ~/dotagents --from claude-code
   kitbag undo";
 
 #[derive(Parser, Debug)]
@@ -109,6 +111,26 @@ enum Cmd {
         #[arg(long)]
         exit_code: bool,
     },
+    /// Show where the instructions and rules in each tool differ from the
+    /// profile, or (without PROFILE) changed since the last apply. Never writes
+    Status {
+        /// Profile directory or git URL to compare with
+        source: Option<String>,
+        #[command(flatten)]
+        args: StatusArgs,
+    },
+    /// Apply a profile without overwriting instructions edited in the tool
+    /// since the last apply (see 'kitbag status')
+    Sync {
+        /// Profile directory or git URL
+        source: String,
+        #[command(flatten)]
+        targets: TargetArgs,
+        #[command(flatten)]
+        sync: SyncArgs,
+        #[command(flatten)]
+        apply: ApplyArgs,
+    },
     /// Revert the most recent apply (or the one with this id)
     Undo {
         /// Transaction id or unique prefix (see 'kitbag history')
@@ -163,6 +185,42 @@ struct TargetArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+struct StatusArgs {
+    /// Targets to compare: ids (comma-separated), 'all' or 'detected'
+    /// [default: detected; without PROFILE, every target applied to]
+    #[arg(long, value_name = "IDS")]
+    to: Option<String>,
+    #[command(flatten)]
+    place: Place,
+    /// Profile directory inside a git repository
+    #[arg(long, value_name = "SUBDIR")]
+    path: Option<String>,
+    /// Exit with status 1 when anything drifted
+    #[arg(long)]
+    exit_code: bool,
+    /// Machine-readable output
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+struct SyncArgs {
+    /// Pull this target's edits to the managed instructions and rules back into
+    /// the profile (redacted, like capture), then apply them to the others
+    #[arg(long, value_name = "ID")]
+    from: Option<String>,
+    /// Replace instructions edited in the tool with the profile's (backed up)
+    #[arg(long)]
+    overwrite: bool,
+    /// Write without asking
+    #[arg(short, long)]
+    yes: bool,
+    /// Show the full plan and diff, write nothing
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args, Debug, Clone, Default)]
 struct ApplyArgs {
     /// Keep existing same-named entries instead of replacing them
     #[arg(long)]
@@ -387,6 +445,21 @@ pub fn run(cli: Cli) -> Result<i32> {
             &targets,
             &apply,
             Mode::Diff { exit_code },
+        ),
+        Cmd::Status { source, args } => {
+            cmd_status(&context(home, Some(&args.place))?, source.as_deref(), &args)
+        }
+        Cmd::Sync {
+            source,
+            targets,
+            sync,
+            apply,
+        } => cmd_sync(
+            &context(home, Some(&targets.place))?,
+            &source,
+            &targets,
+            &apply,
+            &sync,
         ),
         Cmd::Undo { id, force } => cmd_undo(&context(home, None)?, id.as_deref(), force),
         Cmd::History { json } => cmd_history(&context(home, None)?, json),
@@ -710,9 +783,23 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
 }
 
 fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) -> Result<i32> {
+    let (resolved, profile) = load_source(src, t.path.as_deref())?;
+    let targets = select_targets(&t.to, &ctx.env, "to")?;
+    let (profile, plan) = plan_apply(ctx, &resolved, profile, &targets, a)?;
+    present(ctx, &resolved, &profile, &plan, mode)
+}
+
+/// Plan an apply of `profile`, with the restrictions for git sources: risky
+/// settings and content dropped, secrets not resolved, MCP servers opt-in.
+/// Returns the profile as applied (after those restrictions) and the plan.
+fn plan_apply(
+    ctx: &Ctx,
+    resolved: &source::Resolved,
+    mut profile: Profile,
+    targets: &[&'static dyn Adapter],
+    a: &ApplyArgs,
+) -> Result<(Profile, Plan)> {
     let env = &ctx.env;
-    let (resolved, mut profile) = load_source(src, t.path.as_deref())?;
-    let targets = select_targets(&t.to, env, "to")?;
     // A profile from someone else's repository doesn't get to turn off the
     // tools' safety prompts unless the user says so.
     let mut dropped = Vec::new();
@@ -748,7 +835,7 @@ fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) ->
                 .collect(),
             engine::GitMcp::All => Vec::new(),
         };
-        let mut plan = engine::plan_untrusted(&mut profile, &targets, env, &opts, &allow)?;
+        let mut plan = engine::plan_untrusted(&mut profile, targets, env, &opts, &allow)?;
         for n in unknown {
             plan.notes.push(adapters::Note {
                 level: adapters::Level::Warn,
@@ -758,7 +845,7 @@ fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) ->
         }
         plan
     } else {
-        engine::plan(&profile, &targets, env, &opts)?
+        engine::plan(&profile, targets, env, &opts)?
     };
     if untrusted && a.secrets.is_none() && !plan.kept_env.is_empty() {
         plan.notes.push(adapters::Note {
@@ -781,10 +868,27 @@ fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) ->
             });
         }
     }
-    let where_ = match env.scope {
+    Ok((profile, plan))
+}
+
+fn where_label(env: &Env) -> String {
+    match env.scope {
         Scope::User => "user scope".to_string(),
         Scope::Project => format!("project {}", tildify(&env.project, &env.home)),
-    };
+    }
+}
+
+/// Show a plan, then (in apply mode) confirm and write it, and record what
+/// the managed instructions look like afterwards for `kitbag status`.
+fn present(
+    ctx: &Ctx,
+    resolved: &source::Resolved,
+    profile: &Profile,
+    plan: &Plan,
+    mode: Mode,
+) -> Result<i32> {
+    let env = &ctx.env;
+    let where_ = where_label(env);
     println!(
         "{} '{}' from {}\n  -> {} ({where_})\n",
         paint(BOLD, "Profile"),
@@ -793,6 +897,12 @@ fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) ->
         visible_line(&plan.targets.join(", "))
     );
     let show_diff = matches!(mode, Mode::Diff { .. } | Mode::Apply { dry_run: true, .. });
+    let record = |tx: Option<&str>| -> Result<()> {
+        if matches!(mode, Mode::Apply { dry_run: false, .. }) {
+            crate::sync::record(&ctx.state_dir, plan, env, &profile.name, tx)?;
+        }
+        Ok(())
+    };
     if plan.changes.is_empty() {
         if plan.withheld.is_empty() {
             println!(
@@ -802,7 +912,8 @@ fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) ->
         } else {
             println!("Nothing to write without the MCP servers listed below.");
         }
-        print_plan_extras(&plan, resolved.remote);
+        print_plan_extras(plan, resolved.remote);
+        record(None)?;
         return Ok(0);
     }
     if show_diff {
@@ -814,8 +925,8 @@ fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) ->
         }
         println!();
     }
-    print_plan_summary(&plan, env);
-    print_plan_extras(&plan, resolved.remote);
+    print_plan_summary(plan, env);
+    print_plan_extras(plan, resolved.remote);
     match mode {
         Mode::Diff { exit_code } => Ok(i32::from(exit_code)),
         Mode::Apply { dry_run: true, .. } => {
@@ -844,18 +955,289 @@ fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) ->
                 plan.targets.join(", "),
                 where_
             );
-            match engine::commit(&plan, &desc, &ctx.state_dir)? {
-                Some(tx) => println!(
-                    "\n{} {} file(s). Undo with {}",
-                    paint(GREEN, "Wrote"),
-                    tx.entries.len(),
-                    paint(BOLD, format!("kitbag undo {}", tx.id))
-                ),
-                None => println!("Nothing to write."),
+            match engine::commit(plan, &desc, &ctx.state_dir)? {
+                Some(tx) => {
+                    record(Some(&tx.id))?;
+                    println!(
+                        "\n{} {} file(s). Undo with {}",
+                        paint(GREEN, "Wrote"),
+                        tx.entries.len(),
+                        paint(BOLD, format!("kitbag undo {}", tx.id))
+                    );
+                }
+                None => {
+                    record(None)?;
+                    println!("Nothing to write.");
+                }
             }
             Ok(0)
         }
     }
+}
+
+/// One row of `kitbag status`.
+struct StatusRow {
+    target: String,
+    item: String,
+    path: Option<PathBuf>,
+    state: crate::sync::State,
+    detail: Option<String>,
+}
+
+/// Why a target has nowhere for instructions at this scope.
+fn unsupported_detail(a: &dyn Adapter, env: &Env) -> String {
+    if a.id() == "cursor" && env.scope == Scope::User {
+        "Cursor keeps user rules in its settings (app storage), not in files; paste them there, or use --project".to_string()
+    } else {
+        format!(
+            "{} has no instructions file at {} scope",
+            a.name(),
+            env.scope
+        )
+    }
+}
+
+/// Instruction items of `plan`, each compared with the last apply.
+fn instruction_rows(ctx: &Ctx, plan: &Plan) -> Result<Vec<(StatusRow, engine::Item)>> {
+    let last = crate::sync::last_applied(&ctx.state_dir)?;
+    let mut rows = Vec::new();
+    for i in &plan.items {
+        let rec = last
+            .get(&(i.target.clone(), i.path.clone(), i.block.clone()))
+            .filter(|r| r.matches(&ctx.env));
+        let state = crate::sync::classify(
+            i.current.as_deref(),
+            rec.map(|r| r.hash.as_deref()),
+            i.planned.as_deref(),
+        );
+        let detail = (rec.is_none() && state == crate::sync::State::BothChanged)
+            .then(|| "differs, and there is no record of an apply".to_string());
+        rows.push((
+            StatusRow {
+                target: i.target.clone(),
+                item: i.item.clone(),
+                path: Some(i.path.clone()),
+                state,
+                detail,
+            },
+            i.clone(),
+        ));
+    }
+    Ok(rows)
+}
+
+fn print_status(rows: &[StatusRow], env: &Env, as_json: bool) -> Result<()> {
+    if as_json {
+        let v: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "target": r.target, "item": r.item,
+                    "path": r.path.as_ref().map(|p| p.display().to_string()),
+                    "state": r.state.as_str(), "detail": r.detail,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("Nothing to compare: no managed instructions found.");
+        return Ok(());
+    }
+    for r in rows {
+        let label = format!("{:<16}", r.state.as_str());
+        let state = match r.state {
+            crate::sync::State::InSync => paint(GREEN, label),
+            crate::sync::State::Unsupported => paint(DIM, label),
+            s if s.is_conflict() => paint(RED, label),
+            _ => paint(YELLOW, label),
+        };
+        let at = r
+            .path
+            .as_ref()
+            .map(|p| tildify(p, &env.home))
+            .unwrap_or_default();
+        println!(
+            "  {:<14} {:<22} {} {}",
+            r.target,
+            visible_line(&r.item),
+            state,
+            paint(DIM, at)
+        );
+        if let Some(d) = &r.detail {
+            println!("  {:<14} {}", "", paint(DIM, visible_line(d)));
+        }
+    }
+    Ok(())
+}
+
+fn cmd_status(ctx: &Ctx, src: Option<&str>, s: &StatusArgs) -> Result<i32> {
+    let env = &ctx.env;
+    let mut rows: Vec<StatusRow> = Vec::new();
+    match src {
+        Some(src) => {
+            let (resolved, profile) = load_source(src, s.path.as_deref())?;
+            let targets = select_targets(s.to.as_deref().unwrap_or("detected"), env, "to")?;
+            let (profile, plan) =
+                plan_apply(ctx, &resolved, profile, &targets, &ApplyArgs::default())?;
+            rows.extend(instruction_rows(ctx, &plan)?.into_iter().map(|(r, _)| r));
+            let has_text = profile.instructions.is_some() || !profile.rules.is_empty();
+            for a in &targets {
+                if has_text
+                    && a.supports(env.scope, Feature::Instructions) == adapters::Support::None
+                {
+                    rows.push(StatusRow {
+                        target: a.id().to_string(),
+                        item: "instructions".into(),
+                        path: None,
+                        state: crate::sync::State::Unsupported,
+                        detail: Some(unsupported_detail(*a, env)),
+                    });
+                }
+            }
+            if !s.json {
+                println!(
+                    "{} '{}' from {} ({})\n",
+                    paint(BOLD, "Profile"),
+                    visible_line(&profile.name),
+                    visible_line(&resolved.origin),
+                    where_label(env)
+                );
+            }
+        }
+        None => {
+            let only: Option<Vec<&'static str>> = match &s.to {
+                Some(to) => Some(
+                    select_targets(to, env, "to")?
+                        .iter()
+                        .map(|a| a.id())
+                        .collect(),
+                ),
+                None => None,
+            };
+            for r in crate::sync::last_applied(&ctx.state_dir)?.into_values() {
+                if !r.matches(env)
+                    || only
+                        .as_ref()
+                        .is_some_and(|o| !o.contains(&r.target.as_str()))
+                {
+                    continue;
+                }
+                let current = crate::sync::item_text(
+                    crate::plan_fs::read_opt(&r.path)?.as_deref(),
+                    r.block.as_deref(),
+                );
+                rows.push(StatusRow {
+                    state: crate::sync::classify_since_apply(current.as_deref(), r.hash.as_deref()),
+                    target: r.target,
+                    item: r.item,
+                    path: Some(r.path),
+                    detail: None,
+                });
+            }
+            if !s.json {
+                println!(
+                    "{} since the last apply ({})\n",
+                    paint(BOLD, "Changes"),
+                    where_label(env)
+                );
+            }
+        }
+    }
+    let drift = rows.iter().any(|r| r.state.is_drift());
+    print_status(&rows, env, s.json)?;
+    if !s.json && rows.iter().any(|r| r.state.is_conflict()) {
+        println!(
+            "\n{}",
+            paint(
+                DIM,
+                "Edited in the tool: 'kitbag sync PROFILE --from <target>' pulls the edit into the profile, '--overwrite' replaces it (backed up)."
+            )
+        );
+    }
+    Ok(i32::from(s.exit_code && drift))
+}
+
+fn cmd_sync(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, s: &SyncArgs) -> Result<i32> {
+    let env = &ctx.env;
+    let (resolved, loaded) = load_source(src, t.path.as_deref())?;
+    if resolved.remote && s.from.is_some() {
+        bail!(
+            "--from can't be used with a git source: kitbag can't write edits back into a repository it cloned. Clone it, sync the local directory with --from, then commit and push"
+        );
+    }
+    let mut targets = select_targets(&t.to, env, "to")?;
+    let (mut profile, mut plan) = plan_apply(ctx, &resolved, loaded.clone(), &targets, a)?;
+    let mut profile_changes = Vec::new();
+    let mut pulled_notes = Vec::new();
+    if let Some(from) = &s.from {
+        let Some(source_target) = targets.iter().find(|x| x.id() == from.as_str()) else {
+            bail!("--from {from} must be one of the targets being synced (see --to)");
+        };
+        let rows = instruction_rows(ctx, &plan)?;
+        let edited: Vec<&engine::Item> = rows
+            .iter()
+            .filter(|(r, _)| r.target == source_target.id() && r.state.is_conflict())
+            .map(|(_, i)| i)
+            .collect();
+        if edited.is_empty() {
+            pulled_notes.push(adapters::Note {
+                level: adapters::Level::Info,
+                target: from.clone(),
+                message: "no edits to pull back: its managed instructions match the last apply"
+                    .into(),
+            });
+        } else {
+            let pb =
+                crate::sync::pull_back(&loaded, &resolved.dir, &edited, &slugify(&loaded.name))?;
+            pulled_notes.extend(pb.notes);
+            profile_changes = pb.changes;
+            (profile, plan) = plan_apply(ctx, &resolved, pb.profile, &targets, a)?;
+        }
+    }
+    let mut skipped: Vec<String> = Vec::new();
+    if !s.overwrite {
+        for (r, _) in instruction_rows(ctx, &plan)? {
+            if r.state.is_conflict() && !skipped.contains(&r.target) {
+                skipped.push(r.target);
+            }
+        }
+        if !skipped.is_empty() {
+            targets.retain(|x| !skipped.iter().any(|id| id == x.id()));
+            plan = if targets.is_empty() {
+                Plan::default()
+            } else {
+                plan_apply(ctx, &resolved, profile.clone(), &targets, a)?.1
+            };
+        }
+    }
+    plan.notes.extend(pulled_notes);
+    for id in &skipped {
+        plan.notes.push(adapters::Note {
+            level: adapters::Level::Warn,
+            target: id.clone(),
+            message: format!(
+                "{id} was not synced: its managed instructions were edited in the tool since the last apply. Pull the edit into the profile with --from {id}, or replace it with --overwrite (backed up; 'kitbag undo' restores it)"
+            ),
+        });
+    }
+    plan.changes.extend(profile_changes);
+    let code = present(
+        ctx,
+        &resolved,
+        &profile,
+        &plan,
+        Mode::Apply {
+            yes: s.yes,
+            dry_run: s.dry_run,
+        },
+    )?;
+    Ok(if code == 0 && !skipped.is_empty() {
+        1
+    } else {
+        code
+    })
 }
 
 fn cmd_undo(ctx: &Ctx, id: Option<&str>, force: bool) -> Result<i32> {

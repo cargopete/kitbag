@@ -128,7 +128,7 @@ fn import(cap: &mut Captured, name: &str, def: &Map<String, Value>) {
 }
 
 /// A Cursor rule file -> profile rule, normalising Cursor's always-present `alwaysApply`.
-fn rule_from_mdc(name: &str, text: &str) -> Rule {
+pub fn rule_from_mdc(name: &str, text: &str) -> Rule {
     let mut r = rule_from_markdown(name, text);
     match (r.globs.is_empty(), r.always_apply) {
         (false, Some(false)) | (true, Some(true)) => r.always_apply = None,
@@ -331,13 +331,13 @@ impl Adapter for Cursor {
                 write_instructions(work, instr, profile, opts, false, ID)?;
                 for r in &profile.rules {
                     let path = rules_dir.join(format!("{}.mdc", r.name));
-                    write_owned(
+                    super::common::write_rule(
                         work,
                         &path,
                         cursor_mdc(r).as_bytes(),
                         opts,
                         ID,
-                        &format!("rule '{}'", r.name),
+                        &r.name,
                     )?;
                 }
             }
