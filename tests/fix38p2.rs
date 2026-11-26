@@ -115,8 +115,21 @@ fn crlf_files_keep_their_line_endings() {
     )
     .unwrap();
     fs::write(home.join(".codex/AGENTS.md"), "# Mine\r\n").unwrap();
+    fs::create_dir_all(home.join(".gemini/config")).unwrap();
+    fs::write(
+        home.join(".gemini/config/mcp_config.json"),
+        "{\r\n  \"mcpServers\": {}\r\n}\r\n",
+    )
+    .unwrap();
+    fs::write(home.join(".gemini/GEMINI.md"), "# Mine\r\n").unwrap();
     sb.cli()
-        .args(["apply", "p", "--to", "claude-code,codex", "--yes"])
+        .args([
+            "apply",
+            "p",
+            "--to",
+            "claude-code,codex,antigravity",
+            "--yes",
+        ])
         .assert()
         .success();
     for rel in [
@@ -124,6 +137,8 @@ fn crlf_files_keep_their_line_endings() {
         "home/.claude/CLAUDE.md",
         "home/.codex/config.toml",
         "home/.codex/AGENTS.md",
+        "home/.gemini/config/mcp_config.json",
+        "home/.gemini/GEMINI.md",
     ] {
         let text = sb.read(rel);
         assert!(no_bare_lf(&text), "{rel}: {text:?}");
@@ -142,11 +157,18 @@ fn crlf_files_keep_their_line_endings() {
     );
     // Re-applying changes nothing.
     sb.cli()
-        .args(["diff", "p", "--to", "claude-code,codex", "--exit-code"])
+        .args([
+            "diff",
+            "p",
+            "--to",
+            "claude-code,codex,antigravity",
+            "--exit-code",
+        ])
         .assert()
         .success();
     sb.cli()
         .args(["status", "p", "--exit-code"])
+        .args(["--to", "claude-code,codex,antigravity"])
         .assert()
         .success();
 }
