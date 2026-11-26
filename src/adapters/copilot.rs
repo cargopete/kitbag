@@ -4,8 +4,9 @@
 //! * MCP: Copilot's native files use a top-level `mcpServers` object:
 //!   `$COPILOT_HOME/mcp-config.json` (default `~/.copilot/mcp-config.json`) for
 //!   the user, and `.mcp.json` at the workspace root for a project. Copilot CLI
-//!   reads both; VS Code reads the user file and, with the experimental
-//!   `chat.mcp.workspaceRootConfig.enabled` setting, the workspace `.mcp.json`.
+//!   reads both; VS Code reads the user file and an existing workspace
+//!   `.mcp.json` (the experimental `chat.mcp.workspaceRootConfig.enabled`
+//!   setting only controls whether Add Server offers that file).
 //!   Local servers take `type` (`stdio`; Copilot CLI's examples use `local`),
 //!   `command`, `args`, `env` and `cwd`;
 //!   remote servers `type` (`http` or `sse`), `url` and `headers`; `tools`
@@ -525,7 +526,7 @@ fn apply_user_servers(
                 }
             }
         }
-        // Copilot CLI requires `tools`. Keep the list of an entry for the same
+        // Copilot's examples always include `tools` (default `*`). Keep the list of an entry for the same
         // server; anything else gets all tools.
         let keeps_tools = existing
             .get(name.as_str())

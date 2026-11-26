@@ -689,8 +689,9 @@ Good next candidates: Windsurf, Zed.
 - **GitHub Copilot** and Claude Code both read a project's `.mcp.json`. kitbag writes it in
   Claude Code's shape for both (no `cwd`, no `tools`; a `cwd` is dropped with a warning), so
   applying both writes each server once, and a server the profile keeps off one of them stays
-  in the file while the other still gets it. Copilot CLI reads `.mcp.json` as is; VS Code reads
-  it only with the experimental `chat.mcp.workspaceRootConfig.enabled` setting on. VS Code's
+  in the file while the other still gets it. Copilot CLI reads `.mcp.json` as is. VS Code reads
+  an existing workspace `.mcp.json`; the experimental `chat.mcp.workspaceRootConfig.enabled`
+  setting only controls whether its Add Server flow offers that file. VS Code's
   older `.vscode/mcp.json` is deprecated and Copilot CLI doesn't read it, so kitbag only reads it
   at capture. In the user file (`~/.copilot/mcp-config.json`)
   servers get `tools: ["*"]` unless the entry already lists its own tools, which are kept.
