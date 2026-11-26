@@ -362,21 +362,37 @@ pub fn write_instructions(
         .map(|i| block::without_paragraphs_in(i, &outside))
         .filter(|c| !c.trim().is_empty());
     work.track(target, path, Some(&opts.block_id), "instructions".into());
-    upsert_block_file(
-        work,
-        path,
-        &opts.block_id,
-        content.as_deref(),
-        opts.overwrite,
-        target,
-    )?;
+    if !held(work, opts, path, Some(&opts.block_id)) {
+        upsert_block_file(
+            work,
+            path,
+            &opts.block_id,
+            content.as_deref(),
+            opts.overwrite,
+            target,
+        )?;
+    }
     if fold_rules {
         let folded = block::fold_rules(&profile.rules);
         let id = format!("{}{RULES_BLOCK_SUFFIX}", opts.block_id);
         work.track(target, path, Some(&id), "rules".into());
-        upsert_block_file(work, path, &id, folded.as_deref(), opts.overwrite, target)?;
+        if !held(work, opts, path, Some(&id)) {
+            upsert_block_file(work, path, &id, folded.as_deref(), opts.overwrite, target)?;
+        }
     }
     Ok(())
+}
+
+/// Is this managed item one to leave as it is in the tool ([`ApplyOptions::hold`])?
+fn held(work: &Work, opts: &ApplyOptions, path: &Path, block: Option<&str>) -> bool {
+    if opts.hold.is_empty() {
+        return false;
+    }
+    let real = work
+        .fs
+        .real_path(path)
+        .unwrap_or_else(|_| path.to_path_buf());
+    opts.hold.contains(&(real, block.map(str::to_string)))
 }
 
 /// Write one rule file kitbag owns, tracked for drift detection.
@@ -389,6 +405,9 @@ pub fn write_rule(
     name: &str,
 ) -> Result<()> {
     work.track(target, path, None, format!("rule {name}"));
+    if held(work, opts, path, None) {
+        return Ok(());
+    }
     write_owned(work, path, content, opts, target, &format!("rule '{name}'"))?;
     Ok(())
 }

@@ -5,7 +5,7 @@
 //! they plan writes into a [`PlanFs`] and report anything noteworthy as
 //! [`Note`]s. See `README.md` ("Adding an adapter") for a walkthrough.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -180,6 +180,10 @@ pub struct ApplyOptions {
     /// (the same opt-in as adding them: `--allow-git-mcp` / `--trust-source`).
     /// `None` for a local profile, which may remove any of its own.
     pub git_removals: Option<crate::engine::GitMcp>,
+    /// Managed items to leave as they are in the tool, as (real file, block
+    /// id; `None` for a whole rule file): `sync` holds back the ones edited
+    /// by hand. Empty for `apply`.
+    pub hold: BTreeSet<(PathBuf, Option<String>)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]

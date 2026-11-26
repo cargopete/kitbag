@@ -433,9 +433,12 @@ Without a profile, `kitbag status` shows what changed in each tool since the las
 never writes.
 
 `kitbag sync <profile>` is `apply` that won't clobber hand edits: it applies `profile changed`
-and `not applied` items (with the usual plan, diff, confirmation, backups and undo), but leaves
-a target whose instructions were edited in the tool alone and says so (exit status 1). Then
-either:
+and `not applied` items (with the usual plan, diff, confirmation, backups and undo), but holds
+back each managed block or rule file that was edited in the tool (`tool edited` or
+`both changed`). Only that item is left alone: the tool's other instructions, rules, MCP
+servers, commands and skills are still applied, in the same undoable transaction. The plan
+lists each held-back item as `Skipped: claude-code instructions` with a note on how to resolve
+it, and sync exits with status 1. Then either:
 
 - `kitbag sync <profile> --from claude-code` pulls that tool's edited block or rule back into
   the profile (`instructions.md`, `rules/*.md`), redacted like `capture` and refused if it

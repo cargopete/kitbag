@@ -196,6 +196,7 @@ pub fn opts(profile: &Profile) -> ApplyOptions {
         applied_servers: Vec::new(),
         source: None,
         git_removals: None,
+        hold: Default::default(),
     }
 }
 

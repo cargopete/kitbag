@@ -1,6 +1,6 @@
 //! Command-line interface.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
@@ -915,19 +915,21 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
 fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) -> Result<i32> {
     let (resolved, profile) = load_source(src, t.path.as_deref(), t.allow_insecure_source)?;
     let targets = select_targets(&t.to, &ctx.env, "to")?;
-    let (profile, plan) = plan_apply(ctx, &resolved, profile, &targets, a)?;
+    let (profile, plan) = plan_apply(ctx, &resolved, profile, &targets, a, &BTreeSet::new())?;
     present(ctx, &resolved, &profile, &plan, mode)
 }
 
 /// Plan an apply of `profile`, with the restrictions for git sources: risky
 /// settings and content dropped, secrets not resolved, MCP servers opt-in.
 /// Returns the profile as applied (after those restrictions) and the plan.
+/// The managed items in `hold` are left as they are in the tool.
 fn plan_apply(
     ctx: &Ctx,
     resolved: &source::Resolved,
     mut profile: Profile,
     targets: &[&'static dyn Adapter],
     a: &ApplyArgs,
+    hold: &BTreeSet<(PathBuf, Option<String>)>,
 ) -> Result<(Profile, Plan)> {
     let env = &ctx.env;
     // A profile from someone else's repository doesn't get to turn off the
@@ -967,6 +969,7 @@ fn plan_apply(
         applied_servers,
         source: Some(resolved.source.clone()),
         git_removals: resolved.remote.then(|| allow.clone()),
+        hold: hold.clone(),
     };
     let mut plan = if resolved.remote {
         let unknown: Vec<String> = match &allow {
@@ -1035,6 +1038,23 @@ fn print_skipped(plan: &Plan) {
             plan.skipped.join(", ")
         );
     }
+    print_held_back(plan);
+}
+
+/// The managed items `sync` left alone because they were edited in the tool.
+fn print_held_back(plan: &Plan) {
+    if !plan.held_back.is_empty() {
+        let items: Vec<String> = plan
+            .held_back
+            .iter()
+            .map(|i| format!("{} {}", i.target, i.item))
+            .collect();
+        println!(
+            "{} {} (edited in the tool; see the notes below)",
+            paint(YELLOW, "Skipped:"),
+            items.join(", ")
+        );
+    }
 }
 
 fn where_label(env: &Env) -> String {
@@ -1084,6 +1104,9 @@ fn present(
                     "Nothing written; kept {kept} existing item(s) because of --no-overwrite."
                 );
                 print_skipped(plan);
+            } else if !plan.held_back.is_empty() {
+                println!("Nothing to write besides the items edited in the tool.");
+                print_skipped(plan);
             } else if !plan.skipped.is_empty() {
                 println!(
                     "{} {} already matches the profile.",
@@ -1099,6 +1122,7 @@ fn present(
             }
         } else {
             println!("Nothing to write without the MCP servers listed below.");
+            print_held_back(plan);
         }
         print_plan_extras(plan, resolved.remote);
         record(None)?;
@@ -1114,6 +1138,7 @@ fn present(
         println!();
     }
     print_plan_summary(plan, env);
+    print_held_back(plan);
     print_plan_extras(plan, resolved.remote);
     match mode {
         Mode::Diff { exit_code } => Ok(i32::from(exit_code)),
@@ -1415,8 +1440,14 @@ fn cmd_status(ctx: &Ctx, src: Option<&str>, s: &StatusArgs) -> Result<i32> {
             let (resolved, profile) = load_source(src, s.path.as_deref(), s.allow_insecure_source)?;
             let targets = select_targets(s.to.as_deref().unwrap_or("detected"), env, "to")?;
             let loaded = profile.clone();
-            let (profile, plan) =
-                plan_apply(ctx, &resolved, profile, &targets, &ApplyArgs::default())?;
+            let (profile, plan) = plan_apply(
+                ctx,
+                &resolved,
+                profile,
+                &targets,
+                &ApplyArgs::default(),
+                &BTreeSet::new(),
+            )?;
             rows.extend(instruction_rows(ctx, &plan)?.into_iter().map(|(r, _)| r));
             rows.extend(inventory_rows(env, &loaded, &plan, &targets));
             let has_text = profile.instructions.is_some() || !profile.rules.is_empty();
@@ -1522,8 +1553,9 @@ fn cmd_sync(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, s: &SyncArgs) -
             "--from can't be used with a git source: kitbag can't write edits back into a repository it cloned. Clone it, sync the local directory with --from, then commit and push"
         );
     }
-    let mut targets = select_targets(&t.to, env, "to")?;
-    let (mut profile, mut plan) = plan_apply(ctx, &resolved, loaded.clone(), &targets, a)?;
+    let targets = select_targets(&t.to, env, "to")?;
+    let none = BTreeSet::new();
+    let (mut profile, mut plan) = plan_apply(ctx, &resolved, loaded.clone(), &targets, a, &none)?;
     let mut profile_changes = Vec::new();
     let mut pulled_notes = Vec::new();
     if let Some(from) = &s.from {
@@ -1548,36 +1580,35 @@ fn cmd_sync(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, s: &SyncArgs) -
                 crate::sync::pull_back(&loaded, &resolved.dir, &edited, &slugify(&loaded.name))?;
             pulled_notes.extend(pb.notes);
             profile_changes = pb.changes;
-            (profile, plan) = plan_apply(ctx, &resolved, pb.profile, &targets, a)?;
+            (profile, plan) = plan_apply(ctx, &resolved, pb.profile, &targets, a, &none)?;
         }
     }
-    let mut skipped: Vec<String> = Vec::new();
+    // Hold back only the items edited in the tool (a managed block or a rule
+    // file); everything else for that tool still applies.
     if !s.overwrite {
-        for (r, _) in instruction_rows(ctx, &plan)? {
-            if r.state.is_conflict() && !skipped.contains(&r.target) {
-                skipped.push(r.target);
-            }
-        }
-        if !skipped.is_empty() {
-            targets.retain(|x| !skipped.iter().any(|id| id == x.id()));
-            plan = if targets.is_empty() {
-                Plan::default()
-            } else {
-                plan_apply(ctx, &resolved, profile.clone(), &targets, a)?.1
-            };
+        let hold: BTreeSet<(PathBuf, Option<String>)> = instruction_rows(ctx, &plan)?
+            .into_iter()
+            .filter(|(r, _)| r.state.is_conflict())
+            .map(|(_, i)| (i.path, i.block))
+            .collect();
+        if !hold.is_empty() {
+            plan = plan_apply(ctx, &resolved, profile.clone(), &targets, a, &hold)?.1;
         }
     }
     plan.notes.extend(pulled_notes);
-    plan.skipped.extend(skipped.iter().cloned());
-    for id in &skipped {
+    for i in &plan.held_back {
         plan.notes.push(adapters::Note {
             level: adapters::Level::Warn,
-            target: id.clone(),
+            target: i.target.clone(),
             message: format!(
-                "{id} was not synced: its managed instructions were edited in the tool since the last apply. Pull the edit into the profile with --from {id}, or replace it with --overwrite (backed up; 'kitbag undo' restores it)"
+                "{} in {} was not synced: it was edited in the tool since the last apply. Pull the edit into the profile with --from {}, or replace it with --overwrite (backed up; 'kitbag undo' restores it)",
+                held_label(&i.item),
+                tildify(&i.path, &env.home),
+                i.target
             ),
         });
     }
+    let held = !plan.held_back.is_empty();
     plan.changes.extend(profile_changes);
     let code = present(
         ctx,
@@ -1589,11 +1620,15 @@ fn cmd_sync(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, s: &SyncArgs) -
             dry_run: s.dry_run,
         },
     )?;
-    Ok(if code == 0 && !skipped.is_empty() {
-        1
-    } else {
-        code
-    })
+    Ok(if code == 0 && held { 1 } else { code })
+}
+
+/// How a held-back item is named in notes: `instructions block`, `rule rust`.
+fn held_label(item: &str) -> String {
+    match item {
+        "instructions" | "rules" => format!("{item} block"),
+        other => other.to_string(),
+    }
 }
 
 fn cmd_undo(ctx: &Ctx, id: Option<&str>, force: bool) -> Result<i32> {
