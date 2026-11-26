@@ -153,3 +153,36 @@ fn each_target_alone_still_removes_what_it_added() {
     let out = apply_project(&sb, "claude-code,copilot");
     assert!(!has(&sb, "heavy"), "{out}");
 }
+
+#[test]
+fn prompt_files_and_skills_apply_to_a_project_and_undo() {
+    let sb = Sandbox::empty();
+    fs::create_dir_all(sb.path("p/commands")).unwrap();
+    fs::create_dir_all(sb.path("p/skills/db-migrate")).unwrap();
+    fs::write(sb.path("p/kitbag.toml"), "kitbag = 1\nname = \"p\"\n").unwrap();
+    fs::write(
+        sb.path("p/commands/ship.md"),
+        "---\ndescription: Ship it\n---\n\nShip the release.\n",
+    )
+    .unwrap();
+    fs::write(
+        sb.path("p/skills/db-migrate/SKILL.md"),
+        "---\nname: db-migrate\ndescription: Migrations\n---\n\nWrite a reversible migration.\n",
+    )
+    .unwrap();
+    apply_project(&sb, "copilot");
+    assert_eq!(
+        sb.read("project/.github/prompts/ship.prompt.md"),
+        "---\ndescription: Ship it\n---\n\nShip the release.\n"
+    );
+    assert!(
+        sb.read("project/.github/skills/db-migrate/SKILL.md")
+            .contains("Write a reversible migration.")
+    );
+    // Applying again changes nothing.
+    let again = apply_project(&sb, "copilot");
+    assert!(again.to_lowercase().contains("up to date"), "{again}");
+    sb.cli().arg("undo").assert().success();
+    assert!(!sb.path("project/.github/prompts").exists());
+    assert!(!sb.path("project/.github/skills").exists());
+}

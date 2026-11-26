@@ -209,3 +209,31 @@ fn applying_everywhere_then_capturing_everything_is_a_fixed_point() {
         profile.skills.iter().map(|s| &s.name).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn copilot_project_to_copilot_project() {
+    let (a, b) = round_trip("copilot", "copilot", Scope::Project);
+    // Prompt files keep their VS Code keys (agent, tools).
+    assert_eq!(b.commands, a.commands);
+    assert_eq!(b.skills, a.skills);
+    assert_eq!(b.rules, a.rules);
+}
+
+#[test]
+fn claude_code_project_to_copilot_project() {
+    let (a, b) = round_trip("claude-code", "copilot", Scope::Project);
+    assert_eq!(b.commands[0].name, a.commands[0].name);
+    assert_eq!(b.commands[0].body, a.commands[0].body);
+    assert_eq!(b.commands[0].description, a.commands[0].description);
+}
+
+#[test]
+fn claude_code_to_copilot_user_skills() {
+    let (a, b) = round_trip("claude-code", "copilot", Scope::User);
+    assert!(!a.skills.is_empty());
+    assert_eq!(
+        b.skills.iter().map(|s| &s.name).collect::<Vec<_>>(),
+        a.skills.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+    assert!(b.commands.is_empty(), "no user prompt files");
+}
