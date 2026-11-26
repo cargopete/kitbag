@@ -219,3 +219,54 @@ fn help_mentions_the_alias() {
         .success()
         .stdout(contains("alias: claude"));
 }
+
+#[test]
+fn settings_under_the_alias_apply_to_claude_code() {
+    for to in ["claude", "claude-code"] {
+        let sb = Sandbox::empty();
+        write_profile(&sb, "\n[settings.claude]\nmodel = \"opus\"\n");
+        stdout(&sb, &["apply", "p", "--to", to, "--yes"]);
+        let settings = sb.json("home/.claude/settings.json");
+        assert_eq!(settings["model"], "opus", "--to {to}: {settings}");
+        assert!(!state_text(&sb).contains("\"claude\""));
+    }
+}
+
+#[test]
+fn settings_under_both_names_is_an_error() {
+    let sb = Sandbox::empty();
+    write_profile(
+        &sb,
+        "\n[settings.claude]\nmodel = \"opus\"\n\n[settings.claude-code]\nmodel = \"sonnet\"\n",
+    );
+    sb.cli()
+        .args(["apply", "p", "--to", "claude-code", "--yes"])
+        .assert()
+        .failure()
+        .stderr(contains(
+            "both [settings.claude] and [settings.claude-code] are set",
+        ));
+    assert!(!sb.path("home/.claude/settings.json").exists());
+}
+
+#[test]
+fn doctor_reads_settings_under_the_alias_as_claude_code() {
+    let sb = Sandbox::empty();
+    write_profile(
+        &sb,
+        "\n[settings.claude]\nmodel = \"opus\"\n\n[settings.vim]\nmodel = \"x\"\n",
+    );
+    let out = sb.cli().args(["doctor", "p"]).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.contains("settings.claude:"), "{text}");
+    assert!(
+        !text.contains("settings.claude-code: unknown target"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("settings.claude-code: will not apply"),
+        "{text}"
+    );
+    // A key that is no alias is still an unknown target.
+    assert!(text.contains("settings.vim: unknown target"), "{text}");
+}
