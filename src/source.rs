@@ -192,23 +192,7 @@ pub fn resolve(src: &str, subdir: Option<&str>, allow_insecure: bool) -> Result<
         );
     }
     let tmp = tempfile::Builder::new().prefix("kitbag-").tempdir()?;
-    let mut cmd = Command::new("git");
-    if !allow_insecure {
-        // Also when an https server redirects to http.
-        cmd.args([
-            "-c",
-            "protocol.http.allow=never",
-            "-c",
-            "protocol.git.allow=never",
-        ]);
-    }
-    cmd.args(["clone", "--depth", "1", "--quiet", "--no-tags"]);
-    if let Some(r) = &git.reference {
-        cmd.args(["--branch", r]);
-    }
-    cmd.arg("--").arg(&git.url).arg(tmp.path());
-    cmd.env("GIT_TERMINAL_PROMPT", "0");
-    let out = match cmd.output() {
+    let out = match clone_command(&git, tmp.path(), allow_insecure).output() {
         Ok(o) => o,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             bail!("git is required to apply a profile from a URL, but it was not found on PATH")
@@ -274,9 +258,66 @@ pub fn resolve(src: &str, subdir: Option<&str>, allow_insecure: bool) -> Result<
     })
 }
 
+/// The `git clone` for `git` into `dest`. Unless `allow_insecure`, git may
+/// not fetch over `http` or `git` even when an https server redirects there
+/// or a `url.<base>.insteadOf` rewrite points there.
+fn clone_command(git: &GitSource, dest: &Path, allow_insecure: bool) -> Command {
+    let mut cmd = Command::new("git");
+    if !allow_insecure {
+        cmd.args([
+            "-c",
+            "protocol.http.allow=never",
+            "-c",
+            "protocol.git.allow=never",
+        ]);
+        // GIT_ALLOW_PROTOCOL, when set, overrides every protocol.*.allow
+        // setting, `-c` included. Config from the environment
+        // (GIT_CONFIG_COUNT, GIT_CONFIG_PARAMETERS) does not: `-c` wins.
+        cmd.env_remove("GIT_ALLOW_PROTOCOL");
+    }
+    cmd.args(["clone", "--depth", "1", "--quiet", "--no-tags"]);
+    if let Some(r) = &git.reference {
+        cmd.args(["--branch", r]);
+    }
+    cmd.arg("--").arg(&git.url).arg(dest);
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clones_refuse_cleartext_transports_unless_allowed() {
+        let src = parse_git_source("https://example.com/o/r.git").unwrap();
+        let args = |c: &Command| -> Vec<String> {
+            c.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let removes_allow_list = |c: &Command| {
+            c.get_envs()
+                .any(|(k, v)| k == "GIT_ALLOW_PROTOCOL" && v.is_none())
+        };
+        let strict = clone_command(&src, Path::new("dest"), false);
+        let a = args(&strict);
+        assert_eq!(
+            a[..5],
+            [
+                "-c",
+                "protocol.http.allow=never",
+                "-c",
+                "protocol.git.allow=never",
+                "clone"
+            ]
+        );
+        assert!(removes_allow_list(&strict));
+        let loose = clone_command(&src, Path::new("dest"), true);
+        assert!(!args(&loose).iter().any(|a| a.starts_with("protocol.")));
+        assert!(!removes_allow_list(&loose));
+        assert!(args(&loose).ends_with(&["--".into(), src.url.clone(), "dest".into()]));
+    }
 
     fn g(url: &str, r: Option<&str>, s: Option<&str>) -> Option<GitSource> {
         Some(GitSource {

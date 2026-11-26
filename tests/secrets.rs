@@ -541,7 +541,13 @@ fn redactions_stay_with_servers_whose_names_contain_a_dot() {
     let mut found: Vec<(Option<&str>, &str, &str)> = r
         .redactions
         .iter()
-        .map(|red| (red.server.as_deref(), red.location.as_str(), red.env_var.as_str()))
+        .map(|red| {
+            (
+                red.server.as_deref(),
+                red.location.as_str(),
+                red.env_var.as_str(),
+            )
+        })
         .collect();
     found.sort();
     assert_eq!(

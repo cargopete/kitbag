@@ -690,3 +690,45 @@ fn cleartext_sources_need_an_explicit_flag() {
             .stderr(contains("could not clone").and(contains("--allow-insecure-source").not()));
     }
 }
+
+/// An https source that git ends up fetching over http or git:// (a server
+/// redirect, or here a `url.<base>.insteadOf` rewrite, which goes through
+/// the same transport check) is refused, even when GIT_ALLOW_PROTOCOL in
+/// the user's environment would allow it.
+#[test]
+fn https_sources_that_end_up_on_cleartext_are_refused() {
+    if !has_git() {
+        return;
+    }
+    let sb = Sandbox::empty();
+    let gitconfig = sb.path("gitconfig");
+    std::fs::write(
+        &gitconfig,
+        "[url \"http://127.0.0.1:9/\"]\n\tinsteadOf = https://to-http.invalid/\n\
+         [url \"git://127.0.0.1:9/\"]\n\tinsteadOf = https://to-git.invalid/\n",
+    )
+    .unwrap();
+    for (url, transport) in [
+        ("https://to-http.invalid/p.git", "http"),
+        ("https://to-git.invalid/p.git", "git"),
+    ] {
+        for allow_list in [None, Some("http:https:git:ssh:file")] {
+            let mut cmd = sb.cli();
+            cmd.env("GIT_CONFIG_GLOBAL", &gitconfig);
+            if let Some(v) = allow_list {
+                cmd.env("GIT_ALLOW_PROTOCOL", v);
+            }
+            cmd.args(["diff", url, "--to", "codex"])
+                .assert()
+                .code(2)
+                .stderr(contains(format!("transport '{transport}' not allowed")));
+        }
+        // With the flag, git goes ahead (and fails: nothing listens there).
+        sb.cli()
+            .env("GIT_CONFIG_GLOBAL", &gitconfig)
+            .args(["diff", url, "--to", "codex", "--allow-insecure-source"])
+            .assert()
+            .code(2)
+            .stderr(contains("could not clone").and(contains("not allowed").not()));
+    }
+}
