@@ -83,6 +83,78 @@ fn a_claude_md_in_a_parent_directory_shadows_agents_md_for_claude_code() {
     line_with(&out, &proj.join("AGENTS.md"), "load 3");
 }
 
+fn claude_instruction_files(sb: &Sandbox, value: &str) {
+    write(
+        &sb.home().join(".claude/settings.json"),
+        &format!(
+            r#"{{"pluginConfigs": {{"cc-plugin-agents-md@builtin": {{"options": {{"instructionFiles": "{value}"}}}}}}}}"#
+        ),
+    );
+}
+
+#[test]
+fn claude_code_reads_each_directorys_agents_md_after_its_claude_md() {
+    let sb = Sandbox::empty();
+    let proj = sb.path("ws/proj");
+    write(&sb.path("ws/CLAUDE.md"), "# parent\n");
+    write(&sb.path("ws/AGENTS.md"), "# parent agents\n");
+    write(&proj.join("CLAUDE.md"), "# project\n");
+    write(&proj.join("AGENTS.md"), "# project agents\n");
+    claude_instruction_files(&sb, "claude-md-and-agents-md");
+    let out = why(&sb, &proj, "claude");
+    line_with(&out, &sb.path("ws/CLAUDE.md"), "load 1");
+    line_with(&out, &sb.path("ws/AGENTS.md"), "load 2");
+    line_with(&out, &proj.join("CLAUDE.md"), "load 3");
+    line_with(&out, &proj.join("AGENTS.md"), "load 4");
+    assert!(!out.contains("unverified"), "{out}");
+
+    // Without any CLAUDE.md, the order of AGENTS.md files is still open.
+    fs::remove_file(sb.path("ws/CLAUDE.md")).unwrap();
+    fs::remove_file(proj.join("CLAUDE.md")).unwrap();
+    claude_instruction_files(&sb, "claude-md-or-agents-md");
+    let out = why(&sb, &proj, "claude");
+    line_with(&out, &sb.path("ws/AGENTS.md"), "load 1");
+    line_with(&out, &proj.join("AGENTS.md"), "load 2");
+    assert!(out.contains("unverified"), "{out}");
+    assert!(out.contains("come in the load order"), "{out}");
+}
+
+#[test]
+fn claude_code_managed_only_skips_everything_but_the_managed_file() {
+    let sb = Sandbox::empty();
+    let proj = sb.path("ws/proj");
+    write(&sb.home().join(".claude/CLAUDE.md"), "# me\n");
+    write(&sb.home().join(".claude/rules/mine.md"), "Be brief.\n");
+    write(&sb.path("ws/CLAUDE.md"), "# parent\n");
+    write(&proj.join("CLAUDE.md"), "# project\n");
+    write(&proj.join("CLAUDE.local.md"), "# local\n");
+    write(&proj.join("AGENTS.md"), "# agents\n");
+    write(&proj.join(".claude/rules/style.md"), "Use tabs.\n");
+    claude_instruction_files(&sb, "managed-only");
+    let out = why(&sb, &proj, "claude");
+    assert!(!out.contains("load 1"), "{out}");
+    for f in ["~/.claude/CLAUDE.md", "~/.claude/rules/mine.md"] {
+        let f = shown(f);
+        let skip = out
+            .lines()
+            .find(|l| l.contains(&f) && l.contains("skip"))
+            .unwrap_or_else(|| panic!("no skip line for {f} in:\n{out}"));
+        assert!(skip.contains("managed-only"), "{skip}");
+    }
+    for f in [
+        sb.path("ws/CLAUDE.md"),
+        proj.join("CLAUDE.md"),
+        proj.join("CLAUDE.local.md"),
+        proj.join("AGENTS.md"),
+        proj.join(".claude/rules/style.md"),
+    ] {
+        let skip = line_with(&out, &f, "skip");
+        assert!(skip.contains("managed-only"), "{skip}");
+    }
+    assert!(!out.contains("unverified"), "{out}");
+    assert!(out.contains("auto memory"), "{out}");
+}
+
 #[test]
 fn claude_code_flags_agents_md_under_home_and_path_scoped_rules() {
     let sb = Sandbox::empty();
@@ -343,6 +415,14 @@ fn plain_doctor_is_unchanged_and_why_takes_no_profile() {
         .assert()
         .failure()
         .stderr(contains("cannot be used with"));
+    for extra in [["--path", "sub"].as_slice(), &["--allow-insecure-source"]] {
+        sb.cli()
+            .args(["doctor", "--why", "."])
+            .args(extra)
+            .assert()
+            .failure()
+            .stderr(contains("cannot be used with"));
+    }
     sb.cli()
         .args(["doctor", "--why", "missing"])
         .assert()

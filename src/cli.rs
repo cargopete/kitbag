@@ -165,7 +165,7 @@ enum Cmd {
             value_name = "DIR",
             num_args = 0..=1,
             default_missing_value = ".",
-            conflicts_with_all = ["source", "scope", "project"]
+            conflicts_with_all = ["source", "scope", "project", "path", "allow_insecure_source"]
         )]
         why: Option<PathBuf>,
     },

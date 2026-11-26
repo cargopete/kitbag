@@ -284,8 +284,11 @@ fn claude_managed(os: Os) -> PathBuf {
 enum AgentsMode {
     /// Default: AGENTS.md only without any CLAUDE.md in or above the directory.
     Fallback,
+    /// CLAUDE.md and AGENTS.md; in each directory the CLAUDE.md files first.
     Both,
     ClaudeOnly,
+    /// Only the managed CLAUDE.md (and auto memory).
+    ManagedOnly,
     Other(String),
 }
 
@@ -305,6 +308,7 @@ fn claude_agents_mode(settings: Option<&Value>) -> AgentsMode {
         None | Some("claude-md-or-agents-md") => AgentsMode::Fallback,
         Some("claude-md-and-agents-md") => AgentsMode::Both,
         Some("claude-md") => AgentsMode::ClaudeOnly,
+        Some("managed-only") => AgentsMode::ManagedOnly,
         Some(other) => AgentsMode::Other(other.to_string()),
     }
 }
@@ -326,6 +330,8 @@ fn claude_code(place: &Place) -> Report {
     let env = place.env;
     let config = claude_config_dir(env);
     let user_md = config.join("CLAUDE.md");
+    let settings = read_json(&config.join("settings.json"));
+    let mode = claude_agents_mode(settings.as_ref());
 
     // 1. Managed policy, 2. user, 3. the directories from the root down.
     if place.sandboxed {
@@ -336,6 +342,10 @@ fn claude_code(place: &Place) -> Report {
     } else if file(&claude_managed(env.os)) {
         claude_check_size(&mut r, &claude_managed(env.os), "managed policy");
     }
+    if mode == AgentsMode::ManagedOnly {
+        claude_managed_only(&mut r, place, &config);
+        return r;
+    }
     if file(&user_md) {
         claude_check_size(&mut r, &user_md, "user instructions");
     }
@@ -345,7 +355,10 @@ fn claude_code(place: &Place) -> Report {
     // root down to the directory. The ancestor walk is documented for
     // CLAUDE.md and CLAUDE.local.md only; `.claude/CLAUDE.md` only for the
     // directory itself, but a `.claude/CLAUDE.md` above still blocks AGENTS.md.
+    // With "claude-md-and-agents-md", each directory's AGENTS.md comes right
+    // after its CLAUDE.md files (https://code.claude.com/docs/en/memory).
     let mut blockers: Vec<PathBuf> = Vec::new();
+    let mut agents: Vec<PathBuf> = Vec::new();
     let mut alt_above = false;
     for d in root_down(&place.dir) {
         let here = d == place.dir;
@@ -377,6 +390,15 @@ fn claude_code(place: &Place) -> Report {
             blockers.push(local.clone());
         }
         flag_wrong_case(&mut r, place, &d, "CLAUDE.md");
+        // AGENTS.md, through the built-in AGENTS.md plugin (v2.1.277 and later).
+        for f in [d.join("AGENTS.md"), d.join(".claude").join("AGENTS.md")] {
+            if file(&f) {
+                if mode == AgentsMode::Both {
+                    claude_agents_md(&mut r, env, &f, &user_md);
+                }
+                agents.push(f);
+            }
+        }
     }
     if alt_above {
         r.unverified(
@@ -389,25 +411,14 @@ fn claude_code(place: &Place) -> Report {
         "project rule",
     );
 
-    // AGENTS.md, through the built-in AGENTS.md plugin (v2.1.277 and later).
-    let settings = read_json(&config.join("settings.json"));
-    let mode = claude_agents_mode(settings.as_ref());
-    let mut agents: Vec<PathBuf> = Vec::new();
-    for d in root_down(&place.dir) {
-        for f in [d.join("AGENTS.md"), d.join(".claude").join("AGENTS.md")] {
-            if file(&f) {
-                agents.push(f);
-            }
-        }
-    }
     for f in ["AGENTS.local.md", "AGENTS.override.md"] {
         let p = place.dir.join(f);
         if file(&p) {
             r.skip(&p, "Claude Code never reads this file name");
         }
     }
-    let loaded_before: Vec<PathBuf> = r.loaded().map(Path::to_path_buf).collect();
     match &mode {
+        AgentsMode::Both | AgentsMode::ManagedOnly => {}
         AgentsMode::ClaudeOnly => {
             for a in &agents {
                 r.skip(
@@ -422,6 +433,7 @@ fn claude_code(place: &Place) -> Report {
             ));
         }
         AgentsMode::Fallback if !blockers.is_empty() => {
+            let loaded_before: Vec<PathBuf> = r.loaded().map(Path::to_path_buf).collect();
             for a in &agents {
                 if let Some(link) = loaded_before.iter().find(|l| same_file(l, a)) {
                     r.skip(
@@ -445,39 +457,18 @@ fn claude_code(place: &Place) -> Report {
                 ));
             }
         }
-        AgentsMode::Fallback | AgentsMode::Both => {
+        AgentsMode::Fallback => {
             for a in &agents {
-                if loaded_before.iter().any(|l| same_file(l, a)) {
-                    // The docs: "Claude Code skips an AGENTS.md it has already
-                    // loaded" - but only for the project's own files (#102369).
-                    if loaded_before
-                        .iter()
-                        .any(|l| l == &user_md && same_file(l, a))
-                    {
-                        r.trap(
-                            Some(a),
-                            format!(
-                                "loaded twice: {} is a link to this file, and Claude Code reads it once as user instructions and again as project instructions (anthropics/claude-code#102369)",
-                                show(env, &user_md)
-                            ),
-                        );
-                        r.load(a, "AGENTS.md, again");
-                    } else {
-                        r.skip(a, "already loaded through a CLAUDE.md that links to it");
-                    }
-                } else {
-                    claude_check_size(&mut r, a, "AGENTS.md");
-                }
+                claude_agents_md(&mut r, env, a, &user_md);
             }
             if !agents.is_empty() {
                 r.unverified(
-                    "the docs don't say where AGENTS.md files come in the load order across directories; they are listed after the CLAUDE.md files",
+                    "the docs don't say where AGENTS.md files come in the load order when no CLAUDE.md is found; they are listed after the user and rule files",
                 );
             }
             // #103458: under the home directory the check finds
             // ~/.claude/CLAUDE.md as a parent's .claude/CLAUDE.md.
-            if mode == AgentsMode::Fallback
-                && !agents.is_empty()
+            if !agents.is_empty()
                 && file(&user_md)
                 && config == env.home.join(".claude")
                 && place.dir.starts_with(&env.home)
@@ -494,6 +485,58 @@ fn claude_code(place: &Place) -> Report {
     }
     r.note("CLAUDE.md files in subdirectories load later, when Claude reads a file there; @path imports are followed up to four levels deep");
     r
+}
+
+/// One AGENTS.md that Claude Code reads, unless a file loaded before it is
+/// the same file.
+fn claude_agents_md(r: &mut Report, env: &Env, a: &Path, user_md: &Path) {
+    let loaded: Vec<PathBuf> = r.loaded().map(Path::to_path_buf).collect();
+    if !loaded.iter().any(|l| same_file(l, a)) {
+        claude_check_size(r, a, "AGENTS.md");
+    } else if loaded.iter().any(|l| l == user_md && same_file(l, a)) {
+        // The docs: "Claude Code skips an AGENTS.md it has already loaded" -
+        // but only for the project's own files (#102369).
+        r.trap(
+            Some(a),
+            format!(
+                "loaded twice: {} is a link to this file, and Claude Code reads it once as user instructions and again as project instructions (anthropics/claude-code#102369)",
+                show(env, user_md)
+            ),
+        );
+        r.load(a, "AGENTS.md, again");
+    } else {
+        r.skip(a, "already loaded through a CLAUDE.md that links to it");
+    }
+}
+
+/// `instructionFiles = "managed-only"`: only the managed CLAUDE.md and auto
+/// memory load at launch; user, project and local CLAUDE.md files, rules and
+/// every AGENTS.md are excluded (https://code.claude.com/docs/en/memory).
+fn claude_managed_only(r: &mut Report, place: &Place, config: &Path) {
+    let why = "not read: instructionFiles is \"managed-only\" in your Claude Code settings";
+    let mut files = vec![config.join("CLAUDE.md")];
+    files.extend(markdown_under(&config.join("rules"), &["md"], 1000));
+    for d in root_down(&place.dir) {
+        for name in ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"] {
+            files.push(d.join(name));
+        }
+        files.push(d.join(".claude").join("CLAUDE.md"));
+        files.push(d.join(".claude").join("AGENTS.md"));
+    }
+    files.extend(markdown_under(
+        &place.dir.join(".claude").join("rules"),
+        &["md"],
+        1000,
+    ));
+    // The managed file is read even if the walk passes its directory.
+    let mut seen: Vec<PathBuf> = vec![claude_managed(place.env.os)];
+    for f in files {
+        if file(&f) && !seen.contains(&f) {
+            r.skip(&f, why);
+            seen.push(f);
+        }
+    }
+    r.note("with instructionFiles \"managed-only\", only the managed CLAUDE.md and auto memory load (auto memory is not listed here)");
 }
 
 /// Rules under `dir` (recursively): loaded at start, or later when `paths`
@@ -1211,7 +1254,11 @@ mod tests {
         );
         assert_eq!(
             claude_agents_mode(Some(&opt("cc-plugin-agents-md@builtin", "managed-only"))),
-            AgentsMode::Other("managed-only".into())
+            AgentsMode::ManagedOnly
+        );
+        assert_eq!(
+            claude_agents_mode(Some(&opt("cc-plugin-agents-md@builtin", "something-new"))),
+            AgentsMode::Other("something-new".into())
         );
     }
 
