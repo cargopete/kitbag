@@ -797,6 +797,7 @@ fn load_source(
 fn print_plan_summary(plan: &Plan, env: &Env) {
     for c in &plan.changes {
         let stats = ui::line_stats(c)
+            .filter(|_| !ui::mode_only(c))
             .map(|(a, d)| {
                 format!(
                     "{} {}",
@@ -804,7 +805,13 @@ fn print_plan_summary(plan: &Plan, env: &Env) {
                     paint(RED, format!("-{d}"))
                 )
             })
-            .unwrap_or_else(|| paint(DIM, "binary"));
+            .unwrap_or_else(|| {
+                if ui::mode_only(c) {
+                    paint(DIM, "+x")
+                } else {
+                    paint(DIM, "binary")
+                }
+            });
         println!(
             "  {}  {}  {}",
             ui::change_label(c),

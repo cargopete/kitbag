@@ -543,16 +543,35 @@ impl PlanFs {
         Ok(())
     }
 
+    /// Whether `path` is already planned to be written with the executable bit.
+    pub fn is_executable_planned(&self, path: &Path) -> bool {
+        self.real_path(path)
+            .is_ok_and(|real| self.executable.contains(&real))
+    }
+
     /// Files planned to be written with the executable bit.
     pub fn executables(&self) -> std::collections::BTreeSet<PathBuf> {
         self.executable.clone()
     }
 
-    /// Planned changes, in path order, excluding no-op writes.
+    /// Whether `path` is planned as executable but the file on disk isn't
+    /// (Unix; always false elsewhere). Such a file is a change even when its
+    /// content is the same.
+    fn loses_executable(&self, path: &Path) -> bool {
+        cfg!(unix)
+            && self.executable.contains(path)
+            && !crate::adapters::common::skill_file_executable(path)
+    }
+
+    /// Planned changes, in path order, excluding no-op writes. A write of the
+    /// same content still counts when it restores a lost executable bit.
     pub fn changes(&self) -> Vec<FileChange> {
         self.staged
             .iter()
-            .filter(|(_, s)| s.before != s.after)
+            .filter(|(p, s)| {
+                s.before != s.after
+                    || (s.before.is_some() && s.after.is_some() && self.loses_executable(p))
+            })
             .map(|(p, s)| FileChange {
                 path: p.clone(),
                 before: s.before.clone(),

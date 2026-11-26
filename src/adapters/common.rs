@@ -277,6 +277,25 @@ pub fn write_skill(
             );
             continue;
         }
+        // Same content, but the script lost its executable bit (Unix).
+        if cfg!(unix)
+            && f.executable
+            && cur.as_deref() == Some(f.content.as_slice())
+            && !work.fs.is_executable_planned(&path)
+            && !skill_file_executable(&work.fs.real_path(&path)?)
+        {
+            work.fs.write(&path, f.content.clone())?;
+            work.fs.mark_executable(&path)?;
+            work.info(
+                target,
+                format!(
+                    "{} is no longer executable; the executable bit is set again",
+                    path.display()
+                ),
+            );
+            wrote = true;
+            continue;
+        }
         if cur.as_deref() != Some(f.content.as_slice())
             && check_redacted(work, &path, cur.as_deref(), &f.content, target)
         {

@@ -148,6 +148,66 @@ fn skill_scripts_keep_their_executable_bit() {
     assert_eq!(mode("home/.claude/skills/s/notes.txt") & 0o111, 0);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_skill_script_that_lost_its_executable_bit_is_a_change() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::empty();
+    profile(&sb);
+    fs::create_dir_all(sb.path("p/skills/s")).unwrap();
+    fs::write(
+        sb.path("p/skills/s/SKILL.md"),
+        "---\nname: s\ndescription: d\n---\nBody\n",
+    )
+    .unwrap();
+    let script = sb.path("p/skills/s/run.sh");
+    fs::write(&script, "#!/bin/sh\necho hi\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let apply = || {
+        sb.cli()
+            .args(["apply", "p", "--to", "codex", "--yes"])
+            .assert()
+            .success()
+    };
+    apply();
+    let applied = sb.home().join(".agents/skills/s/run.sh");
+    let mode = || fs::metadata(&applied).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode() & 0o111, 0o111);
+
+    // Content-identical and still executable: nothing to do.
+    apply().stdout(contains("Up to date"));
+
+    // Only the mode differs: the plan shows it and apply restores the bit.
+    fs::set_permissions(&applied, fs::Permissions::from_mode(0o644)).unwrap();
+    sb.cli()
+        .args(["diff", "p", "--to", "codex", "--exit-code"])
+        .assert()
+        .code(1)
+        .stdout(
+            contains("modify")
+                .and(contains("run.sh"))
+                .and(contains("+x"))
+                .and(contains("executable bit is set again"))
+                .and(contains("SKILL.md").not()),
+        );
+    apply().stdout(contains("Up to date").not());
+    assert_eq!(mode(), 0o755);
+    assert_eq!(
+        fs::read_to_string(&applied).unwrap(),
+        "#!/bin/sh\necho hi\n"
+    );
+    apply().stdout(contains("Up to date"));
+
+    // Undo puts the old mode back. The last two applies wrote nothing, so the
+    // latest transaction is the one that set the bit.
+    sb.cli().arg("undo").assert().success();
+    assert_eq!(mode(), 0o644);
+    assert_eq!(
+        fs::read_to_string(&applied).unwrap(),
+        "#!/bin/sh\necho hi\n"
+    );
+}
+
 #[test]
 fn commands_that_flatten_to_the_same_name_fail_the_capture() {
     let sb = Sandbox::empty();
