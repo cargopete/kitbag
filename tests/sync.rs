@@ -167,6 +167,12 @@ fn sync_leaves_hand_edits_alone() {
         );
     assert!(sb.read("home/.claude/CLAUDE.md").contains("Be very brief."));
     assert!(sb.read("home/.codex/AGENTS.md").contains("Be terse."));
+    // With every target skipped, it doesn't claim to be up to date.
+    sb.cli()
+        .args(["sync", "p", "--to", "claude-code", "--yes"])
+        .assert()
+        .code(1)
+        .stdout(contains("Nothing to apply").and(contains("Up to date").not()));
 }
 
 #[test]

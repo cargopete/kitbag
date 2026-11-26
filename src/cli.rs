@@ -904,7 +904,9 @@ fn present(
         Ok(())
     };
     if plan.changes.is_empty() {
-        if plan.withheld.is_empty() {
+        if plan.targets.is_empty() {
+            println!("Nothing to apply.");
+        } else if plan.withheld.is_empty() {
             println!(
                 "{} every target already matches the profile.",
                 paint(GREEN, "Up to date:")
