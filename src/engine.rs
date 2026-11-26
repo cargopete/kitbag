@@ -266,6 +266,11 @@ pub struct Plan {
     pub server_writes: Vec<ServerWrite>,
     /// Where the profile comes from ([`ApplyOptions::source`]).
     pub source: Option<String>,
+    /// At project scope, the project directory (as given, and canonical):
+    /// every write the plan makes in it must stay inside it. Checked again
+    /// when the plan is committed, since a symbolic link in the project can
+    /// change while the plan waits for confirmation.
+    pub confine_to: Option<(PathBuf, PathBuf)>,
 }
 
 /// One managed instructions item (see [`crate::adapters::Tracked`]).
@@ -481,6 +486,13 @@ pub fn plan(
         withheld_removals,
         server_writes,
         source: opts.source.clone(),
+        confine_to: (env.scope == Scope::Project).then(|| {
+            let root = env
+                .project
+                .canonicalize()
+                .unwrap_or_else(|_| env.project.clone());
+            (env.project.clone(), root)
+        }),
     })
 }
 
@@ -580,6 +592,7 @@ pub fn commit(plan: &Plan, description: &str, state_dir: &Path) -> Result<Option
             &WriteOptions {
                 private,
                 executable: plan.executable.clone(),
+                confine_to: plan.confine_to.clone(),
             },
         )
         .map(Some)

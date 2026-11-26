@@ -91,6 +91,41 @@ pub struct WriteOptions {
     pub private: std::collections::BTreeSet<PathBuf>,
     /// Files written with the executable bits added (skill scripts).
     pub executable: std::collections::BTreeSet<PathBuf>,
+    /// The project directory of a project-scope apply, as given and in its
+    /// canonical form. Every write to a path in it must really land inside it.
+    /// Checked before anything is written and again before each write, so a
+    /// symbolic link that changed after the plan was made can't redirect a
+    /// write elsewhere. Paths outside it (the profile files `sync --from`
+    /// updates) are not project writes and aren't checked.
+    pub confine_to: Option<(PathBuf, PathBuf)>,
+}
+
+/// Why writing `path`, if it is in the project `(base, root)`, would land
+/// outside it.
+fn escapes(path: &Path, (base, root): &(PathBuf, PathBuf)) -> Option<String> {
+    if !path.starts_with(base) && !path.starts_with(root) {
+        return None;
+    }
+    match real_location(path) {
+        Ok(real)
+            if real.strip_prefix(root).is_ok_and(|rest| {
+                rest.components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+            }) =>
+        {
+            None
+        }
+        Ok(real) => Some(format!(
+            "{} now resolves to {}, outside {}; a symbolic link changed after the plan was made",
+            path.display(),
+            real.display(),
+            root.display()
+        )),
+        Err(e) => Some(format!(
+            "{} can't be resolved ({e}); a symbolic link there may dangle",
+            path.display()
+        )),
+    }
 }
 
 /// Write `content` to `path` atomically, preserving `mode` when given.
@@ -358,6 +393,13 @@ impl Store {
         Self::create_private_dir(&self.backups())?;
         Self::create_private_dir(&self.tx_dir(&tx.id))?;
 
+        // 0. Every write still lands where the plan said (project confinement).
+        if let Some(root) = &opts.confine_to
+            && let Some(why) = changes.iter().find_map(|c| escapes(&c.path, root))
+        {
+            let _ = fs::remove_dir_all(self.tx_dir(&tx.id));
+            bail!("{why}; nothing was written");
+        }
         // 1. Snapshot everything first, and make sure nothing changed since planning.
         if let Err(e) = self.snapshot(&mut tx, changes) {
             let _ = fs::remove_dir_all(self.tx_dir(&tx.id));
@@ -369,6 +411,11 @@ impl Store {
         let mut done = 0;
         let result: Result<()> = (|| {
             for (i, c) in changes.iter().enumerate() {
+                if let Some(root) = &opts.confine_to
+                    && let Some(why) = escapes(&c.path, root)
+                {
+                    bail!("{why}");
+                }
                 match &c.after {
                     None => match fs::remove_file(&c.path) {
                         Err(e) if e.kind() != io::ErrorKind::NotFound => {

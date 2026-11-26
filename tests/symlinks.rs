@@ -170,3 +170,54 @@ fn capture_force_never_writes_through_links() {
         .unwrap();
     assert_eq!(sb.read("victim.md"), "ORIGINAL\n");
 }
+
+/// With `--project`, a directory in the project swapped for a link to
+/// somewhere else between planning and writing (while the plan waits for
+/// confirmation) stops the apply before anything is written.
+#[test]
+fn project_apply_rechecks_confinement_when_it_writes() {
+    use kitbag::adapters::Scope;
+    let sb = Sandbox::empty();
+    let profile = {
+        let mut p = kitbag::model::Profile::new("p");
+        p.instructions = Some("Be brief.\n".into());
+        p.rules.push(kitbag::model::Rule {
+            name: "style".into(),
+            description: Some("Style".into()),
+            body: "Use tabs.\n".into(),
+            ..Default::default()
+        });
+        p
+    };
+    let env = sb.env(Scope::Project);
+    let plan = plan(&profile, &["cursor"], &env);
+    assert!(plan.confine_to.is_some());
+    let rule = plan
+        .changes
+        .iter()
+        .find(|c| c.path.starts_with(sb.project().join(".cursor")))
+        .expect("a cursor rule in the project")
+        .path
+        .clone();
+
+    // The plan was made; now `.cursor` becomes a link out of the project.
+    fs::create_dir_all(sb.path("outside")).unwrap();
+    symlink(sb.path("outside"), sb.project().join(".cursor")).unwrap();
+    let e = kitbag::engine::commit(&plan, "test", &sb.state())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("outside") && e.contains("nothing was written"),
+        "{e}"
+    );
+    assert!(!rule.exists());
+    assert_eq!(fs::read_dir(sb.path("outside")).unwrap().count(), 0);
+    assert!(!sb.project().join("AGENTS.md").exists());
+
+    // Without the link the same plan still applies.
+    fs::remove_file(sb.project().join(".cursor")).unwrap();
+    kitbag::engine::commit(&plan, "test", &sb.state())
+        .unwrap()
+        .unwrap();
+    assert!(rule.exists());
+}
