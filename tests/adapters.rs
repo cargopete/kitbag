@@ -1330,6 +1330,62 @@ fn copilot_captures_custom_agents_and_legacy_chat_modes() {
 }
 
 #[test]
+fn copilot_agents_that_flatten_to_the_same_name_fail_the_capture() {
+    let sb = Sandbox::empty();
+    let dir = sb.project().join(".github/agents");
+    std::fs::create_dir_all(dir.join("team")).unwrap();
+    std::fs::write(dir.join("team/x.agent.md"), "One.\n").unwrap();
+    std::fs::write(dir.join("team-x.agent.md"), "Two.\n").unwrap();
+    let err = kitbag::engine::capture(&targets(&["copilot"]), &sb.env(Scope::Project), "test")
+        .map(|_| ())
+        .expect_err("a flattened name clash is an error");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("both flatten to the name 'team-x'"), "{msg}");
+    assert!(msg.contains("team-x.agent.md"), "{msg}");
+
+    // The same clash across extensions is an error too, while `x.agent.md`
+    // and `x.md` (one path, two extensions) are still one agent.
+    std::fs::remove_file(dir.join("team-x.agent.md")).unwrap();
+    std::fs::write(dir.join("team-x.md"), "Three.\n").unwrap();
+    assert!(
+        kitbag::engine::capture(&targets(&["copilot"]), &sb.env(Scope::Project), "test").is_err()
+    );
+    std::fs::remove_file(dir.join("team-x.md")).unwrap();
+    std::fs::write(dir.join("team/x.md"), "Plain.\n").unwrap();
+    let r = capture(&["copilot"], &sb.env(Scope::Project));
+    assert_eq!(r.profile.agents.len(), 1);
+    assert_eq!(r.profile.agents[0].body, "One.");
+}
+
+#[test]
+fn copilot_skips_prompt_instructions_and_readme_files_among_agents() {
+    let sb = Sandbox::empty();
+    let dir = sb.project().join(".github/agents");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("writer.agent.md"), "Write.\n").unwrap();
+    std::fs::write(dir.join("helper.md"), "Help.\n").unwrap();
+    std::fs::write(dir.join("ship.prompt.md"), "Ship.\n").unwrap();
+    std::fs::write(dir.join("style.instructions.md"), "Style.\n").unwrap();
+    std::fs::write(dir.join("README.md"), "About these agents.\n").unwrap();
+    let r = capture(&["copilot"], &sb.env(Scope::Project));
+    let names: Vec<&str> = r.profile.agents.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, ["helper", "writer"]);
+    for (file, why) in [
+        ("ship.prompt.md", "a prompt file"),
+        ("style.instructions.md", "an instructions file"),
+        ("README.md", "a README"),
+    ] {
+        assert!(
+            r.notes
+                .iter()
+                .any(|n| n.message.contains(file) && n.message.contains(why)),
+            "{file}: {:?}",
+            r.notes
+        );
+    }
+}
+
+#[test]
 fn copilot_captures_user_agents_from_copilot_home() {
     let sb = Sandbox::empty();
     let dir = sb.home().join(".copilot/agents");

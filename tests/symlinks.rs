@@ -243,6 +243,10 @@ fn copilot_agents_are_not_read_or_written_through_a_link_out_of_the_project() {
     let env = sb.env(Scope::Project);
     let engine_opts = opts(&p);
     let planned = kitbag::engine::plan(&p, &targets(&["copilot"]), &env, &engine_opts);
-    assert!(planned.is_err() || planned.unwrap().changes.is_empty());
+    let e = format!("{:#}", planned.expect_err("the plan refuses the link"));
+    assert!(
+        e.contains(".github") && e.contains("agents") && e.contains("refusing to write through it"),
+        "{e}"
+    );
     assert!(!sb.path("outside/reviewer.agent.md").exists());
 }

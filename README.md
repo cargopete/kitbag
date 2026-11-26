@@ -78,16 +78,16 @@ Starting from scratch? `kitbag init my-profile` writes a commented starter profi
 
 ## Targets
 
-| Target id        | Tool              | Scopes        | MCP | Instructions | Rules      | Commands     | Skills | Settings |
-|------------------|-------------------|---------------|-----|--------------|------------|--------------|--------|----------|
-| `claude-code`    | Claude Code       | user, project | ✓   | ✓            | ✓          | ✓            | ✓      | ✓        |
-| `cursor`         | Cursor            | user, project | ✓   | project      | project    | ✓            | ✓      | -        |
-| `codex`          | OpenAI Codex CLI  | user, project | ✓   | ✓            | folded     | user         | ✓      | ✓        |
-| `gemini-cli`     | Gemini CLI        | user, project | ✓   | ✓            | folded     | ✓            | ✓      | ✓        |
-| `claude-desktop` | Claude Desktop    | user          | ✓ (local servers) | -  | -          | -            | -      | -        |
-| `antigravity`    | Google Antigravity | user, project | ✓  | ✓            | -          | -            | -      | -        |
-| `opencode`       | opencode          | user, project | ✓   | ✓            | -          | -            | -      | -        |
-| `copilot`        | GitHub Copilot (CLI, VS Code) | user, project | ✓ | ✓    | ✓          | project      | ✓      | -        |
+| Target id        | Tool              | Scopes        | MCP | Instructions | Rules      | Commands     | Skills | Agents | Settings |
+|------------------|-------------------|---------------|-----|--------------|------------|--------------|--------|--------|----------|
+| `claude-code`    | Claude Code       | user, project | ✓   | ✓            | ✓          | ✓            | ✓      | -      | ✓        |
+| `cursor`         | Cursor            | user, project | ✓   | project      | project    | ✓            | ✓      | -      | -        |
+| `codex`          | OpenAI Codex CLI  | user, project | ✓   | ✓            | folded     | user         | ✓      | -      | ✓        |
+| `gemini-cli`     | Gemini CLI        | user, project | ✓   | ✓            | folded     | ✓            | ✓      | -      | ✓        |
+| `claude-desktop` | Claude Desktop    | user          | ✓ (local servers) | -  | -          | -            | -      | -      | -        |
+| `antigravity`    | Google Antigravity | user, project | ✓  | ✓            | -          | -            | -      | -      | -        |
+| `opencode`       | opencode          | user, project | ✓   | ✓            | -          | -            | -      | -      | -        |
+| `copilot`        | GitHub Copilot (CLI, VS Code) | user, project | ✓ | ✓    | ✓          | project      | ✓      | ✓      | -        |
 
 `claude` is accepted as an alias for `claude-code` wherever a target id is given (`--to`,
 `--from`, `targets`, `disabled_on`, and `[settings.claude]`, read as `[settings.claude-code]`;

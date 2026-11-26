@@ -311,15 +311,33 @@ fn import_vscode(cap: &mut Captured, name: &str, def: &Map<String, Value>, file:
     import(cap, name, def, file, false);
 }
 
-/// The agent name of a file in an agents or chat-modes directory, and
-/// whether it is a legacy chat mode: `x.agent.md`, `x.chatmode.md`, `x.md`.
-fn agent_name(rel: &str) -> Option<(String, bool)> {
-    if rel.ends_with(AGENT_EXT) {
-        Some((name_from_rel(rel, AGENT_EXT), false))
+/// The agent name of a file in an agents or chat-modes directory, the path
+/// without its extension, and whether it is a legacy chat mode:
+/// `x.agent.md`, `x.chatmode.md`, `x.md`.
+fn agent_name(rel: &str) -> Option<(String, String, bool)> {
+    let (ext, mode) = if rel.ends_with(AGENT_EXT) {
+        (AGENT_EXT, false)
     } else if rel.ends_with(CHATMODE_EXT) {
-        Some((name_from_rel(rel, CHATMODE_EXT), true))
+        (CHATMODE_EXT, true)
     } else if rel.ends_with(".md") {
-        Some((name_from_rel(rel, ".md"), false))
+        (".md", false)
+    } else {
+        return None;
+    };
+    let stem = rel.strip_suffix(ext).unwrap_or(rel).to_string();
+    Some((name_from_rel(rel, ext), stem, mode))
+}
+
+/// Markdown files in an agents directory that aren't agents: other Copilot
+/// file types, and a README.
+fn not_an_agent(rel: &str) -> Option<&'static str> {
+    let file = rel.rsplit('/').next().unwrap_or(rel);
+    if file.ends_with(".prompt.md") {
+        Some("a prompt file, not an agent")
+    } else if file.ends_with(".instructions.md") {
+        Some("an instructions file, not an agent")
+    } else if file.eq_ignore_ascii_case("readme.md") {
+        Some("a README, not an agent")
     } else {
         None
     }
@@ -327,23 +345,38 @@ fn agent_name(rel: &str) -> Option<(String, bool)> {
 
 /// Capture the custom agents in `dir` (`.agent.md` before `.md` and
 /// `.chatmode.md` of the same name); `legacy` is the old chat-modes
-/// directory, where only `.chatmode.md` files count. Returns the legacy chat
-/// modes it captured.
+/// directory, where only `.chatmode.md` files count. Two different files that
+/// flatten to the same name (`team/x.agent.md`, `team-x.agent.md`) are an
+/// error, as for prompts and rules. Returns the legacy chat modes it captured.
 fn capture_agents(cap: &mut Captured, dir: &Path, legacy: bool) -> Result<Vec<String>> {
     let mut modes = Vec::new();
     if cap.escapes(dir, ID) {
         return Ok(modes);
     }
-    let mut files: Vec<(String, String, bool)> = walk_files(dir, 500)?
-        .into_iter()
-        .filter_map(|rel| {
-            let (name, mode) = agent_name(&rel)?;
-            (!legacy || mode).then_some((rel, name, mode))
-        })
-        .collect();
+    let mut files: Vec<(String, String, String, bool)> = Vec::new();
+    for rel in walk_files(dir, 500)? {
+        let Some((name, stem, mode)) = agent_name(&rel) else {
+            continue;
+        };
+        if legacy && !mode {
+            continue;
+        }
+        if let Some(why) = not_an_agent(&rel) {
+            cap.warn(
+                ID,
+                format!("skipped {}: {why}", join_rel(dir, &rel).display()),
+            );
+            continue;
+        }
+        files.push((rel, name, stem, mode));
+    }
     // `.agent.md` first, then plain `.md`, then chat modes.
-    files.sort_by_key(|(rel, _, mode)| (*mode, !rel.ends_with(AGENT_EXT), rel.clone()));
-    for (rel, name, mode) in files {
+    files.sort_by_key(|(rel, _, _, mode)| (*mode, !rel.ends_with(AGENT_EXT), rel.clone()));
+    // Name -> the file claiming it, and the path without its extension, so
+    // `x.agent.md` and `x.md` are one agent and `a/x.md`, `a-x.md` a clash.
+    let mut seen = std::collections::BTreeMap::new();
+    let mut stems = std::collections::BTreeMap::new();
+    for (rel, name, stem, mode) in files {
         let path = join_rel(dir, &rel);
         if !is_valid_name(&name) {
             cap.warn(
@@ -351,6 +384,10 @@ fn capture_agents(cap: &mut Captured, dir: &Path, legacy: bool) -> Result<Vec<St
                 format!("skipped {}: unsupported file name", path.display()),
             );
             continue;
+        }
+        if stems.get(&name) != Some(&stem) {
+            claim_name(&mut seen, dir, &rel, &name)?;
+            stems.insert(name.clone(), stem);
         }
         if cap.profile.agents.iter().any(|a| a.name == name) {
             cap.info(
