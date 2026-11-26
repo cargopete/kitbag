@@ -213,11 +213,15 @@ fn disabling_claude_leaves_claude_desktop_alone() {
 #[test]
 fn help_mentions_the_alias() {
     let sb = Sandbox::empty();
-    sb.cli()
-        .args(["apply", "--help"])
-        .assert()
-        .success()
-        .stdout(contains("alias: claude"));
+    for cmd in ["apply", "status", "sync"] {
+        let out = sb.cli().args([cmd, "--help"]).assert().success();
+        // clap wraps help to the terminal width, so compare with whitespace collapsed.
+        let text = String::from_utf8_lossy(&out.get_output().stdout)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("alias: claude"), "{cmd} --help: {text}");
+    }
 }
 
 #[test]
