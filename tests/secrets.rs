@@ -987,9 +987,9 @@ fn nested_settings_and_skill_support_files_are_checked_like_config() {
     )
     .unwrap();
     sb.cli().args(["doctor", "hand"]).assert().code(1).stdout(
-        contains("settings.gemini-cli.ui.apiToken: looks like a secret-named-field")
+        contains("settings.gemini-cli.ui.apiToken: looks like a secret (secret-named-field)")
             .and(contains(
-                "skills/deploy/scripts/deploy.sh: looks like a secret-named-value",
+                "skills/deploy/scripts/deploy.sh: looks like a secret (secret-named-value)",
             ))
             .and(contains("skills/deploy/app.local: contains secret values")),
     );

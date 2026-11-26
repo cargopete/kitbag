@@ -696,7 +696,7 @@ pub fn scan_for_secrets(p: &Profile) -> Vec<String> {
             strong_secret_kind(v)
         };
         if let Some(k) = kind {
-            out.push(format!("{where_}: looks like a {k}"));
+            out.push(format!("{where_}: looks like a secret ({k})"));
         }
     };
     for (n, s) in &p.mcp_servers {
@@ -714,7 +714,10 @@ pub fn scan_for_secrets(p: &Profile) -> Vec<String> {
         // (Secret fallbacks are reported above, with a clearer message.)
         for r in redact_server(n, s).1 {
             if r.reason != "secret-fallback" {
-                out_extra.push(format!("{}: looks like a {}", r.location, r.reason));
+                out_extra.push(format!(
+                    "{}: looks like a secret ({})",
+                    r.location, r.reason
+                ));
             }
         }
     }
@@ -727,7 +730,7 @@ pub fn scan_for_secrets(p: &Profile) -> Vec<String> {
         // Nested values under secret-sounding names, as in structured files.
         for at in crate::secrets::json_secret_fields(&all) {
             out_extra.push(format!(
-                "settings.{t}.{at}: looks like a secret-named-field"
+                "settings.{t}.{at}: looks like a secret (secret-named-field)"
             ));
         }
     }
@@ -758,7 +761,10 @@ pub fn scan_for_secrets(p: &Profile) -> Vec<String> {
             if let Ok(t) = std::str::from_utf8(&f.content)
                 && let Some(k) = crate::secrets::support_file_secret_kind(&f.path, t)
             {
-                out.push(format!("skills/{}/{}: looks like a {k}", s.name, f.path));
+                out.push(format!(
+                    "skills/{}/{}: looks like a secret ({k})",
+                    s.name, f.path
+                ));
             }
             if let Some(why) = sensitive_file(&f.path, &f.content) {
                 out_extra.push(format!("skills/{}/{}: {why}", s.name, f.path));
@@ -972,9 +978,28 @@ mod tests {
         let e = save(&p, dir.path(), false).unwrap_err();
         assert!(
             e.to_string()
-                .contains("instructions.md: looks like a github-token")
+                .contains("instructions.md: looks like a secret (github-token)")
         );
         assert!(!dir.path().join(MANIFEST).exists());
+    }
+
+    #[test]
+    fn secret_messages_read_as_english() {
+        // Not "looks like a openai-key" / "a aws-access-key": the kind goes in
+        // brackets after a fixed phrase, so the article is always right.
+        let mut p = Profile::new("x");
+        p.instructions = Some("key sk-FAKEFAKEFAKEFAKEFAKEFAKE0123 in here".into());
+        let leaks = scan_for_secrets(&p);
+        assert!(
+            leaks.contains(&"instructions.md: looks like a secret (openai-key)".to_string()),
+            "{leaks:?}"
+        );
+        p.instructions = Some("aws AKIAFAKEFAKEFAKEFAKE".into());
+        let leaks = scan_for_secrets(&p);
+        assert!(
+            leaks.contains(&"instructions.md: looks like a secret (aws-access-key)".to_string()),
+            "{leaks:?}"
+        );
     }
 
     #[cfg(unix)]
