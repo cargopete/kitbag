@@ -166,10 +166,15 @@ releases will refuse newer profiles instead of misreading them.
 
 **Per-tool MCP servers.** One shared profile can keep a heavy server out of the tools that
 don't need it. `targets` lists the only tools a server is applied to; `disabled_on` lists the
-tools it is kept out of. Use one or the other, not both. Target names are those of
-`kitbag list-targets` (`claude-code`, `cursor`, `codex`, `gemini-cli`, `claude-desktop`); an
-unknown name is an error that lists the valid ones. `only` and `except` are accepted as older
-names for the same fields.
+tools it is kept out of. Use one or the other, not both, and give `targets` at least one tool.
+Target names are those of `kitbag list-targets` (`claude-code`, `cursor`, `codex`,
+`gemini-cli`, `claude-desktop`, `antigravity`). An unknown name (a typo, or a tool from a newer
+kitbag) is a warning that lists the valid ones, and the name is ignored: it matches no tool.
+`only` and `except` still load as older names for the same fields (an empty `only` still means
+no restriction, with a warning); set each field under one name, not both. Capture writes the new
+names. kitbag 0.1.2 and older don't know `targets` / `disabled_on` and refuse a profile that
+uses them ("unknown field"), so keep `only` / `except` in a profile shared with people on those
+versions.
 
 ```toml
 [mcp_servers.playwright]       # browser work in Claude Code only
@@ -187,11 +192,13 @@ The plan notes each server it skips (`MCP server 'playwright' skipped on cursor:
 profile`). If kitbag applied a server to a tool earlier and the profile now disables it there,
 apply removes it from that tool, with a backup, so `kitbag undo` puts it back. It only does so
 when kitbag's own records (`applied-servers.json` in the state directory) show that an apply of
-the same profile wrote that entry and it hasn't been edited since. A server you added by hand,
-one another profile added, or one you edited stays, and the plan says why. From a git source,
-a server that becomes enabled for a tool again is an addition like any other, so it needs
-`--allow-git-mcp`. `capture --force` into an existing profile keeps the `targets` and
-`disabled_on` of the servers it captures again.
+the same profile (the same name, from the same directory or git URL) wrote that entry and it
+hasn't been edited since. A server you added by hand, one another profile added, or one you
+edited stays, and the plan says why. From a git source, removing a server needs the same
+opt-in as adding one (`--allow-git-mcp <names>` or `--trust-source`); without it the plan lists
+it under "MCP servers not removed" and leaves it. A server that becomes enabled for a tool again
+is an addition like any other. `capture --force` into an existing profile keeps the `targets`
+and `disabled_on` of the servers it captures again.
 
 **Env references.** `${NAME}` takes its value from the environment. `${NAME:-fallback}`
 falls back to a non-secret default (it is written to disk wherever the variable is unset, so
