@@ -877,6 +877,61 @@ fn opencode_apply_keeps_the_legacy_layout() {
     assert!(doc["mcp"]["linear"].get("enabled").is_none(), "{doc}");
 }
 
+/// In opencode 1's layout a server named after one of opencode's own `mcp`
+/// keys is skipped, so it can't turn the file into a `mcp.servers` one.
+#[test]
+fn opencode_legacy_layout_skips_reserved_server_names() {
+    let sb = Sandbox::empty();
+    let cfg = sb.project().join("opencode.json");
+    std::fs::write(
+        &cfg,
+        r#"{
+  "mcp": {
+    "mine": { "type": "local", "command": ["my-mcp"] }
+  }
+}
+"#,
+    )
+    .unwrap();
+    let mut prof = sample();
+    for name in ["servers", "timeout"] {
+        prof.mcp_servers.insert(
+            name.into(),
+            McpServer {
+                command: Some("reserved-mcp".into()),
+                ..Default::default()
+            },
+        );
+    }
+    let env = sb.env(Scope::Project);
+    let p = plan(&prof, &["opencode"], &env);
+    assert!(
+        p.notes.iter().any(|n| n.target == "opencode"
+            && n.message.contains("servers, timeout skipped")
+            && n.message.contains("opencode.json")),
+        "{:?}",
+        p.notes
+    );
+    apply(&sb, &prof, &["opencode"], &env);
+    let doc = sb.json("project/opencode.json");
+    assert!(doc["mcp"].get("servers").is_none(), "{doc}");
+    assert!(doc["mcp"].get("timeout").is_none(), "{doc}");
+    assert_eq!(doc["mcp"]["github"]["type"], "local");
+    assert_eq!(doc["mcp"]["mine"]["command"], json!(["my-mcp"]));
+
+    let r = capture(&["opencode"], &env);
+    let s = &r.profile.mcp_servers;
+    assert!(s.contains_key("github") && s.contains_key("mine"), "{s:?}");
+    assert!(!s.contains_key("type") && !s.contains_key("command"));
+    assert!(
+        !r.notes
+            .iter()
+            .any(|n| n.message.contains("'type'") || n.message.contains("'command'")),
+        "{:?}",
+        r.notes
+    );
+}
+
 /// In a project, AGENTS.md is shared with Codex, Cursor and Antigravity:
 /// one managed block, and undo restores the file.
 #[test]

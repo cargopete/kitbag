@@ -107,9 +107,13 @@ enum Layout {
     Legacy,
 }
 
+/// Keys opencode itself uses directly under `mcp`, so they can't be server
+/// names in the opencode 1 layout.
+const RESERVED_MCP_KEYS: &[&str] = &["servers", "timeout"];
+
 /// An opencode 1 server entry directly under `mcp`: an object with a `type`.
 fn is_legacy_entry(name: &str, def: &Value) -> bool {
-    name != "servers" && def.get("type").is_some()
+    !RESERVED_MCP_KEYS.contains(&name) && def.get("type").is_some()
 }
 
 /// The layout a config file already uses; `mcp.servers` unless it only has
@@ -255,8 +259,8 @@ impl Adapter for OpenCode {
                     ID,
                     format!(
                         "{} lists more instruction files under 'instructions'; only {} was captured",
-                        file.display(),
-                        p.instructions.display()
+                        tildify(file, &env.home),
+                        tildify(&p.instructions, &env.home)
                     ),
                 );
             }
@@ -296,7 +300,14 @@ impl Adapter for OpenCode {
 
         let mut servers = Vec::new();
         let mut sse = Vec::new();
+        let mut reserved = Vec::new();
         for (name, s) in servers_for(profile, ID, work, true) {
+            // In the opencode 1 layout a server named `servers` or `timeout`
+            // would overwrite opencode's own key under `mcp`.
+            if layout == Layout::Legacy && RESERVED_MCP_KEYS.contains(&name.as_str()) {
+                reserved.push(name.as_str());
+                continue;
+            }
             let s = render_server(s, RefStyle::EnvBrace, env, work);
             let mut def = Map::new();
             match s.transport() {
@@ -338,6 +349,17 @@ impl Adapter for OpenCode {
                 format!(
                     "MCP server(s) {} skipped: opencode connects to remote servers over Streamable HTTP, not SSE",
                     sse.join(", ")
+                ),
+            );
+        }
+        if !reserved.is_empty() {
+            work.warn(
+                ID,
+                format!(
+                    "MCP server(s) {} skipped: {} keeps servers directly under 'mcp', where {} are opencode's own keys; rename the server(s) in the profile",
+                    reserved.join(", "),
+                    tildify(&file, &work.home),
+                    RESERVED_MCP_KEYS.join(" and ")
                 ),
             );
         }

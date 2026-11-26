@@ -613,7 +613,9 @@ Good next candidates: Windsurf, Zed, VS Code / GitHub Copilot.
 - **opencode** 2 keeps MCP servers under `mcp.servers` and turns one off with `disabled: true`;
   opencode 1 kept them directly under `mcp` with `enabled: false`, and opencode 2 still reads
   that. kitbag writes the layout a config file already uses (`mcp.servers` for a new one), so a
-  file opencode 1 reads stays readable, and capture reads both. opencode reads
+  file opencode 1 reads stays readable, and capture reads both. In opencode 1's layout a server
+  named `servers` or `timeout` would overwrite opencode's own key, so it is skipped with a
+  warning; rename it in the profile. opencode reads
   `~/.claude/CLAUDE.md` (or a project's `CLAUDE.md`) only while there is no `AGENTS.md`; the
   plan notes when the `AGENTS.md` kitbag creates takes its place. Files listed under
   `instructions`, `{file:...}` references and opencode's agents, commands, skills and plugins
