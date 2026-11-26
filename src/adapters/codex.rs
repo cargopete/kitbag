@@ -21,9 +21,9 @@ use toml_edit::Item;
 
 use super::common::{
     MdKind, Resolver, capture_instructions, capture_markdown_dir, capture_skills_dir,
-    import_server, merge_server_def, safe_settings, server_entries, servers_for,
-    skill_with_required_frontmatter, str_of, string_list, string_map, write_instructions,
-    write_skill,
+    import_server, merge_server_def, record_server_write, remove_skipped_server, safe_settings,
+    server_entries, servers_for, skill_with_required_frontmatter, skipped_servers, str_of,
+    string_list, string_map, write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::toml::{
@@ -343,6 +343,19 @@ impl Adapter for Codex {
                 codex_server(name, s, env, opts, work).map(|t| (name.clone(), t))
             })
             .collect();
+        // Servers the profile disables here, removed if kitbag added them.
+        for name in skipped_servers(work, ID) {
+            let cur = doc
+                .get("mcp_servers")
+                .and_then(|t| t.get(&name))
+                .map(item_to_json);
+            if remove_skipped_server(work, opts, ID, &p.config, &name, cur.as_ref())
+                && let Some(t) = doc.get_mut("mcp_servers").and_then(Item::as_table_like_mut)
+            {
+                t.remove(&name);
+                changed = true;
+            }
+        }
         if !wanted.is_empty() {
             let servers = table_mut(&mut doc, &["mcp_servers"])?;
             for (name, want) in wanted {
@@ -386,6 +399,8 @@ impl Adapter for Codex {
                         servers.insert(&name, Item::Table(json_to_table(&merged.def)));
                     }
                 }
+                let written = servers.get(&name).map(item_to_json);
+                record_server_write(work, ID, &p.config, &name, written.as_ref());
                 work.changed_servers.push((ID.to_string(), name));
                 changed = true;
             }

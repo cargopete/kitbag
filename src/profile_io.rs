@@ -63,7 +63,7 @@ struct Manifest {
 
 /// Parse and validate a `kitbag.toml` manifest into a profile without file-based parts.
 pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> {
-    let m: Manifest = toml::from_str(text).map_err(|e| {
+    let mut m: Manifest = toml::from_str(text).map_err(|e| {
         ProfileError::new(
             format!("{} is not a valid kitbag manifest", file.display()),
             vec![crate::edit::safe_parse_error(
@@ -83,7 +83,8 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
     if m.name.trim().is_empty() {
         issues.push("'name' must not be empty".into());
     }
-    for (name, s) in &m.mcp_servers {
+    let mut warnings = Vec::new();
+    for (name, s) in &mut m.mcp_servers {
         if !is_valid_name(name) {
             issues.push(format!(
                 "mcp_servers.{name}: names may only contain letters, digits, '.', '_' and '-'"
@@ -91,6 +92,14 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
         }
         for i in s.validate() {
             issues.push(format!("mcp_servers.{name}: {i}"));
+        }
+        let (legacy_errors, legacy_warnings) = s.take_legacy_targeting();
+        let (errors, unknown) = s.targeting_issues(&crate::adapters::ids());
+        for i in legacy_errors.into_iter().chain(errors) {
+            issues.push(format!("mcp_servers.{name}: {i}"));
+        }
+        for w in legacy_warnings.into_iter().chain(unknown) {
+            warnings.push(format!("mcp_servers.{name}: {w}"));
         }
     }
     if !issues.is_empty() {
@@ -104,6 +113,7 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
         description: m.description.filter(|d| !d.trim().is_empty()),
         mcp_servers: m.mcp_servers,
         settings: m.settings,
+        warnings,
         ..Profile::default()
     })
 }
@@ -417,6 +427,25 @@ pub fn profile_files(p: &Profile) -> BTreeMap<String, Vec<u8>> {
         }
     }
     out
+}
+
+/// Carry the per-tool targeting (`targets` / `disabled_on`) of `old`'s MCP
+/// servers over to the same-named servers of a fresh capture, which can't
+/// know it. Returns the servers it was kept for.
+pub fn keep_targeting(new: &mut Profile, old: &Profile) -> Vec<String> {
+    let mut kept = Vec::new();
+    for (name, s) in &mut new.mcp_servers {
+        let Some(o) = old.mcp_servers.get(name) else {
+            continue;
+        };
+        if o.targets.is_none() && o.disabled_on.is_empty() {
+            continue;
+        }
+        s.targets.clone_from(&o.targets);
+        s.disabled_on.clone_from(&o.disabled_on);
+        kept.push(name.clone());
+    }
+    kept
 }
 
 /// Write a profile directory. Refuses to replace an existing profile unless `force`,
@@ -803,6 +832,109 @@ mod tests {
             e.to_string().contains("symbolic links are not allowed"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn keeps_targeting_on_recapture() {
+        let mut old = sample();
+        let gh = old.mcp_servers.get_mut("github").unwrap();
+        gh.targets = Some(vec!["claude-code".into()]);
+        let mut new = sample();
+        new.mcp_servers.insert(
+            "other".into(),
+            McpServer {
+                command: Some("x".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(keep_targeting(&mut new, &old), vec!["github"]);
+        assert_eq!(
+            new.mcp_servers["github"].targets,
+            Some(vec!["claude-code".to_string()])
+        );
+        assert_eq!(new.mcp_servers["other"].targets, None);
+        // A profile without targeting renders exactly as before.
+        assert!(!manifest_toml(&sample()).contains("targets"));
+    }
+
+    #[test]
+    fn targeting_fields_load_and_save() {
+        let text = "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\ntargets = [\"claude-code\"]\n[mcp_servers.b]\ncommand = \"b\"\ndisabled_on = [\"cursor\"]\n[mcp_servers.c]\ncommand = \"c\"\nonly = [\"codex\"]\n[mcp_servers.d]\ncommand = \"d\"\nexcept = [\"gemini-cli\"]\n";
+        let p = parse_manifest(text, Path::new("k")).unwrap();
+        assert_eq!(p.mcp_servers["a"].targets, Some(vec!["claude-code".into()]));
+        assert_eq!(p.mcp_servers["b"].disabled_on, vec!["cursor".to_string()]);
+        // The older names still load, and are written with the new ones.
+        assert_eq!(p.mcp_servers["c"].targets, Some(vec!["codex".into()]));
+        assert_eq!(
+            p.mcp_servers["d"].disabled_on,
+            vec!["gemini-cli".to_string()]
+        );
+        let out = manifest_toml(&p);
+        assert!(
+            out.contains("[mcp_servers.a]\ncommand = \"a\"\ntargets = [\"claude-code\"]"),
+            "{out}"
+        );
+        assert!(out.contains("disabled_on = [\"cursor\"]"), "{out}");
+        assert_eq!(parse_manifest(&out, Path::new("k")).unwrap(), p);
+    }
+
+    #[test]
+    fn targeting_errors() {
+        let both = "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\ntargets = [\"codex\"]\ndisabled_on = [\"cursor\"]\n";
+        let e = parse_manifest(both, Path::new("k")).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("mcp_servers.a: set either 'targets'"),
+            "{e}"
+        );
+        let both_names = "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\nonly = [\"codex\"]\ntargets = [\"codex\"]\n";
+        let e = parse_manifest(both_names, Path::new("k")).unwrap_err();
+        assert!(
+            e.to_string().contains(
+                "mcp_servers.a: both 'only' and 'targets' are set; 'only' is the older name of 'targets'"
+            ),
+            "{e}"
+        );
+        let empty = "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\ntargets = []\n";
+        let e = parse_manifest(empty, Path::new("k")).unwrap_err();
+        assert!(e.to_string().contains("'targets' is empty"), "{e}");
+    }
+
+    #[test]
+    fn targeting_warnings() {
+        // A target from a newer kitbag loads, with a warning, and matches nothing.
+        let unknown = "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\ntargets = [\"claude\", \"codex\"]\n[mcp_servers.b]\ncommand = \"b\"\nexcept = [\"vscode\"]\n";
+        let p = parse_manifest(unknown, Path::new("k")).unwrap();
+        assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
+        assert!(
+            p.warnings[0]
+                .starts_with("mcp_servers.a: unknown target 'claude' in 'targets' is ignored"),
+            "{:?}",
+            p.warnings
+        );
+        assert!(p.warnings[0].contains(
+            "valid targets: claude-code, cursor, codex, gemini-cli, claude-desktop, antigravity"
+        ));
+        assert!(
+            p.warnings[1].starts_with("mcp_servers.b: unknown target 'vscode' in 'disabled_on'")
+        );
+        assert!(p.mcp_servers["a"].applies_to("codex"));
+        assert!(!p.mcp_servers["a"].applies_to("cursor"));
+        assert!(p.mcp_servers["b"].applies_to("cursor"));
+        // The name is kept, so re-saving the profile doesn't lose it.
+        assert!(manifest_toml(&p).contains("targets = [\"claude\", \"codex\"]"));
+
+        // An empty 'only' keeps its old meaning: no restriction.
+        let empty_only = "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\nonly = []\n";
+        let p = parse_manifest(empty_only, Path::new("k")).unwrap();
+        assert_eq!(p.mcp_servers["a"].targets, None);
+        assert!(p.mcp_servers["a"].applies_to("cursor"));
+        assert!(
+            p.warnings[0].contains("'only' is empty"),
+            "{:?}",
+            p.warnings
+        );
+        assert!(!manifest_toml(&p).contains("only"));
     }
 
     #[test]

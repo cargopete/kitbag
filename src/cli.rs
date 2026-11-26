@@ -541,7 +541,7 @@ description = "My AI agent setup"
 # [mcp_servers.linear]
 # url = "https://mcp.linear.app/mcp"
 # headers = { Authorization = "Bearer ${LINEAR_API_KEY}" }
-# only = ["claude-code", "cursor"]      # or: except = ["codex"]
+# targets = ["claude-code", "cursor"]   # only these tools; or: disabled_on = ["codex"]
 
 # Per-tool settings (allow-listed keys only; see README).
 # [settings.claude-code]
@@ -638,7 +638,25 @@ fn cmd_capture(
             .and_then(|d| d.file_name().map(|f| f.to_string_lossy().into_owned()));
         slugify(&base.unwrap_or_else(|| "my-setup".into()))
     });
-    let r = engine::capture(&targets, env, &name)?;
+    let mut r = engine::capture(&targets, env, &name)?;
+    // Re-capturing into a profile keeps the per-tool targeting set there.
+    let kept = if out.join(profile_io::MANIFEST).is_file() {
+        profile_io::load(out)
+            .map(|old| profile_io::keep_targeting(&mut r.profile, &old))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    if !kept.is_empty() {
+        r.notes.push(adapters::Note {
+            level: adapters::Level::Info,
+            target: PROFILE_NOTE.to_string(),
+            message: format!(
+                "kept 'targets' / 'disabled_on' from the existing profile for MCP server(s): {}",
+                kept.join(", ")
+            ),
+        });
+    }
     let p = &r.profile;
     println!("{} ({} scope)", paint(BOLD, "Captured"), env.scope);
     for s in &r.sources {
@@ -731,6 +749,9 @@ fn load_source(
 ) -> Result<(source::Resolved, Profile)> {
     let resolved = source::resolve(src, path, allow_insecure)?;
     let profile = profile_io::load(&resolved.dir)?;
+    for w in &profile.warnings {
+        eprintln!("{} {}", paint(YELLOW, "warning:"), visible_line(w));
+    }
     Ok((resolved, profile))
 }
 
@@ -803,6 +824,47 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
             "  To apply them, pass {} (or name fewer), or --trust-source for everything.",
             paint(BOLD, format!("--allow-git-mcp {}", names.join(",")))
         );
+    }
+    if !plan.withheld_removals.is_empty() {
+        println!(
+            "\n{}",
+            paint(
+                YELLOW,
+                "MCP servers not removed (disabled for these tools in the profile, which is from a git source):"
+            )
+        );
+        for s in &plan.withheld_removals {
+            println!(
+                "  {}  {}",
+                shown(&s.name),
+                paint(DIM, format!("({})", s.targets.join(", ")))
+            );
+        }
+        let names: Vec<String> = plan
+            .withheld_removals
+            .iter()
+            .map(|s| shown(&s.name))
+            .collect();
+        println!(
+            "  To remove them, pass {} (or name fewer), or --trust-source for everything.",
+            paint(BOLD, format!("--allow-git-mcp {}", names.join(",")))
+        );
+    }
+    if !plan.removed_servers.is_empty() {
+        println!(
+            "\n{}",
+            paint(
+                YELLOW,
+                "MCP servers removed (disabled for these tools in the profile; kitbag added them there before):"
+            )
+        );
+        for s in &plan.removed_servers {
+            println!(
+                "  {}  {}",
+                shown(&s.name),
+                paint(DIM, format!("({})", s.targets.join(", ")))
+            );
+        }
     }
     if !plan.servers.is_empty() {
         println!(
@@ -883,13 +945,17 @@ fn plan_apply(
             exec_dropped |= std::mem::take(&mut f.executable);
         }
     }
+    let (applied_servers, records_warning) = crate::sync::applied_servers(&ctx.state_dir, env)?;
+    let allow = a.git_mcp();
     let opts = ApplyOptions {
         overwrite: !a.no_overwrite,
         secrets,
         block_id: slugify(&profile.name),
+        applied_servers,
+        source: Some(resolved.source.clone()),
+        git_removals: resolved.remote.then(|| allow.clone()),
     };
     let mut plan = if resolved.remote {
-        let allow = a.git_mcp();
         let unknown: Vec<String> = match &allow {
             engine::GitMcp::Only(names) => names
                 .iter()
@@ -910,6 +976,13 @@ fn plan_apply(
     } else {
         engine::plan(&profile, targets, env, &opts)?
     };
+    if let Some(w) = records_warning {
+        plan.notes.push(adapters::Note {
+            level: adapters::Level::Warn,
+            target: PROFILE_NOTE.to_string(),
+            message: w,
+        });
+    }
     if untrusted && a.secrets.is_none() && !plan.kept_env.is_empty() {
         plan.notes.push(adapters::Note {
             level: adapters::Level::Info,
@@ -987,7 +1060,7 @@ fn present(
         if plan.targets.is_empty() {
             println!("Nothing to apply.");
             print_skipped(plan);
-        } else if plan.withheld.is_empty() {
+        } else if plan.withheld.is_empty() && plan.withheld_removals.is_empty() {
             let kept = plan
                 .notes
                 .iter()
@@ -1153,6 +1226,7 @@ fn inventory_rows(
         };
         let changed_item =
             |item: &str| plan.changed_items.iter().any(|(t, i)| t == id && i == item);
+        let mut disabled_rows = Vec::new();
         let mut add = |item: String, in_profile: bool, changed: bool, in_tool: Option<bool>| {
             let state = match (in_profile, changed, in_tool) {
                 (true, true, Some(false)) => State::Added,
@@ -1188,6 +1262,42 @@ fn inventory_rows(
                 let in_profile = profile.mcp_servers.get(n).is_some_and(|s| s.applies_to(id));
                 let in_tool = present.as_ref().map(|p| p.mcp_servers.contains_key(n));
                 add(format!("mcp {n}"), in_profile, changed_server(n), in_tool);
+            }
+            // Disabled for this tool in the profile, but still in it.
+            for n in profile
+                .mcp_servers
+                .iter()
+                .filter(|(_, s)| !s.applies_to(id))
+                .map(|(n, _)| n)
+            {
+                if !present
+                    .as_ref()
+                    .is_some_and(|p| p.mcp_servers.contains_key(n))
+                {
+                    continue;
+                }
+                let removes = plan
+                    .removed_servers
+                    .iter()
+                    .any(|s| s.name == *n && s.targets.iter().any(|t| t == id));
+                let (state, detail) = if removes {
+                    (
+                        State::Changed,
+                        "disabled for this tool in the profile; apply removes it",
+                    )
+                } else {
+                    (
+                        State::Removed,
+                        "disabled for this tool in the profile; apply leaves it ('kitbag diff' says why)",
+                    )
+                };
+                disabled_rows.push(StatusRow {
+                    target: id.to_string(),
+                    item: format!("mcp {n}"),
+                    path: None,
+                    state,
+                    detail: Some(detail.to_string()),
+                });
             }
         }
         for (feature, kind, wanted, have) in [
@@ -1233,6 +1343,7 @@ fn inventory_rows(
                 );
             }
         }
+        rows.extend(disabled_rows);
     }
     rows
 }
@@ -1663,7 +1774,10 @@ fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
 
     if let Some(src) = src {
         println!("\n{}", paint(BOLD, "Profile"));
-        match load_source(src, t.path.as_deref(), t.allow_insecure_source) {
+        // Not load_source: doctor lists the profile's warnings itself.
+        let loaded = source::resolve(src, t.path.as_deref(), t.allow_insecure_source)
+            .and_then(|r| profile_io::load(&r.dir).map(|p| (r, p)));
+        match loaded {
             Err(e) => {
                 problems += 1;
                 println!("  {} {}", paint(RED, "error"), visible(&format!("{e:#}")));
@@ -1686,6 +1800,9 @@ fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
                         ""
                     }
                 );
+                for w in &p.warnings {
+                    println!("  {} {}", paint(YELLOW, "warn"), visible_line(w));
+                }
                 for leak in profile_io::scan_for_secrets(&p) {
                     problems += 1;
                     println!("  {} {}", paint(RED, "secret"), visible_line(&leak));
@@ -1721,18 +1838,6 @@ fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
                     }
                     for r in policy::risky(target, &allowed) {
                         println!("  {} {}", paint(YELLOW, "risky"), visible_line(&r));
-                    }
-                }
-                for (n, s) in &p.mcp_servers {
-                    for id in s.only.iter().chain(&s.except) {
-                        if adapters::get(id).is_none() {
-                            println!(
-                                "  {} mcp_servers.{}: unknown target '{}' in only/except",
-                                paint(YELLOW, "warn"),
-                                visible_line(n),
-                                visible_line(id)
-                            );
-                        }
                     }
                 }
             }

@@ -6,6 +6,10 @@
 //! what is on disk now, what the last apply left there, and what the profile
 //! would write now. `kitbag sync` uses the result to apply profile changes
 //! without clobbering edits made in the tool.
+//!
+//! MCP server entries kitbag writes are recorded the same way, in
+//! `applied-servers.json`: a server disabled for a tool in the profile is only
+//! removed from it when kitbag put it there and it is unchanged since.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -25,6 +29,7 @@ use crate::profile_io::{rule_from_markdown, rule_to_markdown, scan_for_secrets};
 use crate::txn::{Status, Store, sha256, write_atomic};
 
 const FILE: &str = "applied.json";
+const SERVERS_FILE: &str = "applied-servers.json";
 /// Records kept per item; older ones only matter after several undos.
 const KEEP_PER_ITEM: usize = 10;
 
@@ -117,6 +122,13 @@ pub fn last_applied(state_dir: &Path) -> Result<BTreeMap<Key, Record>> {
     Ok(out)
 }
 
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
 /// Remember what `plan` left in place, after it was written (or found to
 /// have nothing to write).
 pub fn record(
@@ -126,13 +138,11 @@ pub fn record(
     profile: &str,
     tx: Option<&str>,
 ) -> Result<()> {
+    record_servers(state_dir, plan, env, profile, tx)?;
     if plan.items.is_empty() {
         return Ok(());
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+    let now = now_ms();
     let mut all = load_all(state_dir)?;
     for i in &plan.items {
         all.push(Record {
@@ -163,6 +173,153 @@ pub fn record(
     fs::create_dir_all(state_dir).with_context(|| format!("creating {}", state_dir.display()))?;
     let json = serde_json::to_string_pretty(&kept)? + "\n";
     write_atomic(&file(state_dir), json.as_bytes(), Some(0o600))
+}
+
+/// An MCP server entry an apply wrote into a tool's config, or removed from it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerRecord {
+    pub target: String,
+    /// The real config file.
+    pub path: PathBuf,
+    /// The server's name.
+    pub name: String,
+    /// `user` or `project`.
+    pub scope: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<PathBuf>,
+    /// Name of the profile that was applied.
+    pub profile: String,
+    /// Where that profile came from (see [`crate::source::Resolved::source`]).
+    /// Records written before kitbag recorded it have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// [`entry_hash`] of the entry as written; `None` when the apply removed it.
+    pub hash: Option<String>,
+    /// The transaction that wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx: Option<String>,
+    pub at_ms: u128,
+}
+
+/// A hash of one server entry (JSON, or a Codex table as JSON) that doesn't
+/// depend on key order.
+pub fn entry_hash(v: &serde_json::Value) -> String {
+    use serde_json::Value;
+    fn sorted(v: &Value) -> Value {
+        match v {
+            Value::Object(m) => {
+                let mut keys: Vec<&String> = m.keys().collect();
+                keys.sort();
+                Value::Object(
+                    keys.into_iter()
+                        .map(|k| (k.clone(), sorted(&m[k])))
+                        .collect(),
+                )
+            }
+            Value::Array(a) => Value::Array(a.iter().map(sorted).collect()),
+            other => other.clone(),
+        }
+    }
+    sha256(Some(sorted(v).to_string().as_bytes())).unwrap_or_default()
+}
+
+/// The server records, and a warning when the file can't be parsed (it is
+/// then treated as empty, so nothing is removed, and the next apply replaces it).
+fn load_servers(state_dir: &Path) -> Result<(Vec<ServerRecord>, Option<String>)> {
+    let path = state_dir.join(SERVERS_FILE);
+    match fs::read_to_string(&path) {
+        Ok(t) => Ok(match serde_json::from_str(&t) {
+            Ok(v) => (v, None),
+            Err(e) => (
+                Vec::new(),
+                Some(format!(
+                    "could not read {} ({e}), so no MCP server is removed for being disabled in the profile; the next apply starts the file afresh",
+                    path.display()
+                )),
+            ),
+        }),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok((Vec::new(), None)),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// For every (target, file, server) at `env`'s scope (and project), the
+/// record of the latest apply that still stands (not undone), and a warning
+/// if the records can't be read.
+pub fn applied_servers(state_dir: &Path, env: &Env) -> Result<(Vec<ServerRecord>, Option<String>)> {
+    let undone: Vec<String> = Store::new(state_dir)
+        .list()?
+        .into_iter()
+        .filter(|t| t.status != Status::Applied)
+        .map(|t| t.id)
+        .collect();
+    let mut latest: BTreeMap<(String, PathBuf, String), ServerRecord> = BTreeMap::new();
+    let (records, warning) = load_servers(state_dir)?;
+    for r in records {
+        let matches = r.scope == env.scope.to_string()
+            && (env.scope == Scope::User || r.project.as_deref() == Some(env.project.as_path()));
+        // Only records of a written transaction count: without one, nothing was written.
+        if !matches || r.tx.as_ref().is_none_or(|t| undone.contains(t)) {
+            continue;
+        }
+        latest.insert((r.target.clone(), r.path.clone(), r.name.clone()), r);
+    }
+    Ok((latest.into_values().collect(), warning))
+}
+
+/// Remember the MCP server entries `plan` wrote or removed, once written as `tx`.
+fn record_servers(
+    state_dir: &Path,
+    plan: &Plan,
+    env: &Env,
+    profile: &str,
+    tx: Option<&str>,
+) -> Result<()> {
+    let Some(tx) = tx else {
+        return Ok(());
+    };
+    if plan.server_writes.is_empty() {
+        return Ok(());
+    }
+    let now = now_ms();
+    let mut all = load_servers(state_dir)?.0;
+    for w in &plan.server_writes {
+        all.push(ServerRecord {
+            target: w.target.clone(),
+            path: w.path.clone(),
+            name: w.name.clone(),
+            scope: env.scope.to_string(),
+            project: (env.scope == Scope::Project).then(|| env.project.clone()),
+            profile: profile.to_string(),
+            source: plan.source.clone(),
+            hash: w.hash.clone(),
+            tx: Some(tx.to_string()),
+            at_ms: now,
+        });
+    }
+    // Keep the newest few per server.
+    let mut seen: BTreeMap<(String, PathBuf, String, String, Option<PathBuf>), usize> =
+        BTreeMap::new();
+    let mut kept: Vec<ServerRecord> = all
+        .into_iter()
+        .rev()
+        .filter(|r| {
+            let key = (
+                r.target.clone(),
+                r.path.clone(),
+                r.name.clone(),
+                r.scope.clone(),
+                r.project.clone(),
+            );
+            let n = seen.entry(key).or_default();
+            *n += 1;
+            *n <= KEEP_PER_ITEM
+        })
+        .collect();
+    kept.reverse();
+    fs::create_dir_all(state_dir).with_context(|| format!("creating {}", state_dir.display()))?;
+    let json = serde_json::to_string_pretty(&kept)? + "\n";
+    write_atomic(&state_dir.join(SERVERS_FILE), json.as_bytes(), Some(0o600))
 }
 
 /// How one item compares across the tool, the last apply and the profile.
@@ -424,6 +581,15 @@ mod tests {
         assert_eq!(classify(Some("one\r\n"), applied, Some(a)), State::InSync);
         assert_eq!(classify_since_apply(Some(a), ha.as_deref()), State::InSync);
         assert_eq!(classify_since_apply(None, ha.as_deref()), State::ToolEdited);
+    }
+
+    #[test]
+    fn entry_hash_ignores_key_order() {
+        let a = serde_json::json!({"command": "npx", "env": {"A": "1", "B": "2"}});
+        let b = serde_json::json!({"env": {"B": "2", "A": "1"}, "command": "npx"});
+        assert_eq!(entry_hash(&a), entry_hash(&b));
+        let c = serde_json::json!({"command": "npx", "env": {"A": "1"}});
+        assert_ne!(entry_hash(&a), entry_hash(&c));
     }
 
     #[test]

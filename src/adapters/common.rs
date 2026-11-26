@@ -605,13 +605,25 @@ pub fn merge_json_servers(
     opts: &ApplyOptions,
     target: &str,
 ) -> Result<()> {
-    if servers.is_empty() {
+    let skipped = skipped_servers(work, target);
+    if servers.is_empty() && skipped.is_empty() {
         return Ok(());
     }
     let text = work.fs.read(path)?;
+    if servers.is_empty() && text.is_none() {
+        return Ok(());
+    }
     let mut doc = JsonDoc::parse(text.as_deref(), path)?;
     let existing = doc.object(key_path);
     let mut changed = false;
+    for name in &skipped {
+        if remove_skipped_server(work, opts, target, path, name, existing.get(name)) {
+            let mut full: Vec<&str> = key_path.to_vec();
+            full.push(name);
+            doc.remove(&full);
+            changed = true;
+        }
+    }
     for (name, def) in servers {
         let Value::Object(want) = def else { continue };
         let cur = existing.get(name).and_then(Value::as_object);
@@ -631,9 +643,11 @@ pub fn merge_json_servers(
         note_dropped_server_keys(work, target, name, path, &merged.dropped);
         let mut full: Vec<&str> = key_path.to_vec();
         full.push(name);
-        doc.set(&full, &Value::Object(merged.def));
+        let def = Value::Object(merged.def);
+        doc.set(&full, &def);
         work.changed_servers
             .push((target.to_string(), name.clone()));
+        record_server_write(work, target, path, name, Some(&def));
         changed = true;
     }
     if changed {
@@ -753,6 +767,116 @@ pub fn safe_settings(profile: &Profile, target: &str, work: &mut Work) -> Map<St
     allowed
 }
 
+/// Names of the profile's servers that [`servers_for`] left out for `target`.
+pub fn skipped_servers(work: &Work, target: &str) -> Vec<String> {
+    work.skipped_servers
+        .iter()
+        .filter(|(t, _)| t == target)
+        .map(|(_, n)| n.clone())
+        .collect()
+}
+
+/// Note that the plan writes server `name` to `path` as `def`, or removes it (`None`).
+pub fn record_server_write(
+    work: &mut Work,
+    target: &str,
+    path: &Path,
+    name: &str,
+    def: Option<&Value>,
+) {
+    work.server_writes.push(super::ServerWrite {
+        target: target.to_string(),
+        path: path.to_path_buf(),
+        name: name.to_string(),
+        hash: def.map(crate::sync::entry_hash),
+    });
+    if def.is_none() {
+        work.removed_servers
+            .push((target.to_string(), name.to_string()));
+    }
+}
+
+/// Should server `name`, which the profile disables for `target`, be removed
+/// from `path`, where its entry is `current`? Only if an earlier apply of the
+/// same profile (same name and source) put it there and it is unchanged
+/// since; anything else (added by hand, by another profile, or edited) stays,
+/// and the plan says why. A profile from a git source also needs the opt-in
+/// for adding servers; without it the removal is held back. A removal is
+/// noted and recorded.
+pub fn remove_skipped_server(
+    work: &mut Work,
+    opts: &ApplyOptions,
+    target: &str,
+    path: &Path,
+    name: &str,
+    current: Option<&Value>,
+) -> bool {
+    let Some(current) = current else {
+        return false;
+    };
+    let real = work
+        .fs
+        .real_path(path)
+        .unwrap_or_else(|_| path.to_path_buf());
+    let rec = opts
+        .applied_servers
+        .iter()
+        .find(|r| r.target == target && r.path == real && r.name == name)
+        .filter(|r| r.hash.is_some());
+    let remote = opts.git_removals.is_some();
+    let file = crate::ui::tildify(path, &work.home);
+    let disabled = format!("MCP server '{name}' is disabled for {target} in the profile");
+    let keep = match rec {
+        None => Some(format!(
+            "{disabled}, but kitbag has no record of adding it to {file}, so it was left in place; remove it by hand if you don't want it"
+        )),
+        Some(r) if r.profile != work.profile => Some(format!(
+            "{disabled}, but profile '{}' added it to {file}, so it was left in place",
+            r.profile
+        )),
+        Some(r) if r.source.is_none() && remote => Some(format!(
+            "{disabled}, but kitbag's record of adding it to {file} doesn't say where the profile came from, and this one is from a git source, so it was left in place; remove it by hand if you don't want it"
+        )),
+        Some(r) if r.source.is_some() && r.source != opts.source => Some(format!(
+            "{disabled}, but a profile '{}' from {} added it to {file}, so it was left in place",
+            r.profile,
+            r.source.as_deref().unwrap_or_default()
+        )),
+        Some(r) if r.hash.as_deref() != Some(crate::sync::entry_hash(current).as_str()) => {
+            Some(format!(
+                "{disabled}, but it was edited in {file} since kitbag added it, so it was left in place; remove it by hand if you don't want it"
+            ))
+        }
+        Some(_) if !opts.overwrite => Some(format!(
+            "kept MCP server '{name}' in {file}, disabled for {target} in the profile, because --no-overwrite was given"
+        )),
+        Some(_) => None,
+    };
+    if let Some(msg) = keep {
+        work.warn(target, msg);
+        return false;
+    }
+    if opts.git_removals.as_ref().is_some_and(|a| !a.allows(name)) {
+        work.warn(
+            target,
+            format!(
+                "{disabled}, but the profile comes from a git source, so it was not removed from {file} (pass --allow-git-mcp {name} to remove it)"
+            ),
+        );
+        work.withheld_removals
+            .push((target.to_string(), name.to_string()));
+        return false;
+    }
+    work.info(
+        target,
+        format!(
+            "MCP server '{name}' removed from {file}: disabled for {target} in the profile (kitbag added it there before)"
+        ),
+    );
+    record_server_write(work, target, path, name, None);
+    true
+}
+
 /// Servers from the profile that apply to `target`, noting disabled ones the tool can't represent.
 pub fn servers_for<'p>(
     profile: &'p Profile,
@@ -762,7 +886,13 @@ pub fn servers_for<'p>(
 ) -> Vec<(&'p String, &'p McpServer)> {
     let mut out = Vec::new();
     for (name, s) in &profile.mcp_servers {
-        if !s.applies_to(target) {
+        if let Some(why) = s.skip_reason(target) {
+            work.info(
+                target,
+                format!("MCP server '{name}' skipped on {target}: disabled in profile ({why})"),
+            );
+            work.skipped_servers
+                .push((target.to_string(), name.clone()));
             continue;
         }
         if s.disabled && !disabled_supported {

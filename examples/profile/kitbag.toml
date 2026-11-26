@@ -20,7 +20,7 @@ args = ["-y", "@upstash/context7-mcp"]
 [mcp_servers.playwright]
 command = "npx"
 args = ["@playwright/mcp@latest"]
-only = ["claude-code", "cursor"]
+targets = ["claude-code", "cursor"]
 
 # A remote (streamable HTTP) server with a bearer token.
 [mcp_servers.linear]
