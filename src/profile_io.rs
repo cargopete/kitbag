@@ -548,6 +548,21 @@ pub fn keep_targeting(new: &mut Profile, old: &Profile) -> Vec<String> {
     kept
 }
 
+/// Copy over `old`'s MCP servers that a fresh capture didn't find in any
+/// tool (disabled everywhere, or set up for a tool not installed here), with
+/// their targeting, so a re-capture doesn't silently drop them. Returns the
+/// servers it kept.
+pub fn keep_uncaptured_servers(new: &mut Profile, old: &Profile) -> Vec<String> {
+    let mut kept = Vec::new();
+    for (name, s) in &old.mcp_servers {
+        if !new.mcp_servers.contains_key(name) {
+            new.mcp_servers.insert(name.clone(), s.clone());
+            kept.push(name.clone());
+        }
+    }
+    kept
+}
+
 /// Write a profile directory. Refuses to replace an existing profile unless `force`,
 /// and refuses outright if anything still looks like a credential.
 pub fn save(p: &Profile, dir: &Path, force: bool) -> Result<Vec<PathBuf>> {
@@ -1048,6 +1063,26 @@ mod tests {
         assert_eq!(new.mcp_servers["other"].targets, None);
         // A profile without targeting renders exactly as before.
         assert!(!manifest_toml(&sample()).contains("targets"));
+    }
+
+    #[test]
+    fn keeps_servers_a_recapture_did_not_find() {
+        let mut old = sample();
+        old.mcp_servers.insert(
+            "gone".into(),
+            McpServer {
+                command: Some("gone-mcp".into()),
+                disabled_on: vec!["cursor".into()],
+                ..Default::default()
+            },
+        );
+        let mut new = sample();
+        let before = new.mcp_servers["github"].clone();
+        assert_eq!(keep_uncaptured_servers(&mut new, &old), vec!["gone"]);
+        assert_eq!(new.mcp_servers["gone"], old.mcp_servers["gone"]);
+        // Captured servers are left as captured.
+        assert_eq!(new.mcp_servers["github"], before);
+        assert!(keep_uncaptured_servers(&mut new, &old).is_empty());
     }
 
     #[test]

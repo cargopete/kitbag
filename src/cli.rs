@@ -87,6 +87,10 @@ enum Cmd {
         /// Replace an existing profile in the output directory
         #[arg(long)]
         force: bool,
+        /// With --force, drop the existing profile's MCP servers that weren't found in any
+        /// tool (by default they are kept)
+        #[arg(long)]
+        prune: bool,
         /// Show what would be captured without writing anything
         #[arg(long)]
         dry_run: bool,
@@ -529,6 +533,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             out,
             name,
             force,
+            prune,
             dry_run,
         } => cmd_capture(
             &context(home, Some(&place))?,
@@ -536,6 +541,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             &out,
             name,
             force,
+            prune,
             dry_run,
         ),
         Cmd::Apply {
@@ -722,6 +728,7 @@ fn cmd_capture(
     out: &Path,
     name: Option<String>,
     force: bool,
+    prune: bool,
     dry_run: bool,
 ) -> Result<i32> {
     let env = &ctx.env;
@@ -734,13 +741,29 @@ fn cmd_capture(
         slugify(&base.unwrap_or_else(|| "my-setup".into()))
     });
     let mut r = engine::capture(&targets, env, &name)?;
-    // Re-capturing into a profile keeps the per-tool targeting set there.
-    let kept = if out.join(profile_io::MANIFEST).is_file() {
-        profile_io::load(out)
-            .map(|old| profile_io::keep_targeting(&mut r.profile, &old))
-            .unwrap_or_default()
+    // Re-capturing into a profile keeps the per-tool targeting set there, and
+    // the servers no tool has (disabled everywhere, or for a tool not
+    // installed here) unless --prune.
+    let old = if out.join(profile_io::MANIFEST).is_file() {
+        profile_io::load(out).ok()
     } else {
-        Vec::new()
+        None
+    };
+    let (kept, uncaptured) = match &old {
+        Some(old) => {
+            let kept = profile_io::keep_targeting(&mut r.profile, old);
+            let uncaptured = if prune {
+                old.mcp_servers
+                    .keys()
+                    .filter(|n| !r.profile.mcp_servers.contains_key(*n))
+                    .cloned()
+                    .collect()
+            } else {
+                profile_io::keep_uncaptured_servers(&mut r.profile, old)
+            };
+            (kept, uncaptured)
+        }
+        None => (Vec::new(), Vec::new()),
     };
     if !kept.is_empty() {
         r.notes.push(adapters::Note {
@@ -750,6 +773,24 @@ fn cmd_capture(
                 "kept 'targets' / 'disabled_on' from the existing profile for MCP server(s): {}",
                 kept.join(", ")
             ),
+        });
+    }
+    if !uncaptured.is_empty() {
+        let message = if prune {
+            format!(
+                "dropped MCP server(s) of the existing profile that no tool has (--prune): {}",
+                uncaptured.join(", ")
+            )
+        } else {
+            format!(
+                "kept MCP server(s) of the existing profile that no tool has (disabled, or for a tool not installed here): {}; pass --prune to drop them",
+                uncaptured.join(", ")
+            )
+        };
+        r.notes.push(adapters::Note {
+            level: adapters::Level::Info,
+            target: PROFILE_NOTE.to_string(),
+            message,
         });
     }
     let p = &r.profile;

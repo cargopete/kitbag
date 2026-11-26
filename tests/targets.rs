@@ -506,6 +506,81 @@ fn recapture_keeps_targeting() {
 }
 
 #[test]
+fn recapture_keeps_servers_no_tool_has_unless_pruned() {
+    let sb = Sandbox::empty();
+    // `heavy` is kept off the only tool applied to, so capture can't find it.
+    write_profile(
+        &sb,
+        "p",
+        &profile("shared", "disabled_on = [\"claude-code\"]\n"),
+    );
+    apply(&sb, "p", "claude-code");
+    assert!(sb.json(CLAUDE)["mcpServers"].get("heavy").is_none());
+
+    sb.cli()
+        .args(["capture", "--from", "claude-code", "-o", "p", "--force"])
+        .assert()
+        .success()
+        .stdout(
+            contains("kept MCP server(s) of the existing profile that no tool has")
+                .and(contains("heavy; pass --prune")),
+        );
+    let text = sb.read("p/kitbag.toml");
+    let heavy = text.split("[mcp_servers.heavy]").nth(1).unwrap();
+    assert!(heavy.contains("command = \"heavy-mcp\""), "{text}");
+    assert!(heavy.contains("disabled_on = [\"claude-code\"]"), "{text}");
+    assert!(text.contains("[mcp_servers.light]"), "{text}");
+
+    // A dry run says what --prune would drop and writes nothing.
+    sb.cli()
+        .args([
+            "capture",
+            "--from",
+            "claude-code",
+            "-o",
+            "p",
+            "--force",
+            "--prune",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("dropped MCP server(s)").and(contains("(--prune): heavy")));
+    assert_eq!(sb.read("p/kitbag.toml"), text);
+
+    sb.cli()
+        .args([
+            "capture",
+            "--from",
+            "claude-code",
+            "-o",
+            "p",
+            "--force",
+            "--prune",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("(--prune): heavy").and(contains("kept MCP server(s)").not()));
+    let text = sb.read("p/kitbag.toml");
+    assert!(!text.contains("heavy"), "{text}");
+    assert!(text.contains("[mcp_servers.light]"), "{text}");
+}
+
+#[test]
+fn recapture_keeps_servers_for_tools_not_installed() {
+    let sb = Sandbox::empty();
+    write_profile(&sb, "p", &profile("shared", "targets = [\"cursor\"]\n"));
+    apply(&sb, "p", "claude-code");
+    sb.cli()
+        .args(["capture", "--from", "claude-code", "-o", "p", "--force"])
+        .assert()
+        .success()
+        .stdout(contains("no tool has").and(contains("heavy")));
+    let text = sb.read("p/kitbag.toml");
+    assert!(text.contains("targets = [\"cursor\"]"), "{text}");
+}
+
+#[test]
 fn sync_removes_disabled_servers_too() {
     let sb = Sandbox::empty();
     write_profile(&sb, "p", &profile("shared", ""));
