@@ -453,6 +453,126 @@ fn identical_secrets_share_a_variable_and_native_refs_are_respected() {
     assert_eq!(p.mcp_servers["d"].env["API_KEY"], "${D_API_KEY}");
 }
 
+/// Two different secrets never end up behind one `${VAR}`, also when the
+/// prefixed name a second server would get is taken already.
+#[test]
+fn different_secrets_never_share_a_variable() {
+    let sb = Sandbox::empty();
+    let f = sb.home().join(".cursor/mcp.json");
+    fs::create_dir_all(f.parent().unwrap()).unwrap();
+    fs::write(
+        &f,
+        r#"{"mcpServers": {
+            "a": {"command": "a", "env": {"TOKEN": "FakeSecretOne1", "B_TOKEN": "FakeSecretThree3"},
+                  "args": ["-e", "TOKEN=FakeSecretFour4"]},
+            "b": {"command": "b", "env": {"TOKEN": "FakeSecretTwo2"}}
+        }}"#,
+    )
+    .unwrap();
+    let r = capture(&["cursor"], &sb.env(Scope::User));
+    let p = &r.profile;
+    assert_eq!(p.mcp_servers["a"].env["TOKEN"], "${TOKEN}");
+    assert_eq!(p.mcp_servers["a"].env["B_TOKEN"], "${B_TOKEN}");
+    assert_eq!(p.mcp_servers["a"].args[1], "TOKEN=${TOKEN_2}");
+    assert_eq!(p.mcp_servers["b"].env["TOKEN"], "${B_TOKEN_2}");
+    let mut seen = std::collections::HashMap::new();
+    for red in &r.redactions {
+        let prev = seen.insert(red.env_var.clone(), red.fingerprint.clone());
+        assert!(
+            prev.is_none_or(|p| p == red.fingerprint),
+            "{} names two secrets",
+            red.env_var
+        );
+    }
+    assert_eq!(seen.len(), 4);
+}
+
+/// The same server in two tools, alike once redacted but with different
+/// secrets: the first is kept, with a warning.
+#[test]
+fn a_server_with_other_secrets_in_a_second_tool_is_reported() {
+    let sb = Sandbox::empty();
+    let server = |secret: &str| {
+        format!(
+            r#"{{"mcpServers": {{"a": {{"command": "a", "env": {{"API_KEY": "{secret}"}}}}}}}}"#
+        )
+    };
+    fs::create_dir_all(sb.home().join(".cursor")).unwrap();
+    fs::write(sb.home().join(".claude.json"), server("FakeClaudeKey1")).unwrap();
+    fs::write(sb.home().join(".cursor/mcp.json"), server("FakeCursorKey2")).unwrap();
+    let r = capture(&["claude-code", "cursor"], &sb.env(Scope::User));
+    assert_eq!(r.profile.mcp_servers["a"].env["API_KEY"], "${API_KEY}");
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n.target == "cursor" && n.message.contains("different secret values")),
+        "{:?}",
+        r.notes
+    );
+    // The same secret in both tools is not worth a warning.
+    fs::write(sb.home().join(".cursor/mcp.json"), server("FakeClaudeKey1")).unwrap();
+    let r = capture(&["claude-code", "cursor"], &sb.env(Scope::User));
+    assert!(
+        !r.notes
+            .iter()
+            .any(|n| n.message.contains("different secret values")),
+        "{:?}",
+        r.notes
+    );
+}
+
+/// Server names may contain dots: redactions of `a.b` belong to `a.b`, not
+/// to `a`, so each is reported once and none trips the "different secret
+/// values" warning (#53).
+#[test]
+fn redactions_stay_with_servers_whose_names_contain_a_dot() {
+    let sb = Sandbox::empty();
+    fs::create_dir_all(sb.home().join(".cursor")).unwrap();
+    fs::write(
+        sb.home().join(".claude.json"),
+        r#"{"mcpServers": {
+            "a": {"command": "a", "env": {"TOKEN": "FakeSecretOne1"}},
+            "a.b": {"command": "b", "env": {"TOKEN": "FakeSecretTwo2"}}
+        }}"#,
+    )
+    .unwrap();
+    fs::write(
+        sb.home().join(".cursor/mcp.json"),
+        r#"{"mcpServers": {"a": {"command": "a", "env": {"TOKEN": "FakeSecretOne1"}}}}"#,
+    )
+    .unwrap();
+    let r = capture(&["claude-code", "cursor"], &sb.env(Scope::User));
+    let p = &r.profile;
+    assert_eq!(p.mcp_servers["a"].env["TOKEN"], "${TOKEN}");
+    assert_eq!(p.mcp_servers["a.b"].env["TOKEN"], "${A_B_TOKEN}");
+    let mut found: Vec<(Option<&str>, &str, &str)> = r
+        .redactions
+        .iter()
+        .map(|red| {
+            (
+                red.server.as_deref(),
+                red.location.as_str(),
+                red.env_var.as_str(),
+            )
+        })
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        vec![
+            (Some("a"), "mcp_servers.a.env.TOKEN", "TOKEN"),
+            (Some("a.b"), "mcp_servers.a.b.env.TOKEN", "A_B_TOKEN"),
+        ]
+    );
+    assert!(
+        !r.notes
+            .iter()
+            .any(|n| n.message.contains("different secret values")),
+        "{:?}",
+        r.notes
+    );
+}
+
 #[test]
 fn header_args_without_a_space_are_redacted_and_captured() {
     let sb = Sandbox::empty();

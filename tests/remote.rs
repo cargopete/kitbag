@@ -557,3 +557,178 @@ fn local_profiles_apply_mcp_servers_as_before() {
         .stdout(contains("not applied (from a git source)").not());
     assert_eq!(claude_servers(&sb), ["docs", "notes", "search"]);
 }
+
+const FAKE_PASSWORD: &str = "s3cret-fake-pw";
+
+/// Nothing but `git` itself sees the credentials in a source URL: not the
+/// plan, `history`, `undo` or the transaction log.
+#[cfg(unix)]
+#[test]
+fn source_url_credentials_are_never_printed_or_stored() {
+    if !has_git() {
+        return;
+    }
+    let sb = Sandbox::empty();
+    let url = sb.git_profile(
+        "p",
+        &[
+            ("kitbag.toml", "kitbag = 1\nname = \"p\"\n"),
+            ("instructions.md", "Be brief.\n"),
+        ],
+    );
+    let with_creds = url.replacen("file://", &format!("file://bob:{FAKE_PASSWORD}@"), 1);
+    for cmd in [&["diff"][..], &["apply", "--yes"], &["status"], &["doctor"]] {
+        let out = sb
+            .cli()
+            .args(&cmd[..1])
+            .arg(&with_creds)
+            .args(&cmd[1..])
+            .args(["--to", "claude-code"])
+            .output()
+            .unwrap();
+        let all = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!all.contains(FAKE_PASSWORD), "{cmd:?}: {all}");
+        assert!(!all.contains("bob"), "{cmd:?}: {all}");
+    }
+    assert!(sb.home().join(".claude/CLAUDE.md").exists());
+    let log = all_text_under(&sb.state());
+    assert!(log.contains("file:///"), "{log}");
+    assert!(
+        !log.contains(FAKE_PASSWORD) && !log.contains("bob"),
+        "{log}"
+    );
+    for args in [&["history"][..], &["history", "--json"], &["undo"]] {
+        sb.cli()
+            .args(args)
+            .assert()
+            .success()
+            .stdout(contains("file:///").and(contains(FAKE_PASSWORD).not()));
+    }
+}
+
+/// Applies recorded before the fix kept the credentials in the log; they are
+/// not shown again.
+#[test]
+fn history_hides_credentials_recorded_by_older_versions() {
+    let sb = Sandbox::empty();
+    let dir = sb.state().join("backups/1700000000000-abcdef");
+    std::fs::create_dir_all(&dir).unwrap();
+    let tx = serde_json::json!({
+        "id": "1700000000000-abcdef", "created_ms": 1_700_000_000_000u64, "status": "applied",
+        "description": format!("apply https://bob:{FAKE_PASSWORD}@git.example.com/p.git @ abc1234 -> codex (user scope)"),
+        "targets": ["codex"], "entries": [], "created_dirs": []
+    });
+    std::fs::write(dir.join("transaction.json"), tx.to_string()).unwrap();
+    for args in [&["history"][..], &["history", "--json"]] {
+        sb.cli().args(args).assert().success().stdout(
+            contains("https://git.example.com/p.git")
+                .and(contains(FAKE_PASSWORD).not())
+                .and(contains("bob").not()),
+        );
+    }
+}
+
+#[test]
+fn clone_errors_leave_out_url_credentials() {
+    if !has_git() {
+        return;
+    }
+    let sb = Sandbox::empty();
+    // Nothing listens on the discard port, so the clone fails at once.
+    for url in [
+        format!("https://bob:{FAKE_PASSWORD}@127.0.0.1:9/p.git"),
+        format!("https://{FAKE_PASSWORD}@127.0.0.1:9/p.git"),
+    ] {
+        sb.cli()
+            .args(["diff", &url, "--to", "codex"])
+            .assert()
+            .code(2)
+            .stderr(
+                contains("could not clone https://127.0.0.1:9/p.git")
+                    .and(contains(FAKE_PASSWORD).not()),
+            );
+    }
+    sb.cli()
+        .args([
+            "diff",
+            &format!("https://bob:{FAKE_PASSWORD}@example.com/page"),
+            "--to",
+            "codex",
+        ])
+        .assert()
+        .code(2)
+        .stderr(contains("neither a local directory").and(contains(FAKE_PASSWORD).not()));
+}
+
+#[test]
+fn cleartext_sources_need_an_explicit_flag() {
+    if !has_git() {
+        return;
+    }
+    let sb = Sandbox::empty();
+    for url in ["http://127.0.0.1:9/p.git", "git://127.0.0.1:9/p.git"] {
+        for cmd in ["apply", "diff", "sync", "status", "doctor"] {
+            let out = sb.cli().args([cmd, url, "--to", "codex"]).output().unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                stderr.contains("--allow-insecure-source")
+                    || stdout.contains("--allow-insecure-source"),
+                "{cmd} {url}: {stdout}{stderr}"
+            );
+            assert!(!out.status.success() || cmd == "doctor", "{cmd} {url}");
+        }
+        // With the flag, kitbag goes ahead (and the clone fails: nothing listens there).
+        sb.cli()
+            .args(["diff", url, "--to", "codex", "--allow-insecure-source"])
+            .assert()
+            .code(2)
+            .stderr(contains("could not clone").and(contains("--allow-insecure-source").not()));
+    }
+}
+
+/// An https source that git ends up fetching over http or git:// (a server
+/// redirect, or here a `url.<base>.insteadOf` rewrite, which goes through
+/// the same transport check) is refused, even when GIT_ALLOW_PROTOCOL in
+/// the user's environment would allow it.
+#[test]
+fn https_sources_that_end_up_on_cleartext_are_refused() {
+    if !has_git() {
+        return;
+    }
+    let sb = Sandbox::empty();
+    let gitconfig = sb.path("gitconfig");
+    std::fs::write(
+        &gitconfig,
+        "[url \"http://127.0.0.1:9/\"]\n\tinsteadOf = https://to-http.invalid/\n\
+         [url \"git://127.0.0.1:9/\"]\n\tinsteadOf = https://to-git.invalid/\n",
+    )
+    .unwrap();
+    for (url, transport) in [
+        ("https://to-http.invalid/p.git", "http"),
+        ("https://to-git.invalid/p.git", "git"),
+    ] {
+        for allow_list in [None, Some("http:https:git:ssh:file")] {
+            let mut cmd = sb.cli();
+            cmd.env("GIT_CONFIG_GLOBAL", &gitconfig);
+            if let Some(v) = allow_list {
+                cmd.env("GIT_ALLOW_PROTOCOL", v);
+            }
+            cmd.args(["diff", url, "--to", "codex"])
+                .assert()
+                .code(2)
+                .stderr(contains(format!("transport '{transport}' not allowed")));
+        }
+        // With the flag, git goes ahead (and fails: nothing listens there).
+        sb.cli()
+            .env("GIT_CONFIG_GLOBAL", &gitconfig)
+            .args(["diff", url, "--to", "codex", "--allow-insecure-source"])
+            .assert()
+            .code(2)
+            .stderr(contains("could not clone").and(contains("not allowed").not()));
+    }
+}
