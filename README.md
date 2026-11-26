@@ -211,7 +211,9 @@ edited stays, and the plan says why. From a git source, removing a server needs 
 opt-in as adding one (`--allow-git-mcp <names>` or `--trust-source`); without it the plan lists
 it under "MCP servers not removed" and leaves it. A server that becomes enabled for a tool again
 is an addition like any other. `capture --force` into an existing profile keeps the `targets`
-and `disabled_on` of the servers it captures again.
+and `disabled_on` of the servers it captures again, and keeps the profile's servers it found in
+no tool (disabled everywhere, or for a tool not installed on this machine), with a note naming
+them; `--prune` drops those instead.
 
 **Env references.** `${NAME}` takes its value from the environment. `${NAME:-fallback}`
 falls back to a non-secret default (it is written to disk wherever the variable is unset, so
@@ -626,7 +628,7 @@ wrapping of their own.
 | Command | What it does |
 |---|---|
 | `kitbag init [DIR]` | Write a commented starter profile |
-| `kitbag capture [--from IDS] [-o DIR] [--dry-run] [--force]` | Read the current setup into a profile (secrets redacted). Writes only into a new or empty directory. `--force` replaces an existing profile's files and leaves anything else in the directory alone. With several tools, one whose config can't be read is reported and the rest are captured |
+| `kitbag capture [--from IDS] [-o DIR] [--dry-run] [--force] [--prune]` | Read the current setup into a profile (secrets redacted). Writes only into a new or empty directory. `--force` replaces an existing profile's files and leaves anything else in the directory alone; the profile's MCP servers found in no tool are kept unless `--prune`. With several tools, one whose config can't be read is reported and the rest are captured |
 | `kitbag diff <SOURCE> [--to IDS] [--exit-code]` | Show exactly what `apply` would change; never writes |
 | `kitbag apply <SOURCE> [--to IDS] [--yes] [--dry-run]` | Plan, confirm, write with backups |
 | `kitbag status [SOURCE] [--to IDS] [--exit-code] [--json]` | Which managed instructions and rules differ from the profile, or changed since the last apply; never writes |
