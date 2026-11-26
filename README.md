@@ -44,8 +44,9 @@ dotfiles or a team repo), and each tool gets it in its own native format.
   spells things, e.g. `${env:VAR}` vs `${VAR}`, `.mdc` vs `paths:` frontmatter, TOML vs JSON.
 - **Secrets are kept out of the profile (best-effort).** Values are redacted to `${ENV_VAR}`
   references on capture; review the profile before sharing it. On apply, they are written in each tool's own interpolation syntax wherever it has one.
-- **Safe by default.** `apply` shows a diff and asks first. It merges into existing configs
-  without touching anything else (comments and formatting included), backs up every file,
+- **Safe by default.** `apply` lists what it will change and asks first; `kitbag diff` (or
+  `apply --dry-run`) shows the full diff. It merges into existing configs without touching
+  anything else (comments and formatting included), backs up every file,
   and `kitbag undo` reverts.
 - **A single static binary** for macOS, Linux and Windows. No runtime needed.
 
@@ -398,7 +399,8 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
 - **Profile directories.** `init --force` and `capture --force` replace a symbolic link inside
   the profile directory (a file or a sub-directory) with a regular file or directory; they
   never write through it.
-- **State directory:** `$KITBAG_STATE_DIR`, else `$XDG_STATE_HOME/kitbag`, else
+- **State directory:** `$KITBAG_STATE_DIR` if set; else, with `--home DIR` (or
+  `KITBAG_HOME`), `DIR/.local/state/kitbag`; else `$XDG_STATE_HOME/kitbag`, else
   `~/.local/state/kitbag` (`%LOCALAPPDATA%\kitbag` on Windows).
 
 Apply is additive: removing a server from the profile does not remove it from tools you
@@ -436,9 +438,12 @@ Without a profile, `kitbag status` shows what changed in each tool since the las
 never writes.
 
 `kitbag sync <profile>` is `apply` that won't clobber hand edits: it applies `profile changed`
-and `not applied` items (with the usual plan, diff, confirmation, backups and undo), but leaves
-a target whose instructions were edited in the tool alone and says so (exit status 1). Then
-either:
+and `not applied` items (with the usual plan, diff, confirmation, backups and undo), but holds
+back each managed block or rule file that was edited in the tool (`tool edited` or
+`both changed`). Only that item is left alone: the tool's other instructions, rules, MCP
+servers, commands and skills are still applied, in the same undoable transaction. The plan
+lists each held-back item as `Skipped: claude-code instructions` with a note on how to resolve
+it, and sync exits with status 1. Then either:
 
 - `kitbag sync <profile> --from claude-code` pulls that tool's edited block or rule back into
   the profile (`instructions.md`, `rules/*.md`), redacted like `capture` and refused if it
@@ -518,7 +523,9 @@ Common options:
   `--allow-risky-settings` (`--trust-source`) apply to `apply` and `diff`.
 - `--path SUBDIR` selects a profile inside a repository.
 - `--home DIR` (or `KITBAG_HOME`) treats `DIR` as the home directory for sandboxes and tests.
-  It also ignores `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME` and `APPDATA`.
+  It also ignores `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME` and `APPDATA`, and
+  keeps backups and history in `DIR/.local/state/kitbag` (not `XDG_STATE_HOME` or
+  `LOCALAPPDATA`) unless `KITBAG_STATE_DIR` is set, which always wins.
 
 **Sources** are a local directory or a git URL:
 
@@ -609,8 +616,9 @@ Good next candidates: Windsurf, Zed, VS Code / GitHub Copilot, OpenCode.
   byte-order mark. Instructions, rules and commands in any other encoding are skipped with a
   warning. Skill supporting files are copied byte for byte. A UTF-8 byte-order mark at the
   start of a JSON or TOML config is kept when kitbag writes the file back.
-- **Size limits.** Profile files are limited to 2 MiB and skills to 200 files. Capture skips
-  anything larger with a warning, so it never writes a profile that can't be applied.
+- **Size limits.** Profile files are limited to 2 MiB, skills to 200 files and a whole
+  profile to 64 MiB. Capture skips files that are too large with a warning, and refuses to
+  write a profile over the total, so it never writes a profile that can't be applied.
 
 ## Development
 

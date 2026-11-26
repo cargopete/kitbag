@@ -56,7 +56,22 @@ fn find_block(text: &str, id: &str) -> Option<(usize, usize)> {
 }
 
 /// Insert or replace managed block `id` in `existing`. `content: None` removes it.
+/// A file with `\r\n` line endings keeps them.
 pub fn upsert(existing: Option<&str>, id: &str, content: Option<&str>) -> String {
+    match existing {
+        Some(text) if super::uses_crlf(text) => {
+            let lf = text.replace("\r\n", "\n");
+            let out = upsert_lf(Some(&lf), id, content);
+            if out == lf {
+                return text.to_string();
+            }
+            super::keep_line_endings(existing, out)
+        }
+        _ => upsert_lf(existing, id, content),
+    }
+}
+
+fn upsert_lf(existing: Option<&str>, id: &str, content: Option<&str>) -> String {
     let base = existing.unwrap_or("");
     let block = content.map(|c| {
         format!(
@@ -348,6 +363,20 @@ mod tests {
             upsert(None, "p", Some("x")),
             format!("{}\n{NOTE}\nx\n{}\n", begin("p"), end("p"))
         );
+    }
+
+    #[test]
+    fn keeps_crlf_line_endings() {
+        let user = "# Mine\r\n\r\nKeep me.\r\n";
+        let a = upsert(Some(user), "p", Some("Hello\nWorld"));
+        assert!(a.starts_with(user), "{a:?}");
+        assert!(!a.replace("\r\n", "").contains('\n'), "{a:?}");
+        assert_eq!(upsert(Some(&a), "p", Some("Hello\nWorld")), a);
+        let b = upsert(Some(&a), "p", Some("Bye"));
+        assert!(b.contains("\r\nBye\r\n") && !b.contains("Hello"), "{b:?}");
+        assert_eq!(upsert(Some(&b), "p", None), user);
+        // An LF file stays LF.
+        assert!(!upsert(Some("Mine\n"), "p", Some("x")).contains('\r'));
     }
 
     #[test]

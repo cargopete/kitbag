@@ -6,11 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-26
+
 ### Added
 
 - New target `antigravity` for Google Antigravity (app, IDE and CLI), for MCP servers and instructions at user and project scope. Servers go to `~/.gemini/config/mcp_config.json` or `.agents/mcp_config.json`, with `serverUrl` for remote servers and `disabled` for disabled ones; your own keys on an entry (`disabledTools`, `timeoutSeconds` ...) are kept. Antigravity's docs describe no env-reference syntax, so references are resolved at apply time like Claude Desktop (`--secrets never` keeps placeholders) and the file ends up mode 0600; SSE servers are skipped. Instructions go to `~/.gemini/GEMINI.md`, the same file and managed block Gemini CLI uses, so applying to both writes one copy, and to `AGENTS.md` in a project, shared with Codex and Cursor. Capture also reads the other instructions files Antigravity loads. Rules, skills and workflows are not supported yet (#27).
 - Per-tool MCP servers: a server in the profile can list the only tools it applies to (`targets = ["claude-code"]`) or the tools it is kept out of (`disabled_on = ["cursor"]`), so one shared profile can keep a heavy server out of the tools that don't need it. Setting both or an empty `targets` is an error. An unknown target name (a typo, or a tool from a newer kitbag) is a warning listing the valid targets and matches no tool, so the profile still loads. `only` and `except` still load as older names, an empty `only` still means no restriction (with a warning), and setting a field under both names is an error naming both; capture writes the new names. `apply`, `diff` and `sync` note each server they skip (`skipped on cursor: disabled in profile`). A server kitbag applied to a tool before and the profile now disables there is removed from it in the same undoable apply, but only when kitbag's records (new `applied-servers.json` in the state directory) show the same profile, by name and source (local directory or git URL), wrote that entry and it is unchanged since; servers added by hand, by another profile or edited are left, and the plan says why. From a git source a removal needs `--allow-git-mcp` or `--trust-source`, like an addition, and is listed as not removed otherwise. `status` shows such servers per tool. `capture --force` into an existing profile keeps `targets` / `disabled_on` (#33).
 - `claude` is accepted as an alias for the `claude-code` target in `--to` and `--from` (`apply`, `diff`, `status`, `sync`, `doctor`, `capture`), in an MCP server's `targets` / `disabled_on` (and their older names `only` / `except`) and as a `[settings.claude]` table, read as `[settings.claude-code]` (having both tables is an error naming both). It is turned into `claude-code` as soon as it is read, so output, state files and captured profiles still say `claude-code`. A target listed more than once in `targets` / `disabled_on` (`["cursor", "cursor"]`, `["claude", "claude-code"]`, or across the old and new names) is kept once. It never matches `claude-desktop` (#55).
+
+### Changed
+
+- `kitbag sync PROFILE` holds back only the managed instructions block or rule file that was edited by hand, not the whole tool: one edit to `~/.claude/CLAUDE.md` no longer keeps new MCP servers, rules, commands and skills from reaching Claude Code. Everything else is applied in the same undoable transaction, the plan lists each held-back item (`Skipped: claude-code instructions`) with the `--from <target>` / `--overwrite` hint, and sync still exits with status 1 when it held anything back. A held-back item keeps its old record, so `status` still shows it as edited. `--from` and `--overwrite` work as before (#43).
 
 ### Fixed
 
@@ -23,6 +29,14 @@ All notable changes to this project are documented here. The format follows
 - `capture --force` into a profile with `.mdc` rules no longer fails looking for a `.md` file (#38).
 - `--no-overwrite` now also keeps existing managed instruction blocks and existing skill support files, and reports each one it kept. A profile that no longer has instructions still removes the old managed block (#38).
 - Capture matched secrets it redacted to MCP servers by location, so a server whose name contains a dot (`a.b`) also had its secrets counted under server `a`: they were listed twice and could raise a false "different secret values" warning. Each redaction now records its server (#53).
+- A JSON config where a key kitbag edits appears twice (two `mcpServers`, two servers with the name of one kitbag writes, a `command` key twice inside such a server, a setting kitbag writes twice) is refused with an error naming the file and the key. kitbag used to edit the first copy while the tools read the last, so `diff --exit-code` reported no change. Duplicates kitbag doesn't edit, such as a top-level `theme` twice or a key twice in another server, are left alone (#38).
+- Edits to JSON and TOML configs and to managed blocks in instruction files keep a file's Windows (`\r\n`) line endings. They used to write the lines they added with `\n`. A file is taken to use `\r\n` when most of its line breaks are `\r\n`; its other lines are then written with `\r\n` too (#38).
+- Rules, commands, skills and skill files named after a Windows device (`CON`, `nul.md`, `COM1`, `aux.sh` ...), or whose names differ only in case (`Build.md` and `build.md`), are refused when a profile is loaded or captured, on every OS, naming each one: profiles move between machines, and such files can't be created on Windows or are one file on Windows and macOS (#38).
+- Backups of files with very long names no longer fail to be written: the file name part of a backup's name is cut to 100 bytes, without trailing dots or spaces, and the number in front keeps it unique (#38).
+- Loading a profile reads at most 64 MiB in all, besides the 2 MiB limit per file; a larger profile is refused with an error naming its directory, and capture refuses to write one (#38).
+- The README and `--help` now say where state goes with `--home DIR`: `KITBAG_STATE_DIR` if set, else `DIR/.local/state/kitbag`, never `XDG_STATE_HOME` or `LOCALAPPDATA`. A test covers it (#38).
+- A profile `name` with control characters (a newline, tab, escape ..., also at the very end) or invisible text-direction and zero-width characters (U+202A to U+202E, U+2066 to U+2069, U+200B to U+200D, U+FEFF) is refused when the profile is loaded, and `init --name` and `capture --name` refuse one before writing anything. Such a name used to be accepted and stored with each apply in the state directory (#38).
+- The README no longer says plain `apply` shows a diff: it lists what it will change and asks; `kitbag diff` and `apply --dry-run` show the full diff (#38).
 
 ### Security
 
@@ -103,7 +117,8 @@ All notable changes to this project are documented here. The format follows
 - `capture` with several tools (`--from all`, `detected` or a list) reports a tool whose config can't be read and captures the rest; it fails only if nothing could be read. A single `--from` still fails loudly.
 - `install.sh` and `install.ps1` download `kitbag-<target>.sha256`, the checksum name the release workflow uploads (found in the v0.1.0-rc.1 dry run).
 
-[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/cargopete/kitbag/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/cargopete/kitbag/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/cargopete/kitbag/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/cargopete/kitbag/releases/tag/v0.1.0

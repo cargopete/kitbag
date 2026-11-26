@@ -27,6 +27,11 @@ fn applied() -> Sandbox {
     sb
 }
 
+/// A `~/...` display path with the platform's separator.
+fn shown(path: &str) -> String {
+    path.replace('/', std::path::MAIN_SEPARATOR_STR)
+}
+
 /// Replace `from` with `to` inside a file of the sandbox.
 fn edit(sb: &Sandbox, rel: &str, from: &str, to: &str) {
     let text = sb.read(rel);
@@ -161,18 +166,159 @@ fn sync_leaves_hand_edits_alone() {
         .assert()
         .code(1)
         .stdout(
-            contains("claude-code was not synced")
-                .and(contains("--from claude-code"))
-                .and(contains("--overwrite")),
+            contains(format!(
+                "instructions block in {} was not synced",
+                shown("~/.claude/CLAUDE.md")
+            ))
+            .and(contains("--from claude-code"))
+            .and(contains("--overwrite")),
         );
     assert!(sb.read("home/.claude/CLAUDE.md").contains("Be very brief."));
     assert!(sb.read("home/.codex/AGENTS.md").contains("Be terse."));
-    // With every target skipped, it doesn't claim to be up to date.
+    // With only the edited item left, it doesn't claim to be up to date.
     sb.cli()
         .args(["sync", "p", "--to", "claude-code", "--yes"])
         .assert()
         .code(1)
-        .stdout(contains("Nothing to apply").and(contains("Up to date").not()));
+        .stdout(
+            contains("Nothing to write besides the items edited in the tool")
+                .and(contains("Skipped: claude-code instructions"))
+                .and(contains("Up to date").not()),
+        );
+}
+
+/// Add an MCP server `fresh` to the profile of [`applied`].
+fn add_server(sb: &Sandbox) {
+    fs::write(
+        sb.path("p/kitbag.toml"),
+        format!("{MANIFEST}\n[mcp_servers.fresh]\ncommand = \"fresh-mcp\"\n"),
+    )
+    .unwrap();
+}
+
+fn has_server(sb: &Sandbox) -> bool {
+    sb.home().join(".claude.json").exists()
+        && sb.json("home/.claude.json")["mcpServers"]
+            .get("fresh")
+            .is_some()
+}
+
+#[test]
+fn sync_holds_back_only_the_edited_instructions_block() {
+    let sb = applied();
+    edit(&sb, "home/.claude/CLAUDE.md", "Be brief.", "Be very brief.");
+    let edited = sb.read("home/.claude/CLAUDE.md");
+    fs::write(sb.path("p/instructions.md"), "Be terse.\n").unwrap();
+    fs::write(sb.path("p/rules/docs.md"), "Document public items.\n").unwrap();
+    add_server(&sb);
+    let to = ["--to", "claude-code,codex"];
+    // The plan lists the held-back item with both ways out.
+    sb.cli()
+        .args(["sync", "p", "--dry-run"])
+        .args(to)
+        .assert()
+        .code(1)
+        .stdout(
+            contains("Skipped: claude-code instructions (edited in the tool")
+                .and(contains("--from claude-code"))
+                .and(contains("--overwrite"))
+                .and(contains("fresh"))
+                .and(contains("Up to date").not()),
+        );
+    sb.cli()
+        .args(["sync", "p", "--yes"])
+        .args(to)
+        .assert()
+        .code(1)
+        .stdout(
+            contains("Wrote")
+                .and(contains("Skipped: claude-code instructions"))
+                .and(contains("Skipped: claude-code,").not()),
+        );
+    // The edited block is kept; the rest of Claude Code is synced.
+    assert_eq!(sb.read("home/.claude/CLAUDE.md"), edited);
+    assert!(has_server(&sb));
+    assert!(sb.home().join(".claude/rules/docs.md").exists());
+    assert!(sb.read("home/.codex/AGENTS.md").contains("Be terse."));
+    let rows = status(&sb, &["p", "--to", "claude-code,codex"]);
+    assert_eq!(
+        state_of(&rows, "claude-code", "instructions"),
+        "both changed"
+    );
+    assert_eq!(state_of(&rows, "claude-code", "rule docs"), "in sync");
+    assert_eq!(state_of(&rows, "codex", "instructions"), "in sync");
+    // One undo reverts all of it and leaves the edit alone.
+    sb.cli().arg("undo").assert().success();
+    assert!(!has_server(&sb));
+    assert!(!sb.home().join(".claude/rules/docs.md").exists());
+    assert!(sb.read("home/.codex/AGENTS.md").contains("Be brief."));
+    assert_eq!(sb.read("home/.claude/CLAUDE.md"), edited);
+}
+
+#[test]
+fn sync_holds_back_only_the_edited_rule_file() {
+    let sb = applied();
+    let original = sb.read("home/.claude/rules/rust.md");
+    edit(
+        &sb,
+        "home/.claude/rules/rust.md",
+        "Use `?`.",
+        "Use `?` and `anyhow`.",
+    );
+    let edited = sb.read("home/.claude/rules/rust.md");
+    fs::write(sb.path("p/instructions.md"), "Be terse.\n").unwrap();
+    add_server(&sb);
+    sb.cli()
+        .args(["sync", "p", "--to", "claude-code,codex", "--yes"])
+        .assert()
+        .code(1)
+        .stdout(
+            contains("Skipped: claude-code rule rust")
+                .and(contains(format!(
+                    "rule rust in {} was not synced",
+                    shown("~/.claude/rules/rust.md"),
+                )))
+                .and(contains("--from claude-code")),
+        );
+    assert_eq!(sb.read("home/.claude/rules/rust.md"), edited);
+    assert!(sb.read("home/.claude/CLAUDE.md").contains("Be terse."));
+    assert!(has_server(&sb));
+    let rows = status(&sb, &["p", "--to", "claude-code"]);
+    assert_eq!(state_of(&rows, "claude-code", "rule rust"), "tool edited");
+    assert_eq!(state_of(&rows, "claude-code", "instructions"), "in sync");
+    sb.cli().arg("undo").assert().success();
+    assert!(!has_server(&sb));
+    assert!(sb.read("home/.claude/CLAUDE.md").contains("Be brief."));
+    assert_eq!(sb.read("home/.claude/rules/rust.md"), edited);
+    // --overwrite still replaces the edit.
+    sb.cli()
+        .args(["sync", "p", "--to", "claude-code", "--overwrite", "--yes"])
+        .assert()
+        .success();
+    assert_eq!(sb.read("home/.claude/rules/rust.md"), original);
+}
+
+#[test]
+fn sync_holds_back_one_block_of_a_shared_file() {
+    // Codex keeps instructions and folded rules as two blocks in AGENTS.md.
+    let sb = applied();
+    edit(&sb, "home/.codex/AGENTS.md", "Be brief.", "Be very brief.");
+    fs::write(
+        sb.path("p/rules/rust.md"),
+        RULE.replace("Use `?`.", "Use `?` and `thiserror`."),
+    )
+    .unwrap();
+    sb.cli()
+        .args(["sync", "p", "--to", "codex", "--yes"])
+        .assert()
+        .code(1)
+        .stdout(contains("Skipped: codex instructions").and(contains("Wrote")));
+    let agents = sb.read("home/.codex/AGENTS.md");
+    assert!(agents.contains("Be very brief."), "{agents}");
+    assert!(agents.contains("`thiserror`"), "{agents}");
+    let rows = status(&sb, &["p", "--to", "codex"]);
+    assert_eq!(state_of(&rows, "codex", "instructions"), "tool edited");
+    assert_eq!(state_of(&rows, "codex", "rules"), "in sync");
 }
 
 #[test]

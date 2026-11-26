@@ -343,8 +343,10 @@ fn profile_text_cannot_drive_the_terminal() {
     }
     let sb = Sandbox::empty();
     std::fs::write(sb.home().join(".claude.json"), "{}").unwrap();
+    // The name can't hold control characters (the profile is refused), so the
+    // rest of the profile carries them.
     let manifest = r#"kitbag = 1
-name = "e\u001b]0;pwned\u0007"
+name = "e"
 [mcp_servers.docs]
 command = "npx"
 args = ["-y", "evil\u001b[2K\u001b[1A\u001b[2K\rdocs: npx -y @safe/docs-mcp", "\u009b2K\u202eabc"]
