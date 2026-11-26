@@ -744,6 +744,7 @@ mod tests {
     }
 
     /// Drop `real_parent` like transactions written by kitbag 0.1.1.
+    #[cfg(unix)]
     fn make_legacy(store: &Store, tx: &Transaction) {
         let file = store.tx_dir(&tx.id).join("transaction.json");
         let mut v: serde_json::Value =
