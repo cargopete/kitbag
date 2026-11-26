@@ -206,7 +206,14 @@ profile`). If kitbag applied a server to a tool earlier and the profile now disa
 apply removes it from that tool, with a backup, so `kitbag undo` puts it back. It only does so
 when kitbag's own records (`applied-servers.json` in the state directory) show that an apply of
 the same profile (the same name, from the same directory or git URL) wrote that entry and it
-hasn't been edited since. A server you added by hand, one another profile added, or one you
+hasn't been edited since. A git URL is compared as written; only shorthand such as
+`github:owner/repo` is expanded (to `https://github.com/owner/repo.git`), so
+`https://github.com/o/r`, `https://github.com/o/r.git` and `https://github.com/o/r/` count as
+different sources, and a server one of them added is left in place when another disables it.
+To tell an edit, the records keep a SHA-256 of each whole entry as written. Where secrets are
+resolved into a tool's config (Claude Desktop, Antigravity, and Codex fields it can't read
+from the environment), that hash is taken over the resolved values; the values themselves are
+not stored, and the file is created `0600`. A server you added by hand, one another profile added, or one you
 edited stays, and the plan says why. From a git source, removing a server needs the same
 opt-in as adding one (`--allow-git-mcp <names>` or `--trust-source`); without it the plan lists
 it under "MCP servers not removed" and leaves it. A server that becomes enabled for a tool again
