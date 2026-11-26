@@ -572,6 +572,44 @@ By default every tool that reads instruction files is shown; `--to` limits it, a
 (or `KITBAG_HOME`) points it at a sandbox. Under `--home`, Claude Code's managed policy file is
 not checked.
 
+## How many tokens do my MCP servers cost?
+
+Every MCP server's tool definitions are sent to the model before your first prompt.
+`kitbag doctor --mcp-tokens` estimates that cost per tool, so you can see which servers to
+switch off (with `targets` / `disabled_on`, see above). For example (the numbers are made up):
+
+```console
+$ kitbag doctor ~/dotfiles/kitbag --to claude,cursor --mcp-tokens
+...
+MCP tool definitions
+  Claude Code
+    github      ~5,830 tokens  26 tool(s)
+    linear      skipped remote (http) server, not contacted: its URL and headers may carry credentials
+    playwright  ~3,410 tokens  21 tool(s)
+    total       ~9,240 tokens from 2 server(s)
+  Cursor
+    github      ~5,830 tokens  26 tool(s)
+    linear      skipped remote (http) server, not contacted: its URL and headers may carry credentials
+    playwright  skipped disabled for this tool in the profile (not in its 'targets'); not counted
+    total       ~5,830 tokens from 1 server(s)
+```
+
+This **runs the servers' commands**, so it is off unless you pass the flag; plain `doctor`
+starts nothing. Each local server is started once, with its `${VAR}` references filled in from
+your environment, asked for its tools, and stopped; it gets `--mcp-timeout SECS` (default 10)
+in all. A server that fails to start, exits or times out is reported and the others are still
+counted. A server needing a variable that isn't set is not started. kitbag doesn't show or keep
+anything a server prints: its error output is discarded and its tool list is only counted.
+Remote servers are not contacted, since their URL and headers may carry credentials.
+
+With a profile (`SOURCE`), its servers are counted for each tool they apply to, and a server
+disabled for a tool is shown as skipped and not counted against it. Without one, the servers
+in each tool's own config are counted, and ones disabled there are skipped.
+
+The count is an estimate: the characters of each tool's name, description and input schema
+as compact JSON, divided by 4. It is not any model's exact tokenizer, and tools may add some
+wrapping of their own.
+
 ## Commands
 
 | Command | What it does |
@@ -585,6 +623,7 @@ not checked.
 | `kitbag undo [ID] [--force]` | Revert the latest (or a specific) apply; with an ID, also an interrupted one |
 | `kitbag history [--json]` | List applies |
 | `kitbag doctor [SOURCE]` | Check installed tools' configs, a profile, required env vars, risky settings, interrupted applies |
+| `kitbag doctor [SOURCE] --mcp-tokens [--mcp-timeout SECS]` | Also start each local MCP server to list its tools, and estimate the tokens its tool definitions take up in each tool |
 | `kitbag doctor --why [DIR] [--to IDS]` | Which instruction files each tool loads in `DIR` (default: the current directory), in order, which it skips and why, and known traps |
 | `kitbag list-targets [--json]` | Targets, what they support, which are detected, file locations |
 
