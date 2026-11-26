@@ -727,3 +727,91 @@ sandbox_mode = "danger-full-access"
         serde_json::json!(["/"])
     );
 }
+
+/// Every file under `dir` (hidden ones too), by path.
+fn snapshot(dir: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, Vec<u8>)>) {
+        for e in fs::read_dir(dir).unwrap() {
+            let path = e.unwrap().path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                out.push((path.clone(), fs::read(&path).unwrap()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, &mut out);
+    out.sort();
+    out
+}
+
+#[test]
+fn doctor_reports_an_interrupted_apply_and_undo_puts_it_back() {
+    let sb = Sandbox::fixtures();
+    sb.cli().args(["init", "prof"]).assert().success();
+    let before = snapshot(&sb.home());
+    sb.cli()
+        .args(["apply", "prof", "--to", "claude-code,codex,cursor", "--yes"])
+        .assert()
+        .success();
+    assert_ne!(snapshot(&sb.home()), before);
+
+    // Make it look like the apply was killed after writing all but the last
+    // file: the transaction is still pending and that file is as it was.
+    let backups = sb.state().join("backups");
+    let dir = fs::read_dir(&backups)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let id = dir.file_name().unwrap().to_string_lossy().into_owned();
+    let file = dir.join("transaction.json");
+    let mut tx: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    tx["status"] = "pending".into();
+    let entries = tx["entries"].as_array_mut().unwrap();
+    assert!(entries.len() > 1, "{entries:?}");
+    for e in entries.iter_mut() {
+        e.as_object_mut().unwrap().remove("real_parent");
+    }
+    let last = entries.last().unwrap().clone();
+    let last_path = std::path::PathBuf::from(last["path"].as_str().unwrap());
+    match last["backup"].as_str() {
+        Some(b) => fs::copy(dir.join(b), &last_path).map(drop).unwrap(),
+        None => fs::remove_file(&last_path).unwrap(),
+    }
+    fs::write(&file, tx.to_string()).unwrap();
+
+    sb.cli()
+        .args(["doctor", "--to", "codex"])
+        .assert()
+        .code(1)
+        .stdout(
+            contains("interrupted")
+                .and(contains(format!("kitbag undo {id}")))
+                .and(contains("did not finish")),
+        );
+    sb.cli()
+        .arg("history")
+        .assert()
+        .success()
+        .stdout(contains("pending"));
+    // A bare undo still only means "the latest finished apply".
+    sb.cli()
+        .arg("undo")
+        .assert()
+        .failure()
+        .stderr(contains("nothing to undo"));
+    sb.cli().args(["undo", &id]).assert().success().stdout(
+        contains("Undid interrupted apply")
+            .and(contains("unchanged"))
+            .and(contains("the apply stopped before writing it")),
+    );
+    assert_eq!(snapshot(&sb.home()), before, "every file is back as it was");
+    sb.cli()
+        .args(["doctor", "--to", "codex"])
+        .assert()
+        .stdout(contains("interrupted").not());
+}

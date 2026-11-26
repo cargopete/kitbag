@@ -1646,13 +1646,26 @@ fn cmd_undo(ctx: &Ctx, id: Option<&str>, force: bool) -> Result<i32> {
     let done = store.undo_with_home(id, force, Some(&ctx.env.home))?;
     let tx = &done.tx;
     println!(
-        "{} {} ({})",
+        "{} {}{} ({})",
         paint(GREEN, "Undid"),
+        if done.interrupted {
+            "interrupted apply "
+        } else {
+            ""
+        },
         visible_line(&tx.id),
         visible_line(&source::strip_url_credentials(&tx.description))
     );
     for e in &tx.entries {
         if done.refused.iter().any(|r| r.path == e.path) {
+            continue;
+        }
+        if done.untouched.contains(&e.path) {
+            println!(
+                "  {}  {} (the apply stopped before writing it)",
+                paint(DIM, "unchanged"),
+                tildify(&e.path, &ctx.env.home)
+            );
             continue;
         }
         let what = if e.existed { "restored" } else { "removed" };
@@ -1781,6 +1794,24 @@ fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
         "  state dir   {}",
         visible_line(&ctx.state_dir.display().to_string())
     );
+    // An apply that was killed part-way through leaves its transaction
+    // pending, with some files written and some not.
+    let store = Store::new(&ctx.state_dir);
+    for tx in store.interrupted()? {
+        problems += 1;
+        println!(
+            "  {} apply {} from {} did not finish ({}); {} file(s) may be partly applied",
+            paint(RED, "interrupted"),
+            visible_line(&tx.id),
+            tx.created_at(),
+            visible_line(&source::strip_url_credentials(&tx.description)),
+            tx.entries.len()
+        );
+        println!(
+            "      unless an apply is still running, put them back with: kitbag undo {}",
+            visible_line(&tx.id)
+        );
+    }
     let git = std::process::Command::new("git")
         .arg("--version")
         .output()
