@@ -259,7 +259,8 @@ fn list_targets_json() {
             "cursor",
             "codex",
             "gemini-cli",
-            "claude-desktop"
+            "claude-desktop",
+            "antigravity"
         ]
     );
     assert_eq!(v[2]["support"]["rules"], "folded");
@@ -286,6 +287,35 @@ fn doctor_reports_problems() {
         .assert()
         .code(1)
         .stdout(contains("invalid JSON"));
+}
+
+#[test]
+fn apply_to_antigravity_then_undo() {
+    let sb = Sandbox::empty();
+    sb.cli().args(["init", "prof"]).assert().success();
+    fs::write(
+        sb.path("prof/kitbag.toml"),
+        "kitbag = 1\nname = \"prof\"\n\n[mcp_servers.docs]\nurl = \"https://docs.example.com/mcp\"\n",
+    )
+    .unwrap();
+    sb.cli()
+        .args(["apply", "prof", "--to", "antigravity", "--yes"])
+        .assert()
+        .success();
+    let cfg = sb.json("home/.gemini/config/mcp_config.json");
+    assert_eq!(
+        cfg["mcpServers"]["docs"]["serverUrl"],
+        "https://docs.example.com/mcp"
+    );
+    assert!(
+        sb.read("home/.gemini/GEMINI.md")
+            .contains("Write instructions every agent should follow")
+    );
+    sb.cli().arg("undo").assert().success();
+    assert!(
+        !sb.home().join(".gemini").exists(),
+        "undo removes what apply created"
+    );
 }
 
 #[test]

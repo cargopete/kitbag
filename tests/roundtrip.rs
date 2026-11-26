@@ -13,6 +13,7 @@ const ALL: &[&str] = &[
     "codex",
     "gemini-cli",
     "claude-desktop",
+    "antigravity",
 ];
 
 /// Capture `from` in a fixture sandbox, save + reload the profile, apply it to `to`
@@ -97,6 +98,37 @@ fn gemini_to_cursor_user() {
     let (a, b) = round_trip("gemini-cli", "cursor", Scope::User);
     assert_eq!(b.mcp_servers, a.mcp_servers);
     assert_eq!(b.commands[0].body, a.commands[0].body);
+}
+
+#[test]
+fn antigravity_to_claude_code_user() {
+    let (a, b) = round_trip("antigravity", "claude-code", Scope::User);
+    for (name, s) in &a.mcp_servers {
+        if s.disabled {
+            assert!(!b.mcp_servers.contains_key(name), "disabled: {name}");
+            continue;
+        }
+        assert_eq!(&b.mcp_servers[name], s, "server {name}");
+    }
+    assert_eq!(b.instructions, a.instructions);
+}
+
+#[test]
+fn claude_code_to_antigravity_user() {
+    let (a, b) = round_trip("claude-code", "antigravity", Scope::User);
+    // Unset env vars are written as ${VAR} placeholders and read back as such.
+    assert_eq!(b.mcp_servers, a.mcp_servers);
+    assert_eq!(b.instructions, a.instructions);
+}
+
+#[test]
+fn antigravity_project_to_cursor_project() {
+    let (a, b) = round_trip("antigravity", "cursor", Scope::Project);
+    let mut want = a.mcp_servers.clone();
+    // Cursor has no cwd.
+    want.get_mut("chrome-devtools").unwrap().cwd = None;
+    assert_eq!(b.mcp_servers, want);
+    assert_eq!(b.instructions, a.instructions);
 }
 
 #[test]

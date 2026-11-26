@@ -12,13 +12,20 @@ use kitbag::profile_io;
 use predicates::prelude::*;
 use predicates::str::contains;
 
-const FAKE_SECRETS: &[&str] = &["ghp_FAKE", "hunter2secret", "sntrys_FAKE", "sk-ant-FAKE"];
+const FAKE_SECRETS: &[&str] = &[
+    "ghp_FAKE",
+    "hunter2secret",
+    "sntrys_FAKE",
+    "sk-ant-FAKE",
+    "agy_FAKE",
+];
 const ALL: &[&str] = &[
     "claude-code",
     "cursor",
     "codex",
     "gemini-cli",
     "claude-desktop",
+    "antigravity",
 ];
 
 #[test]
