@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-26
+
 ### Added
 
 - New target `antigravity` for Google Antigravity (app, IDE and CLI), for MCP servers and instructions at user and project scope. Servers go to `~/.gemini/config/mcp_config.json` or `.agents/mcp_config.json`, with `serverUrl` for remote servers and `disabled` for disabled ones; your own keys on an entry (`disabledTools`, `timeoutSeconds` ...) are kept. Antigravity's docs describe no env-reference syntax, so references are resolved at apply time like Claude Desktop (`--secrets never` keeps placeholders) and the file ends up mode 0600; SSE servers are skipped. Instructions go to `~/.gemini/GEMINI.md`, the same file and managed block Gemini CLI uses, so applying to both writes one copy, and to `AGENTS.md` in a project, shared with Codex and Cursor. Capture also reads the other instructions files Antigravity loads. Rules, skills and workflows are not supported yet (#27).
@@ -114,7 +116,8 @@ All notable changes to this project are documented here. The format follows
 - `capture` with several tools (`--from all`, `detected` or a list) reports a tool whose config can't be read and captures the rest; it fails only if nothing could be read. A single `--from` still fails loudly.
 - `install.sh` and `install.ps1` download `kitbag-<target>.sha256`, the checksum name the release workflow uploads (found in the v0.1.0-rc.1 dry run).
 
-[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/cargopete/kitbag/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/cargopete/kitbag/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/cargopete/kitbag/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/cargopete/kitbag/releases/tag/v0.1.0
