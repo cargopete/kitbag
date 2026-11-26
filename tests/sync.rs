@@ -27,6 +27,11 @@ fn applied() -> Sandbox {
     sb
 }
 
+/// A `~/...` display path with the platform's separator.
+fn shown(path: &str) -> String {
+    path.replace('/', std::path::MAIN_SEPARATOR_STR)
+}
+
 /// Replace `from` with `to` inside a file of the sandbox.
 fn edit(sb: &Sandbox, rel: &str, from: &str, to: &str) {
     let text = sb.read(rel);
@@ -161,9 +166,12 @@ fn sync_leaves_hand_edits_alone() {
         .assert()
         .code(1)
         .stdout(
-            contains("instructions block in ~/.claude/CLAUDE.md was not synced")
-                .and(contains("--from claude-code"))
-                .and(contains("--overwrite")),
+            contains(format!(
+                "instructions block in {} was not synced",
+                shown("~/.claude/CLAUDE.md")
+            ))
+            .and(contains("--from claude-code"))
+            .and(contains("--overwrite")),
         );
     assert!(sb.read("home/.claude/CLAUDE.md").contains("Be very brief."));
     assert!(sb.read("home/.codex/AGENTS.md").contains("Be terse."));
@@ -266,9 +274,10 @@ fn sync_holds_back_only_the_edited_rule_file() {
         .code(1)
         .stdout(
             contains("Skipped: claude-code rule rust")
-                .and(contains(
-                    "rule rust in ~/.claude/rules/rust.md was not synced",
-                ))
+                .and(contains(format!(
+                    "rule rust in {} was not synced",
+                    shown("~/.claude/rules/rust.md"),
+                )))
                 .and(contains("--from claude-code")),
         );
     assert_eq!(sb.read("home/.claude/rules/rust.md"), edited);
