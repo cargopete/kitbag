@@ -16,7 +16,7 @@ use regex::Regex;
 use serde_json::{Map, Value, json};
 
 use super::common::{
-    add_command, add_instructions, add_rule, capture_instructions, capture_skills_dir,
+    add_command, add_instructions, add_rule, capture_instructions, capture_skills_dir, claim_name,
     import_server, merge_json_servers, name_from_rel, read_text_item, render_server,
     server_entries, server_from_json, servers_for, write_instructions, write_skill,
 };
@@ -218,6 +218,7 @@ impl Adapter for Cursor {
         }
 
         if let Some(dir) = &p.rules {
+            let mut seen = std::collections::BTreeMap::new();
             for rel in walk_files(dir, 500)? {
                 if !rel.ends_with(".mdc") {
                     continue;
@@ -227,6 +228,7 @@ impl Adapter for Cursor {
                     continue;
                 };
                 let name = name_from_rel(&rel, ".mdc");
+                claim_name(&mut seen, dir, &rel, &name)?;
                 if !is_valid_name(&name) {
                     cap.warn(
                         ID,
@@ -253,6 +255,7 @@ impl Adapter for Cursor {
             }
         }
 
+        let mut seen = std::collections::BTreeMap::new();
         for rel in walk_files(&p.commands, 500)? {
             if !rel.ends_with(".md") {
                 continue;
@@ -262,6 +265,7 @@ impl Adapter for Cursor {
                 continue;
             };
             let name = name_from_rel(&rel, ".md");
+            claim_name(&mut seen, &p.commands, &rel, &name)?;
             if !is_valid_name(&name) {
                 continue;
             }

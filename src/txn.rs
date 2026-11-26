@@ -82,6 +82,8 @@ pub struct WriteOptions {
     /// Files that will contain resolved secrets; written owner-only (0600 on
     /// Unix), tightening existing files too. Undo restores the old mode.
     pub private: std::collections::BTreeSet<PathBuf>,
+    /// Files written with the executable bits added (skill scripts).
+    pub executable: std::collections::BTreeSet<PathBuf>,
 }
 
 /// Write `content` to `path` atomically, preserving `mode` when given.
@@ -356,6 +358,8 @@ impl Store {
                         // Files holding secrets are private even if they weren't before.
                         let mode = if opts.private.contains(&c.path) {
                             Some(0o600)
+                        } else if opts.executable.contains(&c.path) {
+                            Some(tx.entries[i].mode.map_or(0o755, |m| m | 0o111))
                         } else {
                             tx.entries[i].mode
                         };
@@ -515,6 +519,12 @@ impl Store {
         let all = self.list()?;
         let mut tx = match id {
             Some(id) => {
+                let id = id.trim();
+                if id.is_empty() {
+                    bail!(
+                        "empty transaction id (see 'kitbag history'; omit it to undo the latest)"
+                    );
+                }
                 let matches: Vec<&Transaction> = all
                     .iter()
                     .filter(|t| t.id == id || t.id.starts_with(id))
@@ -872,6 +882,7 @@ mod tests {
                 &[],
                 &WriteOptions {
                     private: [secret.clone()].into_iter().collect(),
+                    ..Default::default()
                 },
             )
             .unwrap();

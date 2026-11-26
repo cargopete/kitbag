@@ -14,10 +14,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::common::{
-    add_command, capture_instructions, capture_skills_dir, import_server, merge_json_servers,
-    merge_json_settings, name_from_rel, pick_settings, read_text_item, render_server,
-    safe_settings, server_entries, server_from_json, servers_for, skill_with_required_frontmatter,
-    str_of, write_instructions, write_skill,
+    add_command, capture_instructions, capture_skills_dir, claim_name, import_server,
+    merge_json_servers, merge_json_settings, name_from_rel, pick_settings, read_text_item,
+    render_server, safe_settings, server_entries, server_from_json, servers_for,
+    skill_with_required_frontmatter, str_of, write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
@@ -160,6 +160,7 @@ impl Adapter for GeminiCli {
             }
         }
         capture_instructions(&mut cap, &p.instructions, ID)?;
+        let mut seen = std::collections::BTreeMap::new();
         for rel in walk_files(&p.commands, 500)? {
             if !rel.ends_with(".toml") {
                 continue;
@@ -167,6 +168,7 @@ impl Adapter for GeminiCli {
             let path = join_rel(&p.commands, &rel);
             // Gemini namespaces nested commands with ':'; profile names use '-'.
             let name = name_from_rel(&rel, ".toml");
+            claim_name(&mut seen, &p.commands, &rel, &name)?;
             let Some(text) = read_text_item(&mut cap, &path, ID) else {
                 continue;
             };

@@ -10,6 +10,17 @@ All notable changes to this project are documented here. The format follows
 
 - New target `antigravity` for Google Antigravity (app, IDE and CLI), for MCP servers and instructions at user and project scope. Servers go to `~/.gemini/config/mcp_config.json` or `.agents/mcp_config.json`, with `serverUrl` for remote servers and `disabled` for disabled ones; your own keys on an entry (`disabledTools`, `timeoutSeconds` ...) are kept. Antigravity's docs describe no env-reference syntax, so references are resolved at apply time like Claude Desktop (`--secrets never` keeps placeholders) and the file ends up mode 0600; SSE servers are skipped. Instructions go to `~/.gemini/GEMINI.md`, the same file and managed block Gemini CLI uses, so applying to both writes one copy, and to `AGENTS.md` in a project, shared with Codex and Cursor. Capture also reads the other instructions files Antigravity loads. Rules, skills and workflows are not supported yet (#27).
 
+### Fixed
+
+- A bare `--allow-git-mcp` placed before the source (`kitbag apply --allow-git-mcp github:me/profile`) no longer takes the source as a server name; it means "allow all". A value that looks like a path or URL, or names a profile directory (one with a `kitbag.toml`), is treated as the source. `--allow-git-mcp NAME[,NAME]` and `--allow-git-mcp=NAME` work as before. (#41)
+- `apply` and `sync` no longer say "up to date" about a target they skipped; they print `Skipped: <targets>` and the notes say why. With `--no-overwrite`, an apply that kept existing items says "Nothing written; kept N existing item(s)" instead of "up to date" (#38, #42).
+- `kitbag undo ""` (or only whitespace) is an error instead of matching any transaction (#38).
+- `doctor --to <target>` only checks that target and rejects unknown ones like `apply --to` does, before printing anything (#38).
+- Skill scripts keep their executable bit through capture, the profile and apply on Unix. From a git source the bit is only kept with `--trust-source`, and the plan says so otherwise (#38).
+- Capturing commands or rules whose nested paths flatten to the same name (`team-build.md` and `team/build.md`) now fails naming both files, instead of silently keeping one (#38).
+- `capture --force` into a profile with `.mdc` rules no longer fails looking for a `.md` file (#38).
+- `--no-overwrite` now also keeps existing managed instruction blocks and existing skill support files, and reports each one it kept. A profile that no longer has instructions still removes the old managed block (#38).
+
 ## [0.1.2] - 2026-11-26
 
 ### Added

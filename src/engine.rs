@@ -208,6 +208,8 @@ pub struct Plan {
     pub changes: Vec<FileChange>,
     pub notes: Vec<Note>,
     pub targets: Vec<String>,
+    /// Targets left out of the apply (no such scope, edited by hand ...); the notes say why.
+    pub skipped: Vec<String>,
     /// Env vars referenced but not set (only matters where values had to be resolved).
     pub missing_env: BTreeSet<String>,
     /// Secret values that will be written to disk; masked in any displayed diff.
@@ -224,6 +226,8 @@ pub struct Plan {
     /// Files that will hold secret values (from `sensitive`): written with
     /// mode 0600 on Unix, existing files included.
     pub private: BTreeSet<PathBuf>,
+    /// Files to write with the executable bit (skill scripts), Unix only.
+    pub executable: BTreeSet<PathBuf>,
     /// The instruction blocks and rule files kitbag manages, as they are now
     /// and as the plan leaves them (for `status` and `sync`).
     pub items: Vec<Item>,
@@ -265,12 +269,14 @@ pub fn plan(
         ..Work::default()
     };
     let mut applied = Vec::new();
+    let mut skipped = Vec::new();
     for a in targets {
         if !a.scopes().contains(&env.scope) {
             work.info(
                 a.id(),
                 format!("{} has no {} scope; skipped", a.name(), env.scope),
             );
+            skipped.push(a.id().to_string());
             continue;
         }
         let mut unsupported = Vec::new();
@@ -417,11 +423,14 @@ pub fn plan(
             notes.push(n);
         }
     }
+    let executable = work.fs.executables();
     Ok(Plan {
         changes,
         private,
+        executable,
         notes,
         targets: applied,
+        skipped,
         missing_env: work.render.missing,
         sensitive: work.render.resolved,
         kept_env: work.render.kept,
@@ -492,7 +501,10 @@ pub fn commit(plan: &Plan, description: &str, state_dir: &Path) -> Result<Option
             &plan.changes,
             description,
             &plan.targets,
-            &WriteOptions { private },
+            &WriteOptions {
+                private,
+                executable: plan.executable.clone(),
+            },
         )
         .map(Some)
 }
