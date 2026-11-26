@@ -195,7 +195,8 @@ struct TargetArgs {
 #[derive(Args, Debug, Clone)]
 struct StatusArgs {
     /// Targets to compare: ids (comma-separated: claude-code (alias: claude),
-    /// cursor, codex, gemini-cli, claude-desktop, antigravity), 'all' or 'detected'
+    /// cursor, codex, gemini-cli, claude-desktop, antigravity, opencode), 'all' or
+    /// 'detected'
     /// [default: detected; without PROFILE, every target applied to]
     #[arg(long, value_name = "IDS")]
     to: Option<String>,
@@ -221,7 +222,7 @@ struct SyncArgs {
     /// Pull this target's edits to the managed instructions and rules back into
     /// the profile (redacted, like capture), then apply them to the others;
     /// ID is a target id (claude-code (alias: claude), cursor, codex, gemini-cli,
-    /// claude-desktop, antigravity)
+    /// claude-desktop, antigravity, opencode)
     #[arg(long, value_name = "ID")]
     from: Option<String>,
     /// Replace instructions edited in the tool with the profile's (backed up)
