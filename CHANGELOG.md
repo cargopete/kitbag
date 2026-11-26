@@ -24,6 +24,7 @@ All notable changes to this project are documented here. The format follows
 - Loading a profile reads at most 64 MiB in all, besides the 2 MiB limit per file; a larger profile is refused with an error naming its directory, and capture refuses to write one (#38).
 - The README and `--help` now say where state goes with `--home DIR`: `KITBAG_STATE_DIR` if set, else `DIR/.local/state/kitbag`, never `XDG_STATE_HOME` or `LOCALAPPDATA`. A test covers it (#38).
 - A profile `name` with control characters (a newline, tab, escape ...) is refused when the profile is loaded, and `init --name` and `capture --name` refuse one before writing anything. Such a name used to be accepted and stored with each apply in the state directory (#38).
+- The README no longer says plain `apply` shows a diff: it lists what it will change and asks; `kitbag diff` and `apply --dry-run` show the full diff (#38).
 
 ### Security
 

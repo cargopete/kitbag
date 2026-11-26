@@ -43,8 +43,9 @@ dotfiles or a team repo), and each tool gets it in its own native format.
   spells things, e.g. `${env:VAR}` vs `${VAR}`, `.mdc` vs `paths:` frontmatter, TOML vs JSON.
 - **Secrets are kept out of the profile (best-effort).** Values are redacted to `${ENV_VAR}`
   references on capture; review the profile before sharing it. On apply, they are written in each tool's own interpolation syntax wherever it has one.
-- **Safe by default.** `apply` shows a diff and asks first. It merges into existing configs
-  without touching anything else (comments and formatting included), backs up every file,
+- **Safe by default.** `apply` lists what it will change and asks first; `kitbag diff` (or
+  `apply --dry-run`) shows the full diff. It merges into existing configs without touching
+  anything else (comments and formatting included), backs up every file,
   and `kitbag undo` reverts.
 - **A single static binary** for macOS, Linux and Windows. No runtime needed.
 

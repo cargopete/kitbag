@@ -5,6 +5,7 @@ mod common;
 use std::fs;
 
 use common::*;
+use predicates::prelude::*;
 use predicates::str::contains;
 
 const SERVER_PROFILE: &str = "kitbag = 1\nname = \"me\"\n\n[mcp_servers.docs]\ncommand = \"npx\"\nargs = [\"-y\", \"docs-mcp\"]\n";
@@ -242,4 +243,29 @@ fn profile_names_with_control_characters_are_refused() {
         .failure()
         .stderr(contains("--name must not contain control characters"));
     assert!(!sb.path("prof").exists());
+}
+
+#[test]
+fn plain_apply_lists_changes_and_dry_run_shows_the_diff() {
+    // As the README says: apply summarises, diff and apply --dry-run show the diff.
+    let sb = Sandbox::empty();
+    fs::create_dir_all(sb.path("p")).unwrap();
+    fs::write(sb.path("p/kitbag.toml"), "kitbag = 1\nname = \"me\"\n").unwrap();
+    fs::write(sb.path("p/instructions.md"), "Be brief.\n").unwrap();
+    for args in [
+        vec!["diff", "p", "--to", "claude-code"],
+        vec!["apply", "p", "--to", "claude-code", "--dry-run"],
+    ] {
+        sb.cli()
+            .args(&args)
+            .assert()
+            .success()
+            .stdout(contains("--- /dev/null").and(contains("+Be brief.")));
+    }
+    sb.cli()
+        .args(["apply", "p", "--to", "claude-code", "--yes"])
+        .assert()
+        .success()
+        .stdout(contains("CLAUDE.md").and(contains("--- /dev/null").not()));
+    assert!(sb.home().join(".claude/CLAUDE.md").exists());
 }
