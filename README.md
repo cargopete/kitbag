@@ -142,7 +142,8 @@ my-profile/
         └── SKILL.md
 ```
 
-Every file is optional except `kitbag.toml`.
+Every file is optional except `kitbag.toml`. A directory without one but with `rules/` at its
+root is read as a [plugin](#plugins-rules-at-the-root-no-kitbagtoml).
 
 ### `kitbag.toml`
 
@@ -258,7 +259,7 @@ applied by default. The plan lists each one under "MCP servers not applied (from
 source)" with its command and arguments (or URL) and the names of its env vars and headers.
 Pass `--allow-git-mcp docs,search` (repeatable) to apply the ones you name, `--allow-git-mcp`
 with no value for all of them (a value that looks like a path or URL, or names a directory
-with a `kitbag.toml`, is taken as the source, so `--allow-git-mcp github:me/profile` works;
+with a `kitbag.toml` or a plugin's `rules/`, is taken as the source, so `--allow-git-mcp github:me/profile` works;
 write `--allow-git-mcp=NAME` to be explicit), or `--trust-source`, which implies it. Servers already
 in place with the same definition are left as they are and aren't listed; servers from a local
 directory apply as written. From a git source, commands and skills that run shell snippets are
@@ -307,6 +308,40 @@ such as Claude Code's `allowed-tools`, are preserved and passed only to Claude C
 Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (frontmatter
 `name` and `description`) and any scripts or references. Skills are copied as-is, and
 `name`/`description` are added for tools that require them.
+
+### Plugins: `rules/` at the root, no `kitbag.toml`
+
+`apply`, `diff`, `status`, `sync` and `doctor` also take a plugin directory, or a git URL to
+one (`github:owner/plugin`, `https://…/repo.git//plugins/name`), following the idea of a
+portable `rules/` directory in agent plugins. A plugin is a directory with a `rules/`
+directory of `*.md` files at its root, one rule per file named after the file, and no
+`kitbag.toml` (a directory with a `kitbag.toml` is always loaded as a profile):
+
+```text
+my-plugin/
+├── .claude-plugin/plugin.json   # optional; its "name" names the plugin
+├── rules/
+│   ├── typescript.md
+│   └── testing.md
+├── commands/                    # optional, as in a profile
+└── skills/                      # optional, as in a profile
+```
+
+A rule's frontmatter is the profile's: `globs` (a list or a comma-separated string),
+`alwaysApply` and `description`; `paths` and `applyTo` are accepted as names for `globs`. A
+rule without frontmatter, or without any of these fields, applies everywhere. Tools that
+can't scope a rule to files (Codex, Gemini CLI) still load it, always on, in the folded rules
+section labelled with its globs, as for a profile (see the table above).
+
+kitbag reads the plugin in memory and writes nothing into it. The plugin's name, used for its
+managed block and in kitbag's records, is the `name` in `.claude-plugin/plugin.json` or a
+root `plugin.json`, if one is there; otherwise it is the directory's name (for a git URL, the
+sub-directory's or the repository's) as a slug, like `My Plugin` -> `my-plugin`. A plugin has
+no instructions, MCP servers or settings; `commands/` and `skills/` are read as in a profile.
+A plugin from a git URL is a git source, with the same rules as a git profile. `sync --from`
+doesn't work on a plugin, since that writes the edits into a profile. `kitbag undo` takes the
+plugin's rules out again (its own rule files and managed block, nothing you wrote), even
+after the plugin directory is gone.
 
 ## Secrets: the security model
 
@@ -663,7 +698,7 @@ Common options:
   keeps backups and history in `DIR/.local/state/kitbag` (not `XDG_STATE_HOME` or
   `LOCALAPPDATA`) unless `KITBAG_STATE_DIR` is set, which always wins.
 
-**Sources** are a local directory or a git URL:
+**Sources** are a local profile or plugin directory (see [Plugins](#plugins-rules-at-the-root-no-kitbagtoml)) or a git URL to one:
 
 - `github:owner/repo`, `gh:owner/repo/sub/dir#ref`, `gitlab:` and `bitbucket:` shorthands;
 - `https://github.com/owner/repo/tree/<ref>/<dir>`;
