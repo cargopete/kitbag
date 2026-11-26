@@ -15,6 +15,7 @@ use crate::model::Profile;
 use crate::plan_fs::PlanFs;
 use crate::secrets::{Redaction, RenderState};
 
+pub mod antigravity;
 pub mod claude_code;
 pub mod claude_desktop;
 pub mod codex;
@@ -358,6 +359,7 @@ pub fn all() -> &'static [&'static dyn Adapter] {
         &codex::Codex,
         &gemini::GeminiCli,
         &claude_desktop::ClaudeDesktop,
+        &antigravity::Antigravity,
     ]
 }
 
