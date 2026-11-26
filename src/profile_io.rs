@@ -508,6 +508,7 @@ pub fn save(p: &Profile, dir: &Path, force: bool) -> Result<Vec<PathBuf>> {
         .into());
     }
     // Skill scripts that were executable stay so (Unix).
+    #[cfg(unix)]
     let exec: std::collections::BTreeSet<String> = p
         .skills
         .iter()
