@@ -375,7 +375,8 @@ mod tests {
         std::fs::write(b.path().join("npx.cmd"), "").unwrap();
         std::fs::write(b.path().join("tool.bat"), "").unwrap();
         let path = std::env::join_paths([a.path(), b.path()]).unwrap();
-        let exts = ".COM;.EXE;.BAT;.CMD";
+        // Lower case, since only Windows matches file names without case.
+        let exts = ".com;.exe;.bat;.cmd";
         assert_eq!(
             find_with_pathext("npx", &path, exts),
             Some(b.path().join("npx.cmd"))
@@ -389,7 +390,7 @@ mod tests {
         assert_eq!(find_with_pathext("npx.exe", &path, exts), None);
         assert_eq!(find_with_pathext("bin/npx", &path, exts), None);
         assert_eq!(find_with_pathext("bin\\npx", &path, exts), None);
-        assert_eq!(find_with_pathext("npx", &path, ".EXE"), None);
+        assert_eq!(find_with_pathext("npx", &path, ".exe"), None);
     }
 
     #[test]
