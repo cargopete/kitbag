@@ -1066,7 +1066,7 @@ fn placeholder_value(v: &str) -> bool {
 
 /// In free text, URLs lose secret-named query values and secret path segments
 /// (known shapes only: prose has too many ids for an entropy guess).
-fn redact_text_urls(text: &str) -> (String, bool) {
+fn redact_text_urls(text: &str, marker: &str) -> (String, bool) {
     let mut hit = false;
     let out = TEXT_URL
         .replace_all(text, |c: &Captures| {
@@ -1081,7 +1081,7 @@ fn redact_text_urls(text: &str) -> (String, bool) {
             let view: Vec<&str> = segs.iter().map(String::as_str).collect();
             let hits = secret_path_segments(host, &view, false);
             hit |= !hits.is_empty();
-            replace_segments(host, &mut segs, &hits, |_| REDACTED_PASSWORD.to_string());
+            replace_segments(host, &mut segs, &hits, |_| marker.to_string());
             let path: String = segs.iter().map(|s| format!("/{s}")).collect();
             let rest = URL_QUERY.replace_all(rest, |q: &Captures| {
                 let v = percent_decode(&q[3]);
@@ -1092,7 +1092,7 @@ fn redact_text_urls(text: &str) -> (String, bool) {
                     && classify(Some(&q[2]), &v).is_some()
                 {
                     hit = true;
-                    format!("{}{}={REDACTED_PASSWORD}", &q[1], &q[2])
+                    format!("{}{}={marker}", &q[1], &q[2])
                 } else {
                     q[0].to_string()
                 }
@@ -1224,6 +1224,19 @@ fn assignment_spans(text: &str) -> Vec<(usize, usize)> {
 /// Tokens become `[REDACTED:<kind>]`. In URLs only the password is replaced
 /// (`postgres://user:[REDACTED]@host/db`), so the surrounding Markdown survives.
 pub fn redact_text(text: &str) -> (String, Vec<&'static str>) {
+    redact_text_with(text, &|kind| match kind {
+        Some(k) => format!("[REDACTED:{k}]"),
+        None => REDACTED_PASSWORD.to_string(),
+    })
+}
+
+/// [`redact_text`], with `mark(Some(kind))` replacing a known token format
+/// and `mark(None)` any other secret.
+fn redact_text_with(
+    text: &str,
+    mark: &dyn Fn(Option<&'static str>) -> String,
+) -> (String, Vec<&'static str>) {
+    let plain = mark(None);
     let mut kinds = Vec::new();
     let mut out = text.to_string();
     for p in STRONG.iter().filter(|p| p.kind != "url-credentials") {
@@ -1232,7 +1245,7 @@ pub fn redact_text(text: &str) -> (String, Vec<&'static str>) {
             p.re.replace_all(&out, |c: &Captures| {
                 if literal_match(&p.re, &c[0]) {
                     hit = true;
-                    format!("[REDACTED:{}]", p.kind)
+                    mark(Some(p.kind))
                 } else {
                     c[0].to_string()
                 }
@@ -1251,7 +1264,7 @@ pub fn redact_text(text: &str) -> (String, Vec<&'static str>) {
                 c[0].to_string()
             } else {
                 hit = true;
-                format!("{}{REDACTED_PASSWORD}@", &c[1])
+                format!("{}{plain}@", &c[1])
             }
         })
         .into_owned();
@@ -1260,7 +1273,7 @@ pub fn redact_text(text: &str) -> (String, Vec<&'static str>) {
         out = replaced;
     }
     // Tokens in URL queries and webhook paths.
-    let (replaced, hit) = redact_text_urls(&out);
+    let (replaced, hit) = redact_text_urls(&out, &plain);
     if hit {
         kinds.push("url-token");
         out = replaced;
@@ -1271,7 +1284,7 @@ pub fn redact_text(text: &str) -> (String, Vec<&'static str>) {
         .replace_all(&out, |c: &Captures| {
             if secret_text_value(&c[2]) {
                 hit = true;
-                format!("{} {REDACTED_PASSWORD}", &c[1])
+                format!("{} {plain}", &c[1])
             } else {
                 c[0].to_string()
             }
@@ -1285,7 +1298,7 @@ pub fn redact_text(text: &str) -> (String, Vec<&'static str>) {
     let spans = assignment_spans(&out);
     if !spans.is_empty() {
         for (a, b) in spans.into_iter().rev() {
-            out.replace_range(a..b, REDACTED_PASSWORD);
+            out.replace_range(a..b, &plain);
         }
         kinds.push("secret-named-value");
     }
@@ -1462,7 +1475,15 @@ fn shown_secret(key: &str, value: &str) -> bool {
         return false; // already masked
     }
     let unescaped = value.replace("\\\"", "\"").replace("\\\\", "\\");
-    named_secret(Some(key), &unescaped)
+    // Like capture: under a secret-sounding name any literal counts, however
+    // short, except configuration such as numbers, booleans, URLs and paths.
+    let literal = strip_refs(&unescaped);
+    let named = is_secret_name(key)
+        && sole_ref(&unescaped).is_none()
+        && (!has_ref(&unescaped) || substantial_literal(&literal))
+        && !obviously_not_secret(&literal);
+    strong_secret_kind(&unescaped).is_some()
+        || named
         || BEARER
             .captures(&unescaped)
             .is_some_and(|c| !has_ref(&c[2]) && c[2].len() >= 6)
@@ -1521,7 +1542,7 @@ pub fn mask_line(line: &str) -> String {
             }
         })
         .into_owned();
-    TOML_PAIR
+    out = TOML_PAIR
         .replace_all(&out, |c: &Captures| {
             if shown_secret(c[2].trim_matches('"'), &c[4]) {
                 format!("{}{}{}\"••••••••\"", &c[1], &c[2], &c[3])
@@ -1529,7 +1550,67 @@ pub fn mask_line(line: &str) -> String {
                 c[0].to_string()
             }
         })
-        .into_owned()
+        .into_owned();
+    // Whatever capture would redact from free text (instructions, rules):
+    // `export DB_PASSWORD=...`, `Bearer ...`, webhook and query tokens.
+    redact_text_with(&out, &|_| MASK.to_string()).0
+}
+
+/// What a secret is shown as.
+const MASK: &str = "••••••••";
+
+static KEY_BEGIN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"-----BEGIN [A-Z ]*PRIVATE KEY-----").expect("valid regex"));
+static KEY_END: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"-----END [A-Z ]*PRIVATE KEY-----").expect("valid regex"));
+static BASE64_LINE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z0-9+/=]{16,}$").expect("valid regex"));
+static PEM_HEADER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z-]+: \S").expect("valid regex"));
+
+/// Mask private keys (PEM `-----BEGIN ... PRIVATE KEY-----` blocks) across
+/// lines, before a text is split into lines for display. Each block becomes
+/// one line, `•••••••• (private key, sha256:1a2b3c4d)`: the short hash can't
+/// be turned back into the key, but shows whether a key changed.
+///
+/// A block without an `END` line runs as far as it looks like one: base64
+/// lines, PEM headers (`Proc-Type: ...`) and blank lines between them.
+pub fn mask_key_blocks(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(m) = KEY_BEGIN.find(rest) {
+        out.push_str(&rest[..m.start()]);
+        let block = &rest[m.start()..];
+        let len = match KEY_END.find(block) {
+            Some(e) => e.end(),
+            None => unterminated_key_len(block),
+        };
+        let hash = crate::txn::sha256(Some(&block.as_bytes()[..len])).unwrap_or_default();
+        out.push_str(&format!("{MASK} (private key, sha256:{})", &hash[..8]));
+        rest = &block[len..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Length of a key block that has no `END` line: its first line plus the
+/// key-like lines after it, without the line break after the last one.
+fn unterminated_key_len(block: &str) -> usize {
+    let mut lines = block.split_inclusive('\n');
+    let first = lines.next().unwrap_or_default();
+    let mut end = first.trim_end_matches(['\n', '\r']).len();
+    let mut pos = first.len();
+    for line in lines {
+        let content = line.trim_end_matches(['\n', '\r']);
+        let t = content.trim();
+        if BASE64_LINE.is_match(t) || PEM_HEADER.is_match(t) {
+            end = pos + content.len();
+        } else if !t.is_empty() {
+            break;
+        }
+        pos += line.len();
+    }
+    end
 }
 
 /// The forms a secret can take on disk: raw, and escaped inside a JSON / TOML string.
@@ -2066,6 +2147,71 @@ mod tests {
         ] {
             assert_eq!(mask_line(keep), keep);
         }
+    }
+
+    /// Anything capture would redact from text is masked in a diff too.
+    #[test]
+    fn masks_what_capture_would_redact() {
+        for (line, gone) in [
+            ("export DB_PASSWORD=hunter22x", "hunter22x"),
+            (
+                "curl -H 'Authorization: Bearer abcdef123456'",
+                "abcdef123456",
+            ),
+            (
+                "see https://hooks.slack.com/services/T0FAKE/B0FAKE/FakeFakeFake123",
+                "FakeFakeFake123",
+            ),
+            (
+                "https://api.example.com/v1?api_key=fake123abc456",
+                "fake123abc456",
+            ),
+            // Under a secret name, however short, as capture redacts it.
+            (r#"  "PASSWORD": "rootE","#, "rootE"),
+            (r#"token = "a1b2c""#, "a1b2c"),
+        ] {
+            let masked = mask_line(line);
+            assert!(!masked.contains(gone), "{line} -> {masked}");
+            assert!(masked.contains("••••••••"), "{line} -> {masked}");
+        }
+        for keep in [
+            "Run `cargo test` before you push.",
+            "export LOG_LEVEL=debug",
+            r#"  "PASSWORD": "${DB_PASSWORD}","#,
+            r#"  "AUTH_TIMEOUT": "30","#,
+            r#"  "PASSWORD_FILE": "/run/secrets/db","#,
+            "token: [REDACTED]",
+        ] {
+            assert_eq!(mask_line(keep), keep);
+        }
+    }
+
+    #[test]
+    fn masks_private_key_blocks_across_lines() {
+        let key = "-----BEGIN OPENSSH PRIVATE KEY-----\nFAKEb3BlbnNzaC1rZXktdjEAAAAA\nFAKEAAAAAAAAAAEAAAAzAAAAC3Nz\n-----END OPENSSH PRIVATE KEY-----";
+        let text = format!("before\n{key}\nafter\n");
+        let masked = mask_key_blocks(&text);
+        assert!(!masked.contains("FAKE"), "{masked}");
+        assert!(masked.starts_with("before\n•••••••• (private key, sha256:"));
+        assert!(masked.ends_with(")\nafter\n"), "{masked}");
+        assert_eq!(masked.lines().count(), 3);
+        // A different key gets a different tag, so the diff shows the change.
+        let other = mask_key_blocks(&text.replace("FAKEb3", "FAKEc4"));
+        assert_ne!(masked, other);
+        // Escaped on one line, as in JSON.
+        let json = format!("\"key\": \"{}\",", key.replace('\n', "\\n"));
+        let masked = mask_key_blocks(&json);
+        assert!(
+            !masked.contains("FAKE") && masked.ends_with("\","),
+            "{masked}"
+        );
+        // Without an END line: the key-like lines after BEGIN, not the prose.
+        let cut = "-----BEGIN RSA PRIVATE KEY-----\r\nProc-Type: 4,ENCRYPTED\r\n\r\nFAKEMIIEpAIBAAKCAQEA0Z3VS5JJcds3xf\r\n  FAKEn/ygWyF8PbnGy0AHB7MhgHcTz6sE2I2y\r\n\r\nThe end.\r\n";
+        let masked = mask_key_blocks(cut);
+        assert!(!masked.contains("FAKE"), "{masked}");
+        assert!(masked.ends_with(")\r\n\r\nThe end.\r\n"), "{masked:?}");
+        let plain = "No keys here: -----BEGIN PUBLIC KEY----- is fine.\n";
+        assert_eq!(mask_key_blocks(plain), plain);
     }
 
     #[test]

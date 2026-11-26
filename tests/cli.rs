@@ -343,6 +343,27 @@ fn undo_refuses_a_tampered_backup_without_force() {
     assert_eq!(sb.read("home/.claude/CLAUDE.md"), "planted\n");
 }
 
+#[test]
+fn diffs_mask_private_keys_and_secrets_in_existing_files() {
+    let sb = Sandbox::empty();
+    sb.cli().args(["init", "prof"]).assert().success();
+    fs::create_dir_all(sb.home().join(".claude")).unwrap();
+    fs::write(
+        sb.home().join(".claude/CLAUDE.md"),
+        "# Notes\n\nexport DB_PASSWORD=FAKEpw123\n\n-----BEGIN OPENSSH PRIVATE KEY-----\nFAKEb3BlbnNzaC1rZXktdjEAAAAA\nFAKEAAAAAAAAAAEAAAAzAAAAC3Nz\n-----END OPENSSH PRIVATE KEY-----\n",
+    )
+    .unwrap();
+    sb.cli()
+        .args(["diff", "prof", "--to", "claude-code"])
+        .assert()
+        .success()
+        .stdout(
+            contains("(private key, sha256:")
+                .and(contains("DB_PASSWORD=••••••••"))
+                .and(contains("FAKE").not()),
+        );
+}
+
 /// A `~/...` display path with the platform's separator.
 fn shown(path: &str) -> String {
     path.replace('/', std::path::MAIN_SEPARATOR_STR)

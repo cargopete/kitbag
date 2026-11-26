@@ -294,7 +294,8 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
    such as anything for Claude Desktop, or a Codex env var whose name differs from its source.
    kitbag resolves those from your environment at apply time and warns per field. The value is
    masked as `••••••••` in every diff. Diffs also mask anything that already looks like a
-   credential in your existing files. New files containing resolved values are created `0600`.
+   credential in your existing files, including private keys that span several lines, and
+   anything capture would redact. New files containing resolved values are created `0600`.
    `--secrets never` keeps the `${VAR}` placeholder instead. It is the default for profiles
    from git sources, so your environment is never resolved into servers someone else defined
    unless you pass `--secrets resolve` (or `--trust-source`). Unset variables are reported and
