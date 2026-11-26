@@ -215,7 +215,7 @@ pub struct Plan {
     /// MCP servers added or changed, for review before writing.
     pub servers: Vec<ServerReview>,
     /// MCP servers from a git source that would be added or changed but were
-    /// held back because the user didn't opt in (see [`withhold_servers`]).
+    /// held back because the user didn't opt in (see [`plan_untrusted`]).
     pub withheld: Vec<ServerReview>,
     /// Env vars left as placeholders because secrets were not resolved.
     pub kept_env: BTreeSet<String>,
