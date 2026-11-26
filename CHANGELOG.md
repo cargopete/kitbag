@@ -22,6 +22,9 @@ All notable changes to this project are documented here. The format follows
 - When `applied-servers.json` can't be read, the next apply that writes an MCP server still starts it afresh, but first keeps the old file as `applied-servers.json.bak` (`0600`), so its records can be recovered by hand; the warning names that file (#60).
 - README: says that a git source is matched by its URL as written (only shorthand such as `github:owner/repo` is expanded), so `https://github.com/o/r` and `https://github.com/o/r.git` count as different sources and a server one added is left in place when the other disables it, and that for tools that get resolved secrets (Claude Desktop, Antigravity, some Codex fields) the hash `applied-servers.json` keeps of each entry is taken over the resolved values (#60).
 
+### Security
+
+- Diffs mask three kinds of secret already in a tool's config that they used to show: a random-looking value under an ordinary name (`"CLIENT_REF": "q8Zr2LkP..."`, or a lone token in an `args` array), as capture redacts it from an MCP server; a flag whose value is on the next line of a pretty-printed `args` array (`"--api-key",` then the value); and single-quoted TOML values (`API_KEY = '...'`, `args = ['--token', '...']`). A changed secret still shows up as a changed line, masked on both sides. To keep diffs readable, a value only counts as random-looking when it also has a run of 16 or more letters and digits mixing both, so model names, camel-case tool names, package names, paths and UUIDs are still shown. So are values that are random by nature but say what runs, unless they sit under a secret-sounding name: all-hex values (sha256 checksums, commit hashes, Mongo ObjectIds), an image pinned by digest (`ghcr.io/acme/server@sha256:…`, or `sha256:…` alone), so a changed pin shows in a `docker run` `args` array, and ULIDs. Also shown is a value given to a flag that is itself a flag (`"--token", "--verbose"`) (#75).
 
 ## [0.1.4] - 2026-11-26
 

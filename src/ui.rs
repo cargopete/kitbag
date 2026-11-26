@@ -169,6 +169,9 @@ pub fn render_diff(
     let before = crate::secrets::mask_key_blocks(&mask(&before, sensitive));
     let after = crate::secrets::mask_key_blocks(&mask(&after, sensitive));
     let diff = TextDiff::from_lines(&before, &after);
+    // A flag's value can sit on the line after it (`"--token",` then `"..."`).
+    let old_flags = crate::secrets::pending_flags(diff.iter_old_slices());
+    let new_flags = crate::secrets::pending_flags(diff.iter_new_slices());
     let display_path = visible_line(display_path);
     let display_path = display_path.as_ref();
     let mut out = format!(
@@ -208,7 +211,12 @@ pub fn render_diff(
                     .strip_suffix("\r\n")
                     .or_else(|| value.strip_suffix('\n'))
                     .unwrap_or(value);
-                let text = crate::secrets::mask_line(value);
+                let flag: Option<&Option<String>> = match ch.tag() {
+                    ChangeTag::Insert => ch.new_index().and_then(|i| new_flags.get(i)),
+                    _ => ch.old_index().and_then(|i| old_flags.get(i)),
+                };
+                let flag = flag.and_then(Option::as_deref);
+                let text = crate::secrets::mask_line_after(value, flag);
                 let text = visible_line(&text);
                 let line = match ch.tag() {
                     ChangeTag::Insert => paint(GREEN, format!("+{text}")),
@@ -227,6 +235,47 @@ pub fn render_diff(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Secrets already in a file are masked in its diff: a flag's value on the
+    /// next line, a random-looking value under an ordinary name and a
+    /// single-quoted TOML value. A changed secret still shows as a change.
+    #[test]
+    fn diffs_mask_secrets_already_in_the_file() {
+        let before = "{\n  \"mcpServers\": {\n    \"svc\": {\n      \"command\": \"npx\",\n      \"args\": [\n        \"--api-key\",\n        \"hunter22x\",\n        \"--port\",\n        \"8080\"\n      ],\n      \"env\": { \"CLIENT_REF\": \"q8Zr2LkP0vXa7MnB4cTy9WdE\" }\n    }\n  }\n}\n";
+        let after = before
+            .replace("hunter22x", "hunter33y")
+            .replace("8080", "9090");
+        let c = FileChange {
+            path: "mcp.json".into(),
+            before: Some(before.as_bytes().to_vec()),
+            after: Some(after.into_bytes()),
+        };
+        let out = render_diff(&c, "mcp.json", &BTreeSet::new(), usize::MAX);
+        for secret in ["hunter22x", "hunter33y", "q8Zr2LkP0vXa7MnB4cTy9WdE"] {
+            assert!(!out.contains(secret), "{out}");
+        }
+        assert!(out.contains("-        \"••••••••\","), "{out}");
+        assert!(out.contains("+        \"••••••••\","), "{out}");
+        assert!(out.contains("-        \"8080\""), "{out}");
+        assert!(out.contains("+        \"9090\""), "{out}");
+        assert!(out.contains("\"command\": \"npx\""), "{out}");
+
+        let before = "[mcp_servers.svc]\r\nenv = { API_KEY = 'rootE' }\r\ncommand = 'npx'\r\nargs = [\r\n  '--token',\r\n  'abc123def'\r\n]\r\n";
+        let after = before.replace("'npx'", "'uvx'");
+        let c = FileChange {
+            path: "config.toml".into(),
+            before: Some(before.as_bytes().to_vec()),
+            after: Some(after.into_bytes()),
+        };
+        let out = render_diff(&c, "config.toml", &BTreeSet::new(), usize::MAX);
+        assert!(
+            !out.contains("abc123def") && !out.contains("rootE"),
+            "{out}"
+        );
+        assert!(out.contains("  '••••••••'"), "{out}");
+        assert!(out.contains("API_KEY = '••••••••'"), "{out}");
+        assert!(out.contains("+command = 'uvx'"), "{out}");
+    }
 
     #[test]
     fn control_characters_are_shown_not_sent() {
