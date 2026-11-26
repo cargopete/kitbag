@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-26
+
 ### Added
 
 - The `copilot` target carries commands and skills. Commands become VS Code prompt files, `.github/prompts/<name>.prompt.md`, at project scope (VS Code keeps user prompt files in its own profile storage and Copilot CLI doesn't read them, so there are none at user scope); they keep `description`, `argument-hint` and VS Code's `name`, `agent`, `model` and `tools`, other keys such as `allowed-tools` are left out with a note, and `$ARGUMENTS` is written as is with a warning. Skills go to `$COPILOT_HOME/skills/<name>/SKILL.md` (default `~/.copilot`) and `.github/skills/`, with `name` and `description` filled in when missing and a warning for a name VS Code wouldn't load. Capture reads both. Custom agents and chat modes (their old name) are still listed by capture and not carried, as profiles have no agents yet (#22).
@@ -166,7 +168,8 @@ All notable changes to this project are documented here. The format follows
 - `capture` with several tools (`--from all`, `detected` or a list) reports a tool whose config can't be read and captures the rest; it fails only if nothing could be read. A single `--from` still fails loudly.
 - `install.sh` and `install.ps1` download `kitbag-<target>.sha256`, the checksum name the release workflow uploads (found in the v0.1.0-rc.1 dry run).
 
-[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/cargopete/kitbag/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/cargopete/kitbag/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/cargopete/kitbag/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/cargopete/kitbag/compare/v0.1.1...v0.1.2
