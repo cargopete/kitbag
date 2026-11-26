@@ -802,11 +802,12 @@ fn cmd_capture(
         println!("  {} {}", paint(DIM, "read"), tildify(s, &env.home));
     }
     println!(
-        "\n  {} MCP server(s), {} rule(s), {} command(s), {} skill(s){}{}",
+        "\n  {} MCP server(s), {} rule(s), {} command(s), {} skill(s){}{}{}",
         p.mcp_servers.len(),
         p.rules.len(),
         p.commands.len(),
         p.skills.len(),
+        agent_count(p),
         if p.instructions.is_some() {
             ", instructions"
         } else {
@@ -1390,7 +1391,7 @@ fn instruction_rows(ctx: &Ctx, plan: &Plan) -> Result<Vec<(StatusRow, engine::It
     Ok(rows)
 }
 
-/// MCP servers, commands and skills of `profile` (as loaded, before any
+/// MCP servers, commands, skills and agents of `profile` (as loaded, before any
 /// remote restrictions) compared with each planned target: names only.
 fn inventory_rows(
     env: &Env,
@@ -1513,6 +1514,14 @@ fn inventory_rows(
                     .as_ref()
                     .map(|p| p.skills.iter().map(|s| s.name.clone()).collect()),
             ),
+            (
+                Feature::Agents,
+                "agent",
+                profile.agents.iter().map(|s| s.name.clone()).collect(),
+                present
+                    .as_ref()
+                    .map(|p| p.agents.iter().map(|s| s.name.clone()).collect()),
+            ),
         ] {
             if a.supports(env.scope, feature) == adapters::Support::None {
                 continue;
@@ -1535,6 +1544,15 @@ fn inventory_rows(
         rows.extend(disabled_rows);
     }
     rows
+}
+
+/// `, N agent(s)` for a profile with agents, else nothing.
+fn agent_count(p: &Profile) -> String {
+    if p.agents.is_empty() {
+        String::new()
+    } else {
+        format!(", {} agent(s)", p.agents.len())
+    }
 }
 
 fn print_status(rows: &[StatusRow], env: &Env, as_json: bool) -> Result<()> {
@@ -1680,7 +1698,7 @@ fn cmd_status(ctx: &Ctx, src: Option<&str>, s: &StatusArgs) -> Result<i32> {
             "\n{}",
             paint(
                 DIM,
-                "MCP servers, commands, skills: added = in the profile, not in the tool; changed = differs from the profile; removed = in the tool, not in the profile (sync leaves it)."
+                "MCP servers, commands, skills, agents: added = in the profile, not in the tool; changed = differs from the profile; removed = in the tool, not in the profile (sync leaves it)."
             )
         );
     }
@@ -2050,11 +2068,12 @@ fn cmd_doctor(
                     visible_line(&resolved.origin)
                 );
                 println!(
-                    "  {} MCP server(s), {} rule(s), {} command(s), {} skill(s){}",
+                    "  {} MCP server(s), {} rule(s), {} command(s), {} skill(s){}{}",
                     p.mcp_servers.len(),
                     p.rules.len(),
                     p.commands.len(),
                     p.skills.len(),
+                    agent_count(&p),
                     if p.instructions.is_some() {
                         ", instructions"
                     } else {

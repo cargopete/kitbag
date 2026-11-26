@@ -10,7 +10,9 @@ use super::{ApplyOptions, Captured, Env, SecretsMode, Work};
 use crate::edit::block;
 use crate::edit::json::JsonDoc;
 use crate::frontmatter;
-use crate::model::{Command, McpServer, Profile, Rule, Skill, SkillFile, Transport, is_valid_name};
+use crate::model::{
+    Agent, Command, McpServer, Profile, Rule, Skill, SkillFile, Transport, is_valid_name,
+};
 use crate::plan_fs::{decode_text, join_rel, read_opt, subdirs, walk_confined, walk_files};
 use crate::policy;
 use crate::profile_io::{
@@ -79,6 +81,29 @@ pub fn write_command(
     )? {
         work.changed_items
             .push((target.to_string(), format!("command {name}")));
+    }
+    Ok(())
+}
+
+/// Write one custom agent file, noting it for `kitbag status`.
+pub fn write_agent(
+    work: &mut Work,
+    path: &Path,
+    content: &[u8],
+    opts: &ApplyOptions,
+    target: &str,
+    name: &str,
+) -> Result<()> {
+    if write_owned(
+        work,
+        path,
+        content,
+        opts,
+        target,
+        &format!("agent '{name}'"),
+    )? {
+        work.changed_items
+            .push((target.to_string(), format!("agent {name}")));
     }
     Ok(())
 }
@@ -1273,6 +1298,29 @@ pub fn add_command(cap: &mut Captured, mut c: Command, target: &str) {
     if !cap.profile.commands.iter().any(|x| x.name == c.name) {
         cap.profile.commands.push(c);
     }
+}
+
+/// Add a captured custom agent, redacting secrets; the first one of a name wins.
+/// Returns whether it was added.
+pub fn add_agent(cap: &mut Captured, mut a: Agent, target: &str) -> bool {
+    if cap.profile.agents.iter().any(|x| x.name == a.name) {
+        return false;
+    }
+    let (body, mut kinds) = redact_text(&a.body);
+    redact_opt(&mut a.description, &mut kinds);
+    for v in a.extra.values_mut() {
+        kinds.extend(crate::secrets::redact_json_strings(v));
+    }
+    kinds.dedup();
+    if !kinds.is_empty() {
+        cap.warn(
+            target,
+            format!("redacted {} from agent '{}'", kinds.join(", "), a.name),
+        );
+    }
+    a.body = body;
+    cap.profile.agents.push(a);
+    true
 }
 
 /// Remember which file a flattened name came from; two different files that

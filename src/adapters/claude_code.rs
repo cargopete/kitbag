@@ -315,8 +315,18 @@ impl Adapter for ClaudeCode {
     fn scopes(&self) -> &'static [Scope] {
         &[Scope::User, Scope::Project]
     }
-    fn support(&self, _scope: Scope) -> [(Feature, Support); 6] {
-        Feature::ALL.map(|f| (f, Support::Native))
+    fn support(&self, _scope: Scope) -> [(Feature, Support); 7] {
+        // Claude Code subagents are a different format; not carried yet.
+        Feature::ALL.map(|f| {
+            (
+                f,
+                if f == Feature::Agents {
+                    Support::None
+                } else {
+                    Support::Native
+                },
+            )
+        })
     }
 
     fn locations(&self, env: &Env) -> Vec<(&'static str, PathBuf)> {

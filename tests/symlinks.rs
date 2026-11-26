@@ -221,3 +221,28 @@ fn project_apply_rechecks_confinement_when_it_writes() {
         .unwrap();
     assert!(rule.exists());
 }
+
+#[test]
+fn copilot_agents_are_not_read_or_written_through_a_link_out_of_the_project() {
+    use kitbag::adapters::Scope;
+    let sb = Sandbox::empty();
+    fs::create_dir_all(sb.path("outside")).unwrap();
+    fs::write(sb.path("outside/leak.agent.md"), "Outside.\n").unwrap();
+    fs::create_dir_all(sb.project().join(".github")).unwrap();
+    symlink(sb.path("outside"), sb.project().join(".github/agents")).unwrap();
+    let r = capture(&["copilot"], &sb.env(Scope::Project));
+    assert!(r.profile.agents.is_empty());
+
+    let mut p = kitbag::model::Profile::new("p");
+    p.agents.push(kitbag::model::Agent {
+        name: "reviewer".into(),
+        description: Some("Reviews".into()),
+        extra: Default::default(),
+        body: "Review.".into(),
+    });
+    let env = sb.env(Scope::Project);
+    let engine_opts = opts(&p);
+    let planned = kitbag::engine::plan(&p, &targets(&["copilot"]), &env, &engine_opts);
+    assert!(planned.is_err() || planned.unwrap().changes.is_empty());
+    assert!(!sb.path("outside/reviewer.agent.md").exists());
+}

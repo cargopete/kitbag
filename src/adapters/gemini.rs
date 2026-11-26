@@ -97,13 +97,14 @@ impl Adapter for GeminiCli {
     fn scopes(&self) -> &'static [Scope] {
         &[Scope::User, Scope::Project]
     }
-    fn support(&self, _scope: Scope) -> [(Feature, Support); 6] {
+    fn support(&self, _scope: Scope) -> [(Feature, Support); 7] {
         [
             (Feature::Mcp, Support::Native),
             (Feature::Instructions, Support::Native),
             (Feature::Rules, Support::Folded),
             (Feature::Commands, Support::Native),
             (Feature::Skills, Support::Native),
+            (Feature::Agents, Support::None),
             (Feature::Settings, Support::Native),
         ]
     }

@@ -308,15 +308,56 @@ pub fn shell_snippet(text: &str) -> Option<&'static str> {
     }
 }
 
+/// Frontmatter keys of a custom agent that start servers of its own
+/// (`mcp-servers`). Matched like [`executable_key`].
+fn agent_server_key(key: &str) -> bool {
+    let k: String = key
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    k == "mcpservers"
+}
+
+/// What makes a custom agent run commands: hooks, pre-approved tools, MCP
+/// servers it starts itself, or a shell snippet in its body.
+fn agent_risks(a: &crate::model::Agent) -> Vec<String> {
+    let mut out: Vec<String> = a
+        .extra
+        .keys()
+        .filter(|k| executable_key(k) || agent_server_key(k))
+        .cloned()
+        .collect();
+    if let Some(syntax) = shell_snippet(&a.body) {
+        out.push(format!("a shell snippet ({syntax})"));
+    }
+    out
+}
+
 fn joined_keys(keys: &[String]) -> String {
     keys.join(", ")
 }
 
 /// For profiles from remote sources: skip commands and skills that run shell
 /// snippets, and remove `hooks` and `allowed-tools` from the frontmatter of
-/// the rest. Returns a description of each change.
+/// the rest. Custom agents with hooks, pre-approved tools, MCP servers of
+/// their own or a shell snippet are skipped whole, since an agent without
+/// its servers or hooks is not the agent its author wrote. Returns a
+/// description of each change.
 pub fn drop_risky_content(profile: &mut crate::model::Profile) -> Vec<String> {
     let mut out = Vec::new();
+    profile.agents.retain(|a| {
+        let risks = agent_risks(a);
+        if risks.is_empty() {
+            return true;
+        }
+        out.push(format!(
+            "agent '{}', which can run commands ({})",
+            a.name,
+            joined_keys(&risks)
+        ));
+        false
+    });
     profile.commands.retain_mut(|c| {
         if let Some(syntax) = shell_snippet(&c.body) {
             out.push(format!(
@@ -378,8 +419,8 @@ pub fn drop_risky_content(profile: &mut crate::model::Profile) -> Vec<String> {
     out
 }
 
-/// Commands and skills that pre-approve tools, define hooks or run shell
-/// commands when used.
+/// Commands, skills and agents that pre-approve tools, define hooks or run
+/// shell commands when used, and agents that start MCP servers of their own.
 pub fn risky_content(profile: &crate::model::Profile) -> Vec<String> {
     let mut out = Vec::new();
     let tools = |v: &Value| match v {
@@ -411,6 +452,18 @@ pub fn risky_content(profile: &crate::model::Profile) -> Vec<String> {
             ));
         }
     }
+    for a in &profile.agents {
+        let what = format!("agent '{}'", a.name);
+        frontmatter(&mut out, &what, &a.extra);
+        if a.extra.keys().any(|k| agent_server_key(k)) {
+            out.push(format!(
+                "{what} starts MCP servers of its own (mcp-servers)"
+            ));
+        }
+        if let Some(syntax) = shell_snippet(&a.body) {
+            out.push(format!("{what} has a shell snippet ({syntax})"));
+        }
+    }
     for s in &profile.skills {
         if let Some(main) = s.main_file() {
             let what = format!("skill '{}'", s.name);
@@ -428,6 +481,52 @@ pub fn risky_content(profile: &crate::model::Profile) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn agents_that_run_commands_are_dropped_from_remote_profiles() {
+        let agent = |name: &str, extra: Value, body: &str| crate::model::Agent {
+            name: name.into(),
+            description: Some("d".into()),
+            extra: extra.as_object().cloned().unwrap_or_default(),
+            body: body.into(),
+        };
+        let mut p = crate::model::Profile::new("p");
+        p.agents = vec![
+            agent(
+                "plain",
+                json!({"tools": ["read"], "model": "GPT-5"}),
+                "Read.",
+            ),
+            agent(
+                "servers",
+                json!({"mcp-servers": {"x": {"command": "sh"}}}),
+                "Go.",
+            ),
+            agent("hooked", json!({"hooks": {}}), "Go."),
+            agent("snippet", json!({}), "Run !`rm -rf /`."),
+        ];
+        let risky = risky_content(&p);
+        assert!(
+            risky
+                .iter()
+                .any(|r| r.contains("agent 'servers' starts MCP servers"))
+        );
+        assert!(
+            risky
+                .iter()
+                .any(|r| r.contains("agent 'hooked' defines hooks"))
+        );
+        assert!(
+            risky
+                .iter()
+                .any(|r| r.contains("agent 'snippet' has a shell snippet"))
+        );
+        assert!(!risky.iter().any(|r| r.contains("'plain'")));
+        let dropped = drop_risky_content(&mut p);
+        assert_eq!(dropped.len(), 3, "{dropped:?}");
+        let left: Vec<&str> = p.agents.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(left, ["plain"]);
+    }
 
     #[test]
     fn filters_unsafe_keys() {

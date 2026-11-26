@@ -37,8 +37,14 @@
 //! * Skills: `$COPILOT_HOME/skills/<name>/SKILL.md` and
 //!   `.github/skills/<name>/SKILL.md`, the locations both Copilot CLI and
 //!   VS Code list for Copilot.
-//! * Custom agents (`.agent.md`; chat modes are their old name) are not carried:
-//!   the profile has no place for agents yet. Capture lists them.
+//! * Custom agents: `$COPILOT_HOME/agents/<name>.agent.md` (default
+//!   `~/.copilot/agents/`) and `.github/agents/<name>.agent.md`, where both
+//!   Copilot CLI and VS Code look; both also take a plain `<name>.md`, which
+//!   capture reads and apply keeps writing to if it is already there. Chat
+//!   modes are the old name of custom agents: capture reads
+//!   `.github/chatmodes/*.chatmode.md` (and a `*.chatmode.md` left among the
+//!   agents) as agents, and apply writes them as `.agent.md` files, as VS Code
+//!   says to rename them. Frontmatter is kept as it is.
 //!
 //! Docs: <https://code.visualstudio.com/docs/agents/reference/mcp-configuration>,
 //! <https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference>,
@@ -47,7 +53,8 @@
 //! <https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference>,
 //! <https://code.visualstudio.com/docs/agent-customization/prompt-files>,
 //! <https://code.visualstudio.com/docs/agent-customization/agent-skills>,
-//! <https://code.visualstudio.com/docs/agents/reference/custom-agent-file-reference>.
+//! <https://code.visualstudio.com/docs/agents/reference/custom-agent-file-reference>,
+//! <https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/create-custom-agents-for-cli>.
 
 use std::path::{Path, PathBuf};
 
@@ -56,18 +63,18 @@ use serde_json::{Map, Value, json};
 
 use super::claude_code;
 use super::common::{
-    MdKind, add_rule, capture_instructions, capture_markdown_dir, capture_skills_dir, claim_name,
-    import_server, keep_shared_servers, merge_json_servers, name_from_rel, read_text_item,
-    render_server, same_server, server_entries, server_from_json, servers_for,
-    skill_with_required_frontmatter, string_list, write_command, write_instructions, write_rule,
-    write_skill,
+    MdKind, add_agent, add_rule, capture_instructions, capture_markdown_dir, capture_skills_dir,
+    claim_name, import_server, keep_shared_servers, merge_json_servers, name_from_rel,
+    read_text_item, render_server, same_server, server_entries, server_from_json, servers_for,
+    skill_with_required_frontmatter, string_list, write_agent, write_command, write_instructions,
+    write_rule, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
 use crate::frontmatter::{self, opt};
-use crate::model::{Command, Profile, Rule, RuleMode, Skill, Transport, is_valid_name};
+use crate::model::{Agent, Command, Profile, Rule, RuleMode, Skill, Transport, is_valid_name};
 use crate::plan_fs::{join_rel, walk_files};
-use crate::profile_io::rule_from_markdown;
+use crate::profile_io::{agent_from_markdown, agent_to_markdown, rule_from_markdown};
 use crate::secrets::{RefStyle, has_ref};
 
 const ID: &str = "copilot";
@@ -76,6 +83,9 @@ const ID: &str = "copilot";
 const MANAGED_KEYS: &[&str] = &["type", "command", "args", "env", "cwd", "url", "headers"];
 const RULE_EXT: &str = ".instructions.md";
 const PROMPT_EXT: &str = ".prompt.md";
+const AGENT_EXT: &str = ".agent.md";
+/// The old name and extension of custom agents.
+const CHATMODE_EXT: &str = ".chatmode.md";
 /// Prompt-file frontmatter keys VS Code lists besides `description` and
 /// `argument-hint`; other keys a command carries (Claude Code's
 /// `allowed-tools` ...) mean nothing in a prompt file and are left out.
@@ -88,6 +98,7 @@ struct Paths {
     instructions: PathBuf,
     rules: PathBuf,
     skills: PathBuf,
+    agents: PathBuf,
     /// VS Code prompt files; project scope only.
     prompts: Option<PathBuf>,
     /// Copilot CLI settings, for `disabledMcpServers`.
@@ -108,6 +119,7 @@ fn paths(env: &Env) -> Paths {
                 instructions: d.join("copilot-instructions.md"),
                 rules: d.join("instructions"),
                 skills: d.join("skills"),
+                agents: d.join("agents"),
                 prompts: None,
                 settings: d.join("settings.json"),
             }
@@ -119,6 +131,7 @@ fn paths(env: &Env) -> Paths {
                 instructions: g.join("copilot-instructions.md"),
                 rules: g.join("instructions"),
                 skills: g.join("skills"),
+                agents: g.join("agents"),
                 prompts: Some(g.join("prompts")),
                 settings: g.join("copilot").join("settings.json"),
             }
@@ -298,38 +311,68 @@ fn import_vscode(cap: &mut Captured, name: &str, def: &Map<String, Value>, file:
     import(cap, name, def, file, false);
 }
 
-/// Copilot features kitbag doesn't carry yet, so the user knows what a
-/// captured profile leaves behind.
-fn note_not_carried(cap: &mut Captured, env: &Env) {
-    let dirs: Vec<(PathBuf, &str)> = match env.scope {
-        Scope::User => {
-            let d = copilot_home(env);
-            vec![(d.join("agents"), "custom agents")]
-        }
-        Scope::Project => {
-            let g = env.project.join(".github");
-            vec![
-                (g.join("agents"), "custom agents"),
-                (g.join("chatmodes"), "chat modes (now custom agents)"),
-            ]
-        }
-    };
-    let found: Vec<String> = dirs
-        .iter()
-        .filter_map(|(dir, what)| {
-            let n = walk_files(dir, 10_000).map_or(0, |f| f.len());
-            (n > 0).then(|| format!("{what} ({})", crate::ui::tildify(dir, &env.home)))
+/// The agent name of a file in an agents or chat-modes directory, and
+/// whether it is a legacy chat mode: `x.agent.md`, `x.chatmode.md`, `x.md`.
+fn agent_name(rel: &str) -> Option<(String, bool)> {
+    if rel.ends_with(AGENT_EXT) {
+        Some((name_from_rel(rel, AGENT_EXT), false))
+    } else if rel.ends_with(CHATMODE_EXT) {
+        Some((name_from_rel(rel, CHATMODE_EXT), true))
+    } else if rel.ends_with(".md") {
+        Some((name_from_rel(rel, ".md"), false))
+    } else {
+        None
+    }
+}
+
+/// Capture the custom agents in `dir` (`.agent.md` before `.md` and
+/// `.chatmode.md` of the same name); `legacy` is the old chat-modes
+/// directory, where only `.chatmode.md` files count. Returns the legacy chat
+/// modes it captured.
+fn capture_agents(cap: &mut Captured, dir: &Path, legacy: bool) -> Result<Vec<String>> {
+    let mut modes = Vec::new();
+    if cap.escapes(dir, ID) {
+        return Ok(modes);
+    }
+    let mut files: Vec<(String, String, bool)> = walk_files(dir, 500)?
+        .into_iter()
+        .filter_map(|rel| {
+            let (name, mode) = agent_name(&rel)?;
+            (!legacy || mode).then_some((rel, name, mode))
         })
         .collect();
-    if !found.is_empty() {
-        cap.info(
-            ID,
-            format!(
-                "not carried by kitbag for Copilot yet: {}",
-                found.join(", ")
-            ),
-        );
+    // `.agent.md` first, then plain `.md`, then chat modes.
+    files.sort_by_key(|(rel, _, mode)| (*mode, !rel.ends_with(AGENT_EXT), rel.clone()));
+    for (rel, name, mode) in files {
+        let path = join_rel(dir, &rel);
+        if !is_valid_name(&name) {
+            cap.warn(
+                ID,
+                format!("skipped {}: unsupported file name", path.display()),
+            );
+            continue;
+        }
+        if cap.profile.agents.iter().any(|a| a.name == name) {
+            cap.info(
+                ID,
+                format!(
+                    "skipped {}: an agent named '{name}' was already captured",
+                    path.display()
+                ),
+            );
+            continue;
+        }
+        let Some(text) = read_text_item(cap, &path, ID) else {
+            continue;
+        };
+        if add_agent(cap, agent_from_markdown(&name, &text), ID) {
+            cap.sources.push(path);
+            if mode {
+                modes.push(name);
+            }
+        }
     }
+    Ok(modes)
 }
 
 /// Mark the captured servers that Copilot CLI's `disabledMcpServers` lists.
@@ -364,10 +407,14 @@ impl Adapter for Copilot {
     fn scopes(&self) -> &'static [Scope] {
         &[Scope::User, Scope::Project]
     }
-    fn support(&self, scope: Scope) -> [(Feature, Support); 6] {
+    fn support(&self, scope: Scope) -> [(Feature, Support); 7] {
         Feature::ALL.map(|f| {
             let native = match f {
-                Feature::Mcp | Feature::Instructions | Feature::Rules | Feature::Skills => true,
+                Feature::Mcp
+                | Feature::Instructions
+                | Feature::Rules
+                | Feature::Skills
+                | Feature::Agents => true,
                 // VS Code prompt files; user ones live in VS Code's profile storage.
                 Feature::Commands => scope == Scope::Project,
                 Feature::Settings => false,
@@ -394,6 +441,7 @@ impl Adapter for Copilot {
             out.push(("commands", prompts));
         }
         out.push(("skills", p.skills));
+        out.push(("agents", p.agents));
         out
     }
 
@@ -409,6 +457,8 @@ impl Adapter for Copilot {
                     || g.join("copilot").exists()
                     || g.join("prompts").exists()
                     || g.join("skills").exists()
+                    || g.join("agents").exists()
+                    || g.join("chatmodes").exists()
                     || env.project.join(".vscode").join("mcp.json").exists()
             }
         }
@@ -501,7 +551,21 @@ impl Adapter for Copilot {
         }
         capture_skills_dir(&mut cap, &p.skills, ID)?;
 
-        note_not_carried(&mut cap, env);
+        let mut modes = capture_agents(&mut cap, &p.agents, false)?;
+        if env.scope == Scope::Project {
+            let legacy = env.project.join(".github").join("chatmodes");
+            modes.extend(capture_agents(&mut cap, &legacy, true)?);
+        }
+        if !modes.is_empty() {
+            cap.info(
+                ID,
+                format!(
+                    "captured chat modes as agents ({}): chat modes are the old name of custom agents, and kitbag applies them as .agent.md files in {}",
+                    modes.join(", "),
+                    crate::ui::tildify(&p.agents, &env.home)
+                ),
+            );
+        }
         Ok(cap)
     }
 
@@ -558,6 +622,10 @@ impl Adapter for Copilot {
             write_skill(work, &p.skills.join(&s.name), &s, opts, ID)?;
         }
 
+        for a in &profile.agents {
+            apply_agent(work, env, &p.agents, a, opts)?;
+        }
+
         if profile.settings.contains_key(ID) {
             work.info(
                 ID,
@@ -592,6 +660,61 @@ fn apply_prompt(work: &mut Work, dir: &Path, c: &Command, opts: &ApplyOptions) -
     }
     let path = dir.join(format!("{}{PROMPT_EXT}", c.name));
     write_command(work, &path, text.as_bytes(), opts, ID, &c.name)
+}
+
+/// One custom agent as `<dir>/<name>.agent.md`, or as `<name>.md` when that
+/// file is there and the `.agent.md` isn't, so an agent captured from a plain
+/// `.md` file is written back to it rather than twice.
+fn apply_agent(
+    work: &mut Work,
+    env: &Env,
+    dir: &Path,
+    a: &Agent,
+    opts: &ApplyOptions,
+) -> Result<()> {
+    if a.description.is_none() {
+        work.info(
+            ID,
+            format!(
+                "agent '{}' has no description; Copilot's custom agent schema asks for one",
+                a.name
+            ),
+        );
+    }
+    let agent_md = dir.join(format!("{}{AGENT_EXT}", a.name));
+    let plain = dir.join(format!("{}.md", a.name));
+    let path = if work.fs.read_bytes(&agent_md)?.is_none() && work.fs.read_bytes(&plain)?.is_some()
+    {
+        plain
+    } else {
+        agent_md
+    };
+    if env.scope == Scope::Project {
+        let mode = env
+            .project
+            .join(".github")
+            .join("chatmodes")
+            .join(format!("{}{CHATMODE_EXT}", a.name));
+        if work.fs.read_bytes(&mode)?.is_some() {
+            work.info(
+                ID,
+                format!(
+                    "agent '{}': the old chat mode {} was left in place; remove it once the agent in {} works",
+                    a.name,
+                    crate::ui::tildify(&mode, &env.home),
+                    crate::ui::tildify(dir, &env.home)
+                ),
+            );
+        }
+    }
+    write_agent(
+        work,
+        &path,
+        agent_to_markdown(a).as_bytes(),
+        opts,
+        ID,
+        &a.name,
+    )
 }
 
 /// Warn about references where neither Copilot CLI's nor VS Code's docs

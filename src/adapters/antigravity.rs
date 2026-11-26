@@ -104,7 +104,7 @@ impl Adapter for Antigravity {
     fn scopes(&self) -> &'static [Scope] {
         &[Scope::User, Scope::Project]
     }
-    fn support(&self, _scope: Scope) -> [(Feature, Support); 6] {
+    fn support(&self, _scope: Scope) -> [(Feature, Support); 7] {
         Feature::ALL.map(|f| {
             (
                 f,

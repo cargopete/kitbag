@@ -7,6 +7,7 @@
 //! instructions.md          always-on instructions (-> CLAUDE.md / AGENTS.md / GEMINI.md ...)
 //! rules/<name>.md          scoped rules with optional `globs` frontmatter
 //! commands/<name>.md       reusable prompts / slash commands
+//! agents/<name>.md         custom agents (Copilot `.agent.md`; chat modes)
 //! skills/<name>/SKILL.md   agent skills, plus any supporting files
 //! ```
 //!
@@ -312,6 +313,19 @@ pub struct Command {
     pub body: String,
 }
 
+/// A custom agent (Copilot's `.agent.md`, once called a chat mode): a
+/// persona with its own instructions, tools and model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Agent {
+    pub name: String,
+    pub description: Option<String>,
+    /// Other frontmatter keys (`tools`, `model`, `handoffs`, `mcp-servers` ...),
+    /// kept verbatim.
+    pub extra: Map<String, Value>,
+    /// Markdown instructions for the agent.
+    pub body: String,
+}
+
 /// One file inside a skill directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillFile {
@@ -350,6 +364,7 @@ pub struct Profile {
     pub rules: Vec<Rule>,
     pub commands: Vec<Command>,
     pub skills: Vec<Skill>,
+    pub agents: Vec<Agent>,
     /// Problems found while loading that don't stop the profile from loading.
     pub warnings: Vec<String>,
 }
@@ -369,12 +384,14 @@ impl Profile {
             && self.rules.is_empty()
             && self.commands.is_empty()
             && self.skills.is_empty()
+            && self.agents.is_empty()
     }
 
     pub fn sort(&mut self) {
         self.rules.sort_by(|a, b| a.name.cmp(&b.name));
         self.commands.sort_by(|a, b| a.name.cmp(&b.name));
         self.skills.sort_by(|a, b| a.name.cmp(&b.name));
+        self.agents.sort_by(|a, b| a.name.cmp(&b.name));
     }
 }
 
@@ -439,6 +456,11 @@ pub fn portable_name_issues(p: &Profile) -> Vec<String> {
     check(
         "skills/",
         p.skills.iter().map(|s| s.name.clone()).collect(),
+        &mut issues,
+    );
+    check(
+        "agents/",
+        p.agents.iter().map(|a| a.name.clone()).collect(),
         &mut issues,
     );
     for s in &p.skills {

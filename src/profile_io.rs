@@ -13,7 +13,7 @@ use toml_edit::{DocumentMut, Item, Table, value};
 use crate::edit::toml::{json_to_table, json_to_value};
 use crate::frontmatter::{self, glob_list, opt, string};
 use crate::model::{
-    Command, FORMAT_VERSION, McpServer, Profile, Rule, Skill, SkillFile, is_valid_name,
+    Agent, Command, FORMAT_VERSION, McpServer, Profile, Rule, Skill, SkillFile, is_valid_name,
     portable_name_issues,
 };
 use crate::secrets::{
@@ -335,6 +335,28 @@ pub fn command_to_markdown(c: &Command, with_extra: bool) -> String {
     frontmatter::render(&entries, &c.body)
 }
 
+pub fn agent_from_markdown(name: &str, text: &str) -> Agent {
+    let doc = frontmatter::parse(text);
+    Agent {
+        name: name.to_string(),
+        description: string(doc.data.get("description")),
+        extra: doc
+            .data
+            .iter()
+            .filter(|(k, v)| k.as_str() != "description" && !v.is_null())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        body: doc.body.trim().to_string(),
+    }
+}
+
+/// Agent markdown: `description` first, then the other keys as they were.
+pub fn agent_to_markdown(a: &Agent) -> String {
+    let mut entries: Vec<(&str, Value)> = vec![("description", opt(&a.description))];
+    entries.extend(a.extra.iter().map(|(k, v)| (k.as_str(), v.clone())));
+    frontmatter::render(&entries, &a.body)
+}
+
 pub fn skill_description(files: &[SkillFile]) -> Option<String> {
     let main = files.iter().find(|f| f.path == "SKILL.md")?;
     let text = String::from_utf8_lossy(&main.content);
@@ -488,6 +510,7 @@ fn plugin_profile(dir: &Path, name_hint: Option<&str>, budget: &mut ReadBudget) 
 fn load_with_limit(dir: &Path, limit: u64, name_hint: Option<&str>) -> Result<Profile> {
     let budget = &mut ReadBudget { dir, left: limit };
     let manifest = dir.join(MANIFEST);
+    let mut plugin = false;
     let mut p = match read_profile_text(&manifest, budget)? {
         Some(text) => {
             let mut p = parse_manifest(&text, &manifest)?;
@@ -498,7 +521,10 @@ fn load_with_limit(dir: &Path, limit: u64, name_hint: Option<&str>) -> Result<Pr
             }
             p
         }
-        None => plugin_profile(dir, name_hint, budget)?,
+        None => {
+            plugin = true;
+            plugin_profile(dir, name_hint, budget)?
+        }
     };
     let mut issues = Vec::new();
     for (file, is_dir) in list_profile_dir(&dir.join(PLUGIN_RULES))? {
@@ -533,6 +559,26 @@ fn load_with_limit(dir: &Path, limit: u64, name_hint: Option<&str>) -> Result<Pr
         let text =
             read_profile_text(&dir.join("commands").join(&file), budget)?.unwrap_or_default();
         p.commands.push(command_from_markdown(stem, &text));
+    }
+    // A plugin's `agents/` holds Claude Code subagents, another format.
+    let agents = if plugin {
+        Vec::new()
+    } else {
+        list_profile_dir(&dir.join("agents"))?
+    };
+    for (file, is_dir) in agents {
+        let Some(stem) = file.strip_suffix(".md") else {
+            continue;
+        };
+        if is_dir {
+            continue;
+        }
+        if !is_valid_name(stem) {
+            issues.push(format!("agents/{file}: invalid file name"));
+            continue;
+        }
+        let text = read_profile_text(&dir.join("agents").join(&file), budget)?.unwrap_or_default();
+        p.agents.push(agent_from_markdown(stem, &text));
     }
     for (name, is_dir) in list_profile_dir(&dir.join("skills"))? {
         if !is_dir {
@@ -628,6 +674,12 @@ pub fn profile_files(p: &Profile) -> BTreeMap<String, Vec<u8>> {
         out.insert(
             format!("commands/{}.md", c.name),
             command_to_markdown(c, true).into_bytes(),
+        );
+    }
+    for a in &p.agents {
+        out.insert(
+            format!("agents/{}.md", a.name),
+            agent_to_markdown(a).into_bytes(),
         );
     }
     for s in &p.skills {
@@ -880,6 +932,18 @@ pub fn scan_for_secrets(p: &Profile) -> Vec<String> {
             }
         }
     }
+    for a in &p.agents {
+        let at = format!("agents/{}.md", a.name);
+        check(at.clone(), &a.body, true);
+        if let Some(d) = &a.description {
+            check(at.clone(), d, true);
+        }
+        for v in a.extra.values() {
+            for s in crate::secrets::json_strings(v) {
+                check(at.clone(), s, true);
+            }
+        }
+    }
     for s in &p.skills {
         for f in &s.files {
             if let Ok(t) = std::str::from_utf8(&f.content)
@@ -918,6 +982,39 @@ pub fn required_env(p: &Profile) -> BTreeMap<String, Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agents_load_and_save_with_their_frontmatter() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "kitbag.toml", "kitbag = 1\nname = \"x\"\n");
+        let text = "---\ndescription: Reviews\ntools:\n  - read\nmodel: GPT-5\nuser-invocable: false\n---\n\nReview.\n";
+        write(dir.path(), "agents/reviewer.md", text);
+        write(dir.path(), "agents/notes.txt", "not an agent");
+        let p = load(dir.path()).unwrap();
+        assert_eq!(p.agents.len(), 1);
+        let a = &p.agents[0];
+        assert_eq!(a.name, "reviewer");
+        assert_eq!(a.description.as_deref(), Some("Reviews"));
+        assert_eq!(a.extra["user-invocable"], Value::Bool(false));
+        assert_eq!(a.body, "Review.");
+        assert_eq!(profile_files(&p)["agents/reviewer.md"], text.as_bytes());
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn a_plugin_agents_dir_is_not_read() {
+        // A plugin's agents/ holds Claude Code subagents, another format.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "rules/style.md", "Use tabs.\n");
+        write(
+            dir.path(),
+            "agents/helper.md",
+            "---\nname: helper\n---\nHelp.\n",
+        );
+        let p = load(dir.path()).unwrap();
+        assert!(p.agents.is_empty());
+        assert_eq!(p.rules.len(), 1);
+    }
 
     #[test]
     fn rule_glob_aliases_read_the_same() {
