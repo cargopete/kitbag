@@ -1370,7 +1370,7 @@ pub fn capture_skills_dir(cap: &mut Captured, dir: &Path, target: &str) -> Resul
             }
             let content = match String::from_utf8(bytes) {
                 Ok(text) => {
-                    let (red, kinds) = redact_text(&text);
+                    let (red, kinds) = crate::secrets::redact_support_file(&rel, &text);
                     if !kinds.is_empty() {
                         cap.warn(
                             target,
@@ -1417,8 +1417,15 @@ pub fn pick_settings(cap: &mut Captured, target: &str, doc: &Map<String, Value>)
     }
     // Permission rules such as `Bash(curl -H 'X-Api-Key: ...' *)` can embed secrets.
     let mut kinds = Vec::new();
-    for v in picked.values_mut() {
+    for (k, v) in picked.iter_mut() {
         kinds.extend(crate::secrets::redact_json_strings(v));
+        // Nested values under secret-sounding names (`ui.apiToken`), which
+        // free text only catches when they mix letters and digits.
+        if crate::secrets::redact_secret_fields(v, Some(k))
+            && !kinds.contains(&"secret-named-field")
+        {
+            kinds.push("secret-named-field");
+        }
     }
     kinds.dedup();
     if !kinds.is_empty() {

@@ -905,3 +905,90 @@ fn parse_errors_name_the_place_but_never_echo_the_source() {
     assert!(!leaked, "{text}");
     assert!(text.contains("line 1, column"), "{text}");
 }
+
+/// Nested settings and skill support files go through the same name-aware
+/// checks as structured config, whatever their extension (#37).
+#[test]
+fn nested_settings_and_skill_support_files_are_checked_like_config() {
+    let sb = Sandbox::empty();
+    fs::write(sb.home().join(".claude.json"), "{}").unwrap();
+    let gemini = sb.home().join(".gemini");
+    fs::create_dir_all(&gemini).unwrap();
+    fs::write(
+        gemini.join("settings.json"),
+        r#"{"ui": {"theme": "GitHub", "apiToken": "nestedcorrecthorse"}}"#,
+    )
+    .unwrap();
+    let skill = sb.home().join(".claude/skills/deploy");
+    fs::create_dir_all(skill.join("scripts")).unwrap();
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: deploy\ndescription: Deploy the app\n---\n\nRun scripts/deploy.sh.\n",
+    )
+    .unwrap();
+    fs::write(
+        skill.join("scripts/deploy.sh"),
+        "#!/bin/sh\nexport DB_PASSWORD=\"quotedcorrecthorse\"\nTOKEN=\"$(cat ~/.token)\"\n",
+    )
+    .unwrap();
+    fs::write(
+        skill.join("settings.jsonc"),
+        "{\n  // local\n  \"password\": \"jsonccorrecthorse\",\n}\n",
+    )
+    .unwrap();
+
+    sb.cli()
+        .args(["capture", "--from", "claude-code,gemini-cli", "-o", "prof"])
+        .assert()
+        .success()
+        .stdout(
+            contains("skipped skill file 'deploy/settings.jsonc'")
+                .and(contains(
+                    "redacted secret-named-value from skill 'deploy/scripts/deploy.sh'",
+                ))
+                .and(contains("redacted secret-named-field from settings")),
+        );
+    let text = all_text_under(&sb.path("prof"));
+    for leak in [
+        "nestedcorrecthorse",
+        "quotedcorrecthorse",
+        "jsonccorrecthorse",
+    ] {
+        assert!(!text.contains(leak), "{leak} leaked:\n{text}");
+    }
+    let script = sb.read("prof/skills/deploy/scripts/deploy.sh");
+    assert!(script.contains("DB_PASSWORD=\"[REDACTED]\""), "{script}");
+    assert!(script.contains("TOKEN=\"$(cat ~/.token)\""), "{script}");
+    sb.cli().args(["doctor", "prof"]).assert().success();
+
+    // A profile written by hand (or by an older kitbag) is flagged.
+    let dir = sb.path("hand");
+    fs::create_dir_all(dir.join("skills/deploy/scripts")).unwrap();
+    fs::write(
+        dir.join("kitbag.toml"),
+        "kitbag = 1\nname = \"hand\"\n[settings.gemini-cli.ui]\napiToken = \"nestedcorrecthorse\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("skills/deploy/SKILL.md"),
+        "---\nname: deploy\ndescription: Deploy\n---\n\nbody\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("skills/deploy/scripts/deploy.sh"),
+        "export DB_PASSWORD=\"quotedcorrecthorse\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("skills/deploy/app.local"),
+        r#"{"auth": {"clientSecret": "jsoncorrecthorse"}}"#,
+    )
+    .unwrap();
+    sb.cli().args(["doctor", "hand"]).assert().code(1).stdout(
+        contains("settings.gemini-cli.ui.apiToken: looks like a secret-named-field")
+            .and(contains(
+                "skills/deploy/scripts/deploy.sh: looks like a secret-named-value",
+            ))
+            .and(contains("skills/deploy/app.local: contains secret values")),
+    );
+}

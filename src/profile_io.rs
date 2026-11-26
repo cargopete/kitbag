@@ -724,6 +724,12 @@ pub fn scan_for_secrets(p: &Profile) -> Vec<String> {
         for s in crate::secrets::json_strings(&all) {
             check(format!("settings.{t}"), s, true);
         }
+        // Nested values under secret-sounding names, as in structured files.
+        for at in crate::secrets::json_secret_fields(&all) {
+            out_extra.push(format!(
+                "settings.{t}.{at}: looks like a secret-named-field"
+            ));
+        }
     }
     if let Some(i) = &p.instructions {
         check("instructions.md".into(), i, true);
@@ -749,8 +755,10 @@ pub fn scan_for_secrets(p: &Profile) -> Vec<String> {
     }
     for s in &p.skills {
         for f in &s.files {
-            if let Ok(t) = std::str::from_utf8(&f.content) {
-                check(format!("skills/{}/{}", s.name, f.path), t, true);
+            if let Ok(t) = std::str::from_utf8(&f.content)
+                && let Some(k) = crate::secrets::support_file_secret_kind(&f.path, t)
+            {
+                out.push(format!("skills/{}/{}: looks like a {k}", s.name, f.path));
             }
             if let Some(why) = sensitive_file(&f.path, &f.content) {
                 out_extra.push(format!("skills/{}/{}: {why}", s.name, f.path));
