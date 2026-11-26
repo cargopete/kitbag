@@ -116,6 +116,7 @@ pub fn write_atomic(path: &Path, content: &[u8], mode: Option<u32>) -> Result<()
 
 /// Longest file-name part, in bytes, kept in a backup's name. File systems
 /// cap names at 255 bytes; the number in front keeps shortened names unique.
+/// Trailing dots and spaces are dropped too, as Windows would drop them.
 const BACKUP_NAME_BYTES: usize = 100;
 
 /// The name of backup number `n` (unique within its transaction) of `path`.
@@ -128,7 +129,8 @@ fn backup_name(n: usize, path: &Path) -> String {
     while !file.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{n:04}-{}", &file[..end])
+    let kept = file[..end].trim_end_matches(['.', ' ']);
+    format!("{n:04}-{kept}")
 }
 
 /// The permission bits of `path` (Unix only; `None` elsewhere or if missing).
@@ -764,6 +766,12 @@ mod tests {
         // A cut through a multi-byte character backs off to its start.
         let wide = "é".repeat(80);
         assert!(backup_name(1, Path::new(&wide)).len() <= 5 + BACKUP_NAME_BYTES);
+        // A cut that ends in dots or spaces drops them.
+        let dotted = format!("{}. . .json", "b".repeat(BACKUP_NAME_BYTES - 5));
+        assert_eq!(
+            backup_name(4, Path::new(&dotted)),
+            format!("0004-{}", "b".repeat(BACKUP_NAME_BYTES - 5))
+        );
     }
 
     /// Files whose names are near the 255-byte limit can still be backed up.
