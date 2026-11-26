@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-26
+
 ### Added
 
 - `kitbag status [PROFILE]` shows, per tool, whether each managed instructions block and rule file is `in sync`, `tool edited`, `profile changed`, `both changed`, `not applied` or `unsupported` (Cursor user rules live in app storage). Applies now record a hash of each one in the state directory. Without a profile it shows what changed since the last apply. `--exit-code` exits 1 on drift, `--json` prints rows (#32).
@@ -74,6 +76,7 @@ All notable changes to this project are documented here. The format follows
 - `capture` with several tools (`--from all`, `detected` or a list) reports a tool whose config can't be read and captures the rest; it fails only if nothing could be read. A single `--from` still fails loudly.
 - `install.sh` and `install.ps1` download `kitbag-<target>.sha256`, the checksum name the release workflow uploads (found in the v0.1.0-rc.1 dry run).
 
-[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/cargopete/kitbag/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/cargopete/kitbag/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/cargopete/kitbag/releases/tag/v0.1.0
