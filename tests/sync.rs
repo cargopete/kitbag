@@ -475,3 +475,62 @@ fn project_scope_status_and_pull_back_from_a_cursor_rule() {
     );
     assert!(status(&sb, &args).iter().all(|r| r.2 == "in sync"));
 }
+
+#[test]
+fn undo_after_a_no_op_apply_restores_profile_changed() {
+    let sb = applied();
+    let to = ["p", "--to", "claude-code,codex"];
+    fs::write(sb.path("p/instructions.md"), "Be terse.\n").unwrap();
+    sb.cli()
+        .args(["apply", "p", "--to", "claude-code,codex", "--yes"])
+        .assert()
+        .success()
+        .stdout(contains("Wrote"));
+    // Nothing to write the second time.
+    sb.cli()
+        .args(["apply", "p", "--to", "claude-code,codex", "--yes"])
+        .assert()
+        .success()
+        .stdout(contains("Up to date"));
+    sb.cli().arg("undo").assert().success();
+    assert!(sb.read("home/.claude/CLAUDE.md").contains("Be brief."));
+    let rows = status(&sb, &to);
+    assert_eq!(
+        state_of(&rows, "claude-code", "instructions"),
+        "profile changed"
+    );
+    assert_eq!(state_of(&rows, "codex", "instructions"), "profile changed");
+    assert_eq!(state_of(&rows, "claude-code", "rule rust"), "in sync");
+}
+
+#[test]
+fn undo_after_a_repeated_sync_with_a_held_item_restores_profile_changed() {
+    let sb = applied();
+    edit(
+        &sb,
+        "home/.claude/rules/rust.md",
+        "Use `?`.",
+        "Use `?` and `anyhow`.",
+    );
+    fs::write(sb.path("p/instructions.md"), "Be terse.\n").unwrap();
+    let sync = || {
+        sb.cli()
+            .args(["sync", "p", "--to", "claude-code", "--yes"])
+            .assert()
+            .code(1)
+    };
+    sync().stdout(contains("Wrote").and(contains("Skipped: claude-code rule rust")));
+    // The second sync only re-records the items it leaves in place.
+    sync().stdout(
+        contains("Nothing to write besides the items edited in the tool")
+            .and(contains("Wrote").not()),
+    );
+    sb.cli().arg("undo").assert().success();
+    assert!(sb.read("home/.claude/CLAUDE.md").contains("Be brief."));
+    let rows = status(&sb, &["p", "--to", "claude-code"]);
+    assert_eq!(
+        state_of(&rows, "claude-code", "instructions"),
+        "profile changed"
+    );
+    assert_eq!(state_of(&rows, "claude-code", "rule rust"), "tool edited");
+}

@@ -71,7 +71,9 @@ pub struct Record {
     pub profile: String,
     /// [`hash`] of the item's text; `None` when the apply removed it.
     pub hash: Option<String>,
-    /// The transaction that wrote it (none when the apply had nothing to write).
+    /// The transaction that wrote it. An apply with nothing to write records
+    /// the transaction of the record it supersedes, or none for an item that
+    /// had no record yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tx: Option<String>,
     pub at_ms: u128,
@@ -142,9 +144,32 @@ pub fn record(
     if plan.items.is_empty() {
         return Ok(());
     }
+    // An apply with nothing to write has no transaction of its own, and undo
+    // can only discount records that name one. So it doesn't record an item
+    // whose standing record already says the same, and ties any other to the
+    // transaction of the record it supersedes: undoing that one undoes this
+    // record too. Only an item with no standing record gets one without a
+    // transaction, as a baseline no undo can make wrong.
+    let standing = match tx {
+        Some(_) => BTreeMap::new(),
+        None => last_applied(state_dir)?,
+    };
     let now = now_ms();
     let mut all = load_all(state_dir)?;
+    let before = all.len();
     for i in &plan.items {
+        let planned = i.planned.as_deref().map(hash);
+        let tx = match tx {
+            Some(t) => Some(t.to_string()),
+            None => match standing
+                .get(&(i.target.clone(), i.path.clone(), i.block.clone()))
+                .filter(|r| r.matches(env))
+            {
+                Some(r) if r.hash == planned => continue,
+                Some(r) => r.tx.clone(),
+                None => None,
+            },
+        };
         all.push(Record {
             target: i.target.clone(),
             path: i.path.clone(),
@@ -153,10 +178,13 @@ pub fn record(
             scope: env.scope.to_string(),
             project: (env.scope == Scope::Project).then(|| env.project.clone()),
             profile: profile.to_string(),
-            hash: i.planned.as_deref().map(hash),
-            tx: tx.map(str::to_string),
+            hash: planned,
+            tx,
             at_ms: now,
         });
+    }
+    if all.len() == before {
+        return Ok(());
     }
     // Keep the newest few per item.
     let mut seen: BTreeMap<Key, usize> = BTreeMap::new();
