@@ -123,6 +123,20 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
             issues.push(format!("mcp_servers.{name}: {i}"));
         }
         let (legacy_errors, legacy_warnings) = s.take_legacy_targeting();
+        // Aliases (`claude`) become canonical ids here, so nothing later sees them.
+        // A target named twice (`["claude", "claude-code"]`) is kept once, at
+        // its first place.
+        for ids in s
+            .targets
+            .iter_mut()
+            .chain(std::iter::once(&mut s.disabled_on))
+        {
+            let mut seen = std::collections::BTreeSet::new();
+            ids.retain_mut(|id| {
+                *id = crate::adapters::canonical_id(id).to_string();
+                seen.insert(id.clone())
+            });
+        }
         let (errors, unknown) = s.targeting_issues(&crate::adapters::ids());
         for i in legacy_errors.into_iter().chain(errors) {
             issues.push(format!("mcp_servers.{name}: {i}"));
@@ -130,6 +144,22 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
         for w in legacy_warnings.into_iter().chain(unknown) {
             warnings.push(format!("mcp_servers.{name}: {w}"));
         }
+    }
+    // `[settings.claude]` is read as `[settings.claude-code]`, like the ids in
+    // `targets`; a table under both names is an error.
+    let mut settings = BTreeMap::new();
+    let mut spelled: BTreeMap<String, String> = BTreeMap::new();
+    for (key, table) in m.settings {
+        let id = crate::adapters::canonical_id(&key).to_string();
+        if let Some(other) = spelled.get(&id) {
+            let alias = if *other == id { &key } else { other };
+            issues.push(format!(
+                "both [settings.{other}] and [settings.{key}] are set; '{alias}' is another name for '{id}', keep one"
+            ));
+            continue;
+        }
+        spelled.insert(id.clone(), key);
+        settings.insert(id, table);
     }
     if !issues.is_empty() {
         return Err(ProfileError::new(
@@ -141,7 +171,7 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
         name: m.name.trim().to_string(),
         description: m.description.filter(|d| !d.trim().is_empty()),
         mcp_servers: m.mcp_servers,
-        settings: m.settings,
+        settings,
         warnings,
         ..Profile::default()
     })
@@ -893,6 +923,28 @@ mod tests {
     }
 
     #[test]
+    fn settings_tables_take_the_alias() {
+        let text = "kitbag = 1\nname = \"x\"\n[settings.claude]\nmodel = \"opus\"\n[settings.vim]\nx = 1\n";
+        let p = parse_manifest(text, Path::new("k")).unwrap();
+        assert_eq!(
+            p.settings.keys().collect::<Vec<_>>(),
+            ["claude-code", "vim"]
+        );
+        assert_eq!(p.settings["claude-code"]["model"], "opus");
+        assert!(manifest_toml(&p).contains("[settings.claude-code]\nmodel = \"opus\""));
+
+        let both = "kitbag = 1\nname = \"x\"\n[settings.claude-code]\nmodel = \"opus\"\n[settings.claude]\nmodel = \"sonnet\"\n";
+        let e = parse_manifest(both, Path::new("k")).unwrap_err();
+        assert_eq!(
+            e.issues,
+            [
+                "both [settings.claude] and [settings.claude-code] are set; 'claude' is another name for 'claude-code', keep one"
+            ],
+            "{e}"
+        );
+    }
+
+    #[test]
     fn validation_reports_every_issue() {
         let text = "kitbag = 1\nname = \"x\"\n[mcp_servers.bad]\nargs = [\"x\"]\n[mcp_servers.remote]\nurl = \"https://x\"\ncommand = \"y\"\ntransport = \"http\"\n";
         let e = parse_manifest(text, Path::new("kitbag.toml")).unwrap_err();
@@ -1011,12 +1063,12 @@ mod tests {
     #[test]
     fn targeting_warnings() {
         // A target from a newer kitbag loads, with a warning, and matches nothing.
-        let unknown = "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\ntargets = [\"claude\", \"codex\"]\n[mcp_servers.b]\ncommand = \"b\"\nexcept = [\"vscode\"]\n";
+        let unknown = "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\ntargets = [\"vim\", \"codex\"]\n[mcp_servers.b]\ncommand = \"b\"\nexcept = [\"vscode\"]\n";
         let p = parse_manifest(unknown, Path::new("k")).unwrap();
         assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
         assert!(
             p.warnings[0]
-                .starts_with("mcp_servers.a: unknown target 'claude' in 'targets' is ignored"),
+                .starts_with("mcp_servers.a: unknown target 'vim' in 'targets' is ignored"),
             "{:?}",
             p.warnings
         );
@@ -1030,7 +1082,30 @@ mod tests {
         assert!(!p.mcp_servers["a"].applies_to("cursor"));
         assert!(p.mcp_servers["b"].applies_to("cursor"));
         // The name is kept, so re-saving the profile doesn't lose it.
-        assert!(manifest_toml(&p).contains("targets = [\"claude\", \"codex\"]"));
+        assert!(manifest_toml(&p).contains("targets = [\"vim\", \"codex\"]"));
+
+        // The `claude` alias is no unknown target: it is read as `claude-code`.
+        let alias = "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\ntargets = [\"claude\"]\n[mcp_servers.b]\ncommand = \"b\"\nexcept = [\"claude\"]\n";
+        let p = parse_manifest(alias, Path::new("k")).unwrap();
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        assert_eq!(
+            p.mcp_servers["a"].targets,
+            Some(vec!["claude-code".to_string()])
+        );
+        assert_eq!(p.mcp_servers["b"].disabled_on, vec!["claude-code"]);
+        assert!(!p.mcp_servers["b"].applies_to("claude-code"));
+        assert!(p.mcp_servers["b"].applies_to("claude-desktop"));
+        assert!(manifest_toml(&p).contains("targets = [\"claude-code\"]"));
+
+        // A target named under both spellings is kept once, at its first place.
+        let twice = "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\ntargets = [\"codex\", \"claude\", \"cursor\", \"claude-code\", \"codex\"]\n[mcp_servers.b]\ncommand = \"b\"\ndisabled_on = [\"claude-code\", \"claude\"]\n";
+        let p = parse_manifest(twice, Path::new("k")).unwrap();
+        assert_eq!(
+            p.mcp_servers["a"].targets,
+            Some(vec!["codex".into(), "claude-code".into(), "cursor".into()])
+        );
+        assert_eq!(p.mcp_servers["b"].disabled_on, vec!["claude-code"]);
+        assert!(manifest_toml(&p).contains("targets = [\"codex\", \"claude-code\", \"cursor\"]"));
 
         // An empty 'only' keeps its old meaning: no restriction.
         let empty_only = "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\nonly = []\n";

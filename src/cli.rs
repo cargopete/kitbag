@@ -68,7 +68,8 @@ enum Cmd {
     },
     /// Capture your current setup into a profile (secrets are redacted)
     Capture {
-        /// Targets to read: ids (comma-separated), 'all' or 'detected'
+        /// Targets to read: ids (comma-separated; 'claude' means claude-code), 'all' or
+        /// 'detected'
         #[arg(long, value_name = "IDS", default_value = "detected")]
         from: String,
         #[command(flatten)]
@@ -176,8 +177,8 @@ struct Place {
 
 #[derive(Args, Debug, Clone)]
 struct TargetArgs {
-    /// Targets to write: ids (comma-separated: claude-code, cursor, codex, gemini-cli,
-    /// claude-desktop, antigravity), 'all' or 'detected'
+    /// Targets to write: ids (comma-separated: claude-code (alias: claude), cursor,
+    /// codex, gemini-cli, claude-desktop, antigravity), 'all' or 'detected'
     #[arg(long, value_name = "IDS", default_value = "detected")]
     to: String,
     #[command(flatten)]
@@ -193,7 +194,8 @@ struct TargetArgs {
 
 #[derive(Args, Debug, Clone)]
 struct StatusArgs {
-    /// Targets to compare: ids (comma-separated), 'all' or 'detected'
+    /// Targets to compare: ids (comma-separated: claude-code (alias: claude),
+    /// cursor, codex, gemini-cli, claude-desktop, antigravity), 'all' or 'detected'
     /// [default: detected; without PROFILE, every target applied to]
     #[arg(long, value_name = "IDS")]
     to: Option<String>,
@@ -217,7 +219,9 @@ struct StatusArgs {
 #[derive(Args, Debug, Clone)]
 struct SyncArgs {
     /// Pull this target's edits to the managed instructions and rules back into
-    /// the profile (redacted, like capture), then apply them to the others
+    /// the profile (redacted, like capture), then apply them to the others;
+    /// ID is a target id (claude-code (alias: claude), cursor, codex, gemini-cli,
+    /// claude-desktop, antigravity)
     #[arg(long, value_name = "ID")]
     from: Option<String>,
     /// Replace instructions edited in the tool with the profile's (backed up)
@@ -1559,9 +1563,14 @@ fn cmd_sync(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, s: &SyncArgs) -
     let mut profile_changes = Vec::new();
     let mut pulled_notes = Vec::new();
     if let Some(from) = &s.from {
-        let Some(source_target) = targets.iter().find(|x| x.id() == from.as_str()) else {
+        let Some(source_target) = targets
+            .iter()
+            .copied()
+            .find(|x| x.id() == adapters::canonical_id(from))
+        else {
             bail!("--from {from} must be one of the targets being synced (see --to)");
         };
+        let from = source_target.id().to_string();
         let rows = instruction_rows(ctx, &plan)?;
         let edited: Vec<&engine::Item> = rows
             .iter()

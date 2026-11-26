@@ -404,10 +404,45 @@ pub fn all() -> &'static [&'static dyn Adapter] {
     ]
 }
 
+/// Other names accepted for a target id, as (alias, canonical id). Only ever
+/// used to read user input; output, state files and profiles use the
+/// canonical id.
+pub const ALIASES: &[(&str, &str)] = &[("claude", "claude-code")];
+
+/// The canonical id for `id`: an alias becomes the id it stands for, anything
+/// else is returned unchanged. Case-sensitive, like the ids themselves.
+pub fn canonical_id(id: &str) -> &str {
+    ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == id)
+        .map_or(id, |(_, canonical)| canonical)
+}
+
 pub fn get(id: &str) -> Option<&'static dyn Adapter> {
+    let id = canonical_id(id);
     all().iter().copied().find(|a| a.id() == id)
 }
 
 pub fn ids() -> Vec<&'static str> {
     all().iter().map(|a| a.id()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_is_an_alias_for_claude_code_only() {
+        assert_eq!(canonical_id("claude"), "claude-code");
+        assert_eq!(canonical_id("claude-code"), "claude-code");
+        assert_eq!(canonical_id("claude-desktop"), "claude-desktop");
+        assert_eq!(canonical_id("Claude"), "Claude");
+        assert_eq!(get("claude").map(|a| a.id()), Some("claude-code"));
+        assert!(get("Claude").is_none());
+        // Aliases never shadow a real id and always point at one.
+        for (alias, id) in ALIASES {
+            assert!(!ids().contains(alias));
+            assert!(ids().contains(id));
+        }
+    }
 }

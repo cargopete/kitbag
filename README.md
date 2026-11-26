@@ -86,6 +86,11 @@ Starting from scratch? `kitbag init my-profile` writes a commented starter profi
 | `claude-desktop` | Claude Desktop    | user          | ✓ (local servers) | -  | -          | -            | -      | -        |
 | `antigravity`    | Google Antigravity | user, project | ✓  | ✓            | -          | -            | -      | -        |
 
+`claude` is accepted as an alias for `claude-code` wherever a target id is given (`--to`,
+`--from`, `targets`, `disabled_on`, and `[settings.claude]`, read as `[settings.claude-code]`;
+a profile with both tables is an error); kitbag always writes and prints `claude-code`. It
+never means `claude-desktop`.
+
 *folded*: the tool has no file-scoped rules, so rules become labelled sections of its single
 instructions file. Each section records the rule's globs, and `capture` splits them back out
 losslessly.
@@ -511,7 +516,8 @@ What keeps a profile portable:
 
 Common options:
 
-- `--to` / `--from` take target ids (comma-separated), `all`, or `detected` (the default).
+- `--to` / `--from` take target ids (comma-separated; `claude` means `claude-code`), `all`,
+  or `detected` (the default).
 - `--scope user|project` and `--project DIR` choose between global and per-project config.
 - `--secrets resolve|never`, `--no-overwrite`, `--allow-git-mcp [NAMES]` and
   `--allow-risky-settings` (`--trust-source`) apply to `apply` and `diff`.

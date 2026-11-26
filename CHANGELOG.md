@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `claude` is accepted as an alias for the `claude-code` target in `--to` and `--from` (`apply`, `diff`, `status`, `sync`, `doctor`, `capture`), in an MCP server's `targets` / `disabled_on` (and their older names `only` / `except`) and as a `[settings.claude]` table, read as `[settings.claude-code]` (having both tables is an error naming both). It is turned into `claude-code` as soon as it is read, so output, state files and captured profiles still say `claude-code`. A target listed more than once in `targets` / `disabled_on` (`["cursor", "cursor"]`, `["claude", "claude-code"]`, or across the old and new names) is kept once. It never matches `claude-desktop` (#55).
+
 ## [0.1.3] - 2026-11-26
 
 ### Added
