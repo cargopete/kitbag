@@ -249,6 +249,10 @@ pub struct Plan {
     /// The instruction blocks and rule files kitbag manages, as they are now
     /// and as the plan leaves them (for `status` and `sync`).
     pub items: Vec<Item>,
+    /// Managed items left as they are in the tool because of
+    /// [`ApplyOptions::hold`] (`sync` holds back hand edits). They are not in
+    /// `items`, so the apply doesn't record them and they still show as edited.
+    pub held_back: Vec<Item>,
     /// (target, `command <name>` / `skill <name>`) of commands and skills the plan writes.
     pub changed_items: Vec<(String, String)>,
     /// MCP servers the plan removes from a tool, because the profile now
@@ -385,6 +389,7 @@ pub fn plan(
         risky.extend(policy::risky_content(profile));
     }
     let mut items: Vec<Item> = Vec::new();
+    let mut held_back: Vec<Item> = Vec::new();
     for t in &work.tracked {
         let path = work
             .fs
@@ -392,6 +397,7 @@ pub fn plan(
             .unwrap_or_else(|_| t.path.clone());
         if items
             .iter()
+            .chain(&held_back)
             .any(|i| i.target == t.target && i.path == path && i.block == t.block)
         {
             continue;
@@ -402,14 +408,20 @@ pub fn plan(
         if planned.is_none() && current.is_none() {
             continue;
         }
-        items.push(Item {
+        let held = opts.hold.contains(&(path.clone(), t.block.clone()));
+        let item = Item {
             target: t.target.clone(),
             item: t.item.clone(),
             path,
             block: t.block.clone(),
             current,
             planned,
-        });
+        };
+        if held {
+            held_back.push(item);
+        } else {
+            items.push(item);
+        }
     }
     let changes = work.fs.changes();
     let private: BTreeSet<PathBuf> = changes
@@ -454,6 +466,7 @@ pub fn plan(
         withheld: Vec::new(),
         risky,
         items,
+        held_back,
         changed_items: work.changed_items,
         removed_servers,
         withheld_removals,
