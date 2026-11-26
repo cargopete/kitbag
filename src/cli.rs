@@ -268,7 +268,10 @@ impl ApplyArgs {
 /// Does this argument look like a profile source (path or git URL) rather
 /// than a list of MCP server names?
 fn looks_like_source(arg: &str) -> bool {
-    arg.contains(['/', '\\', ':']) || arg.starts_with(['.', '~']) || arg.ends_with(".git")
+    arg.contains(['/', '\\', ':'])
+        || arg.starts_with(['.', '~'])
+        || arg.ends_with(".git")
+        || std::path::Path::new(arg).is_dir()
 }
 
 /// A bare `--allow-git-mcp` followed by the profile source would otherwise
@@ -854,6 +857,14 @@ fn plan_apply(
     } else {
         SecretsMode::Resolve
     });
+    // Skill scripts from someone else's repository are not made executable
+    // unless the source is trusted, like shell snippets.
+    let mut exec_dropped = false;
+    if untrusted {
+        for f in profile.skills.iter_mut().flat_map(|s| s.files.iter_mut()) {
+            exec_dropped |= std::mem::take(&mut f.executable);
+        }
+    }
     let opts = ApplyOptions {
         overwrite: !a.no_overwrite,
         secrets,
@@ -889,6 +900,13 @@ fn plan_apply(
                 "{} not resolved from your environment, because the profile comes from a remote repository (pass --secrets resolve to resolve them)",
                 plan.kept_env.iter().map(|v| format!("${{{v}}}")).collect::<Vec<_>>().join(", ")
             ),
+        });
+    }
+    if exec_dropped && !plan.targets.is_empty() {
+        plan.notes.push(adapters::Note {
+            level: adapters::Level::Info,
+            target: PROFILE_NOTE.to_string(),
+            message: "skill scripts are not marked executable, because the profile comes from a remote repository (pass --trust-source to keep the executable bit)".to_string(),
         });
     }
     for (target, d) in dropped {
@@ -952,7 +970,17 @@ fn present(
             println!("Nothing to apply.");
             print_skipped(plan);
         } else if plan.withheld.is_empty() {
-            if !plan.skipped.is_empty() {
+            let kept = plan
+                .notes
+                .iter()
+                .filter(|n| n.message.contains("because --no-overwrite was given"))
+                .count();
+            if kept > 0 {
+                println!(
+                    "Nothing written; kept {kept} existing item(s) because of --no-overwrite."
+                );
+                print_skipped(plan);
+            } else if !plan.skipped.is_empty() {
                 println!(
                     "{} {} already matches the profile.",
                     paint(GREEN, "Up to date:"),
@@ -1532,6 +1560,11 @@ fn check_file(path: &Path) -> Option<String> {
 
 fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
     let env = &ctx.env;
+    let chosen = if t.to == "detected" {
+        None
+    } else {
+        Some(select_targets(&t.to, env, "to")?)
+    };
     let mut problems = 0;
     println!(
         "{}",
@@ -1567,11 +1600,6 @@ fn cmd_doctor(ctx: &Ctx, src: Option<&str>, t: &TargetArgs) -> Result<i32> {
         )
     );
 
-    let chosen = if t.to == "detected" {
-        None
-    } else {
-        Some(select_targets(&t.to, env, "to")?)
-    };
     println!("\n{}", paint(BOLD, "Tools"));
     for a in adapters::all() {
         if let Some(chosen) = &chosen

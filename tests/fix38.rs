@@ -222,3 +222,171 @@ fn no_overwrite_keeps_blocks_and_skill_support_files() {
     assert!(sb.read("home/.claude/CLAUDE.md").contains("Be terse."));
     assert_eq!(sb.read("home/.claude/skills/s/helper.txt"), "v2");
 }
+
+#[test]
+fn an_engine_skip_is_reported_on_apply() {
+    let sb = Sandbox::empty();
+    profile(&sb);
+    sb.cli()
+        .args([
+            "apply",
+            "p",
+            "--project",
+            "proj",
+            "--to",
+            "claude-desktop",
+            "--yes",
+        ])
+        .assert()
+        .stdout(contains("Skipped: claude-desktop").and(contains("every target already").not()));
+}
+
+#[test]
+fn no_overwrite_does_not_claim_up_to_date_and_still_removes_stale_blocks() {
+    let sb = Sandbox::empty();
+    profile(&sb);
+    sb.cli()
+        .args(["apply", "p", "--to", "claude-code", "--yes"])
+        .assert()
+        .success();
+    fs::write(sb.path("p/instructions.md"), "Be terse.\n").unwrap();
+    sb.cli()
+        .args([
+            "apply",
+            "p",
+            "--to",
+            "claude-code",
+            "--yes",
+            "--no-overwrite",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            contains("Nothing written; kept 1 existing item(s)").and(contains("Up to date").not()),
+        );
+    // A profile without instructions removes the stale block even so.
+    fs::remove_file(sb.path("p/instructions.md")).unwrap();
+    fs::write(sb.path("p/rules.md"), "x").unwrap();
+    sb.cli()
+        .args([
+            "apply",
+            "p",
+            "--to",
+            "claude-code",
+            "--yes",
+            "--no-overwrite",
+        ])
+        .assert()
+        .success();
+    assert!(!sb.read("home/.claude/CLAUDE.md").contains("Be brief."));
+}
+
+#[test]
+fn doctor_rejects_a_bad_target_before_the_header() {
+    let sb = Sandbox::empty();
+    sb.cli()
+        .args(["doctor", "--to", "nope"])
+        .assert()
+        .failure()
+        .stdout(contains("kitbag").not());
+}
+
+#[test]
+fn a_local_directory_named_without_a_slash_is_the_source() {
+    let sb = Sandbox::empty();
+    profile(&sb);
+    sb.cli()
+        .current_dir(sb.path("."))
+        .args([
+            "apply",
+            "--allow-git-mcp",
+            "p",
+            "--to",
+            "claude-code",
+            "--yes",
+        ])
+        .assert()
+        .success();
+    assert!(sb.read("home/.claude/CLAUDE.md").contains("Be brief."));
+}
+
+#[cfg(unix)]
+#[test]
+fn captured_skill_scripts_keep_the_bit_through_the_profile() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::empty();
+    let skill = sb.path("home/.claude/skills/s");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: s\ndescription: d\n---\nBody\n",
+    )
+    .unwrap();
+    fs::write(skill.join("run.sh"), "#!/bin/sh\n").unwrap();
+    fs::set_permissions(skill.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    sb.cli()
+        .args(["capture", "--from", "claude-code", "-o", "out"])
+        .assert()
+        .success();
+    let mode = |rel: &str| fs::metadata(sb.path(rel)).unwrap().permissions().mode();
+    assert_eq!(mode("out/skills/s/run.sh") & 0o111, 0o111);
+    assert_eq!(mode("out/skills/s/SKILL.md") & 0o111, 0);
+    sb.cli()
+        .args(["apply", "out", "--to", "codex", "--yes"])
+        .assert()
+        .success();
+    let applied = sb.path("home/.codex/skills/s/run.sh");
+    if applied.exists() {
+        assert_eq!(
+            fs::metadata(applied).unwrap().permissions().mode() & 0o111,
+            0o111
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn git_sourced_skill_scripts_need_trust_for_the_bit() {
+    use std::os::unix::fs::PermissionsExt;
+    if !has_git() {
+        return;
+    }
+    let sb = Sandbox::empty();
+    let url = sb.git_profile(
+        "g",
+        &[
+            ("kitbag.toml", "kitbag = 1\nname = \"g\"\n"),
+            (
+                "skills/s/SKILL.md",
+                "---\nname: s\ndescription: d\n---\nBody\n",
+            ),
+            ("skills/s/run.sh", "#!/bin/sh\n"),
+        ],
+    );
+    let script = sb.path("g/skills/s/run.sh");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    git(&sb.path("g"), &["commit", "-q", "-a", "-m", "mode"]);
+    let run = sb.path("home/.claude/skills/s/run.sh");
+    sb.cli()
+        .args(["apply", &url, "--to", "claude-code", "--yes"])
+        .assert()
+        .success()
+        .stdout(contains("not marked executable"));
+    assert_eq!(fs::metadata(&run).unwrap().permissions().mode() & 0o111, 0);
+    fs::remove_dir_all(sb.path("home/.claude/skills")).unwrap();
+    sb.cli()
+        .args([
+            "apply",
+            &url,
+            "--to",
+            "claude-code",
+            "--yes",
+            "--trust-source",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::metadata(&run).unwrap().permissions().mode() & 0o111,
+        0o111
+    );
+}

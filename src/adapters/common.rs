@@ -263,7 +263,11 @@ pub fn write_skill(
     for f in &skill.files {
         let path = join_rel(dir, &f.path);
         let cur = work.fs.read_bytes(&path)?;
-        if cur.as_deref() != Some(f.content.as_slice()) && cur.is_some() && !opts.overwrite {
+        if f.path != "SKILL.md"
+            && cur.is_some()
+            && cur.as_deref() != Some(f.content.as_slice())
+            && !opts.overwrite
+        {
             work.warn(
                 target,
                 format!(
@@ -320,7 +324,7 @@ pub fn upsert_block_file(
         let has_block = cur
             .as_deref()
             .is_some_and(|t| block::split(t).blocks.iter().any(|(b, _)| b == id));
-        if has_block && !overwrite {
+        if has_block && content.is_some() && !overwrite {
             work.warn(
                 target,
                 format!(

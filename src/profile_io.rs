@@ -507,11 +507,29 @@ pub fn save(p: &Profile, dir: &Path, force: bool) -> Result<Vec<PathBuf>> {
         )
         .into());
     }
+    // Skill scripts that were executable stay so (Unix).
+    let exec: std::collections::BTreeSet<String> = p
+        .skills
+        .iter()
+        .flat_map(|s| {
+            s.files
+                .iter()
+                .filter(|f| f.executable)
+                .map(|f| format!("skills/{}/{}", s.name, f.path))
+        })
+        .collect();
     let mut written = Vec::new();
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     for (rel, content) in new_files {
         // Links in the profile are replaced, never written through.
         crate::plan_fs::write_owned_file(dir, &rel, &content)?;
+        #[cfg(unix)]
+        if exec.contains(&rel) {
+            use std::os::unix::fs::PermissionsExt;
+            let path = crate::plan_fs::join_rel(dir, &rel);
+            let mode = fs::metadata(&path)?.permissions().mode();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode | 0o111))?;
+        }
         written.push(crate::plan_fs::join_rel(dir, &rel));
     }
     Ok(written)

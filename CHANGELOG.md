@@ -8,14 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
-- A bare `--allow-git-mcp` placed before the source (`kitbag apply --allow-git-mcp github:me/profile`) no longer takes the source as a server name; it means "allow all". A value that looks like a path or URL is treated as the source. `--allow-git-mcp NAME[,NAME]` and `--allow-git-mcp=NAME` work as before.
-- `apply` and `sync` no longer say "up to date" about a target they skipped; they print `Skipped: <targets>` and the notes say why (#38).
+- A bare `--allow-git-mcp` placed before the source (`kitbag apply --allow-git-mcp github:me/profile`) no longer takes the source as a server name; it means "allow all". A value that looks like a path or URL, or names an existing directory, is treated as the source. `--allow-git-mcp NAME[,NAME]` and `--allow-git-mcp=NAME` work as before.
+- `apply` and `sync` no longer say "up to date" about a target they skipped; they print `Skipped: <targets>` and the notes say why. With `--no-overwrite`, an apply that kept existing items says "Nothing written; kept N existing item(s)" instead of "up to date" (#38).
 - `kitbag undo ""` (or only whitespace) is an error instead of matching any transaction (#38).
-- `doctor --to <target>` only checks that target and rejects unknown ones like `apply --to` does (#38).
-- Skill scripts keep their executable bit when applied on Unix (#38).
+- `doctor --to <target>` only checks that target and rejects unknown ones like `apply --to` does, before printing anything (#38).
+- Skill scripts keep their executable bit through capture, the profile and apply on Unix. From a git source the bit is only kept with `--trust-source`, and the plan says so otherwise (#38).
 - Capturing commands or rules whose nested paths flatten to the same name (`team-build.md` and `team/build.md`) now fails naming both files, instead of silently keeping one (#38).
 - `capture --force` into a profile with `.mdc` rules no longer fails looking for a `.md` file (#38).
-- `--no-overwrite` now also keeps existing managed instruction blocks and existing skill support files, and reports each one it kept (#38).
+- `--no-overwrite` now also keeps existing managed instruction blocks and existing skill support files, and reports each one it kept. A profile that no longer has instructions still removes the old managed block (#38).
 
 ## [0.1.2] - 2026-11-26
 
