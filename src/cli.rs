@@ -176,6 +176,35 @@ struct ApplyArgs {
     /// approval_policy = never ...). Local profiles always apply them, with a warning
     #[arg(long, visible_alias = "trust-source")]
     allow_risky_settings: bool,
+    /// From a git source, MCP servers that would be added or changed are not
+    /// applied unless allowed here: give their names (comma-separated,
+    /// repeatable), or no value to allow all. --trust-source allows all
+    #[arg(
+        long,
+        value_name = "NAMES",
+        num_args = 0..=1,
+        default_missing_value = "*",
+        value_delimiter = ',',
+        action = clap::ArgAction::Append
+    )]
+    allow_git_mcp: Vec<String>,
+}
+
+impl ApplyArgs {
+    /// Which MCP servers a git source may add or change.
+    fn git_mcp(&self) -> engine::GitMcp {
+        if self.allow_risky_settings || self.allow_git_mcp.iter().any(|n| n == "*") {
+            engine::GitMcp::All
+        } else {
+            engine::GitMcp::Only(
+                self.allow_git_mcp
+                    .iter()
+                    .map(|n| n.trim().to_string())
+                    .filter(|n| !n.is_empty())
+                    .collect(),
+            )
+        }
+    }
 }
 
 /// Target label of notes about the profile as a whole.
@@ -611,25 +640,14 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
             println!("  - {}", visible_line(r));
         }
     }
-    if !plan.servers.is_empty() {
-        println!(
-            "\n{}",
-            paint(
-                YELLOW,
-                if remote {
-                    "This profile comes from a remote repository. Review the MCP servers it adds or changes:"
-                } else {
-                    "MCP servers added or changed:"
-                }
-            )
-        );
-        // Shown as in the profile; anything that still looks like a secret is masked,
-        // and control characters can't rewrite the terminal.
-        let shown = |s: &str| {
-            let masked = crate::secrets::mask(&crate::secrets::mask_line(s), &plan.sensitive);
-            visible_line(&masked).into_owned()
-        };
-        for s in &plan.servers {
+    // Shown as in the profile; anything that still looks like a secret is masked,
+    // and control characters can't rewrite the terminal.
+    let shown = |s: &str| {
+        let masked = crate::secrets::mask(&crate::secrets::mask_line(s), &plan.sensitive);
+        visible_line(&masked).into_owned()
+    };
+    let list = |servers: &[engine::ServerReview]| {
+        for s in servers {
             println!(
                 "  {}: {}  {}",
                 shown(&s.name),
@@ -642,6 +660,35 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
                 }
             }
         }
+    };
+    if !plan.withheld.is_empty() {
+        println!(
+            "\n{}",
+            paint(
+                YELLOW,
+                "MCP servers not applied (from a git source). Each runs a command on this machine or connects to a remote service when the tool starts:"
+            )
+        );
+        list(&plan.withheld);
+        let names: Vec<String> = plan.withheld.iter().map(|s| shown(&s.name)).collect();
+        println!(
+            "  To apply them, pass {} (or name fewer), or --trust-source for everything.",
+            paint(BOLD, format!("--allow-git-mcp {}", names.join(",")))
+        );
+    }
+    if !plan.servers.is_empty() {
+        println!(
+            "\n{}",
+            paint(
+                YELLOW,
+                if remote {
+                    "This profile comes from a remote repository. Review the MCP servers it adds or changes:"
+                } else {
+                    "MCP servers added or changed:"
+                }
+            )
+        );
+        list(&plan.servers);
     }
     if !plan.missing_env.is_empty() {
         println!(
@@ -691,7 +738,28 @@ fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) ->
         secrets,
         block_id: slugify(&profile.name),
     };
-    let mut plan = engine::plan(&profile, &targets, env, &opts)?;
+    let mut plan = if resolved.remote {
+        let allow = a.git_mcp();
+        let unknown: Vec<String> = match &allow {
+            engine::GitMcp::Only(names) => names
+                .iter()
+                .filter(|n| !profile.mcp_servers.contains_key(*n))
+                .cloned()
+                .collect(),
+            engine::GitMcp::All => Vec::new(),
+        };
+        let mut plan = engine::plan_untrusted(&mut profile, &targets, env, &opts, &allow)?;
+        for n in unknown {
+            plan.notes.push(adapters::Note {
+                level: adapters::Level::Warn,
+                target: PROFILE_NOTE.to_string(),
+                message: format!("--allow-git-mcp: no MCP server named '{n}' in the profile"),
+            });
+        }
+        plan
+    } else {
+        engine::plan(&profile, &targets, env, &opts)?
+    };
     if untrusted && a.secrets.is_none() && !plan.kept_env.is_empty() {
         plan.notes.push(adapters::Note {
             level: adapters::Level::Info,
@@ -726,10 +794,14 @@ fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) ->
     );
     let show_diff = matches!(mode, Mode::Diff { .. } | Mode::Apply { dry_run: true, .. });
     if plan.changes.is_empty() {
-        println!(
-            "{} every target already matches the profile.",
-            paint(GREEN, "Up to date:")
-        );
+        if plan.withheld.is_empty() {
+            println!(
+                "{} every target already matches the profile.",
+                paint(GREEN, "Up to date:")
+            );
+        } else {
+            println!("Nothing to write without the MCP servers listed below.");
+        }
         print_plan_extras(&plan, resolved.remote);
         return Ok(0);
     }

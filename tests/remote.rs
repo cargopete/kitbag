@@ -256,7 +256,7 @@ fn remote_servers_get_no_local_secrets_and_are_listed_for_review() {
     let targets = "claude-code,claude-desktop,codex";
     sb.cli()
         .env("AWS_SECRET_ACCESS_KEY", FAKE_AWS)
-        .args(["apply", &url, "--to", targets, "--yes"])
+        .args(["apply", &url, "--to", targets, "--yes", "--allow-git-mcp"])
         .assert()
         .success()
         .stdout(
@@ -287,6 +287,7 @@ fn remote_servers_get_no_local_secrets_and_are_listed_for_review() {
             "--yes",
             "--secrets",
             "resolve",
+            "--allow-git-mcp",
         ])
         .assert()
         .success()
@@ -391,4 +392,168 @@ env = { "K\u001b[1A" = "x" }
         sb.read("home/.claude/CLAUDE.md")
             .contains(instructions.trim_end())
     );
+}
+
+const GIT_SERVERS: &str = r#"kitbag = 1
+name = "g"
+
+[mcp_servers.docs]
+command = "npx"
+args = ["-y", "docs-mcp@1.2.3"]
+env = { DOCS_TOKEN = "${DOCS_TOKEN}" }
+
+[mcp_servers.search]
+url = "https://search.example/mcp"
+headers = { Authorization = "Bearer ${SEARCH_KEY}" }
+
+[mcp_servers.notes]
+command = "uvx"
+args = ["notes-mcp"]
+"#;
+
+fn claude_servers(sb: &Sandbox) -> Vec<String> {
+    let v = sb.json("home/.claude.json");
+    let mut names: Vec<String> = v["mcpServers"]
+        .as_object()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+#[test]
+fn git_mcp_servers_are_not_applied_by_default() {
+    if !has_git() {
+        return;
+    }
+    let sb = Sandbox::empty();
+    std::fs::write(sb.home().join(".claude.json"), "{}").unwrap();
+    let url = sb.git_profile(
+        "g",
+        &[("kitbag.toml", GIT_SERVERS), ("instructions.md", "Hi.\n")],
+    );
+    sb.cli()
+        .args(["apply", &url, "--to", "claude-code", "--yes"])
+        .assert()
+        .success()
+        .stdout(
+            contains("MCP servers not applied (from a git source)")
+                .and(contains("docs: npx -y docs-mcp@1.2.3"))
+                .and(contains("env: DOCS_TOKEN"))
+                .and(contains("search: https://search.example/mcp"))
+                .and(contains("headers: Authorization"))
+                .and(contains("--allow-git-mcp docs,notes,search"))
+                .and(contains("--trust-source")),
+        );
+    assert!(claude_servers(&sb).is_empty(), "{:?}", claude_servers(&sb));
+    // Everything else in the profile still applies.
+    assert!(sb.read("home/.claude/CLAUDE.md").contains("Hi."));
+}
+
+#[test]
+fn git_mcp_servers_can_be_allowed_by_name() {
+    if !has_git() {
+        return;
+    }
+    let sb = Sandbox::empty();
+    std::fs::write(sb.home().join(".claude.json"), "{}").unwrap();
+    let url = sb.git_profile("g", &[("kitbag.toml", GIT_SERVERS)]);
+    sb.cli()
+        .args([
+            "apply",
+            &url,
+            "--to",
+            "claude-code",
+            "--yes",
+            "--allow-git-mcp",
+            "docs",
+            "--allow-git-mcp=search,nope",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            contains("notes: uvx notes-mcp")
+                .and(contains("--allow-git-mcp notes"))
+                .and(contains("no MCP server named 'nope'")),
+        );
+    assert_eq!(claude_servers(&sb), ["docs", "search"]);
+}
+
+#[test]
+fn git_mcp_servers_can_all_be_allowed() {
+    if !has_git() {
+        return;
+    }
+    for flag in [
+        "--allow-git-mcp",
+        "--trust-source",
+        "--allow-risky-settings",
+    ] {
+        let sb = Sandbox::empty();
+        std::fs::write(sb.home().join(".claude.json"), "{}").unwrap();
+        let url = sb.git_profile("g", &[("kitbag.toml", GIT_SERVERS)]);
+        sb.cli()
+            .args(["apply", &url, "--to", "claude-code", flag, "--yes"])
+            .assert()
+            .success()
+            .stdout(contains("not applied (from a git source)").not());
+        assert_eq!(claude_servers(&sb), ["docs", "notes", "search"], "{flag}");
+    }
+}
+
+#[test]
+fn unchanged_git_mcp_servers_are_not_reported() {
+    if !has_git() {
+        return;
+    }
+    let sb = Sandbox::empty();
+    std::fs::write(sb.home().join(".claude.json"), "{}").unwrap();
+    let url = sb.git_profile("g", &[("kitbag.toml", GIT_SERVERS)]);
+    sb.cli()
+        .args([
+            "apply",
+            &url,
+            "--to",
+            "claude-code",
+            "--yes",
+            "--allow-git-mcp",
+        ])
+        .assert()
+        .success();
+    sb.cli()
+        .args(["diff", &url, "--to", "claude-code", "--exit-code"])
+        .assert()
+        .success()
+        .stdout(contains("Up to date").and(contains("not applied").not()));
+    // A server changed by hand is "changed" again, so it is held back and named.
+    let mut v = sb.json("home/.claude.json");
+    v["mcpServers"]["notes"]["args"] = serde_json::json!(["other"]);
+    std::fs::write(sb.home().join(".claude.json"), v.to_string()).unwrap();
+    sb.cli()
+        .args(["apply", &url, "--to", "claude-code", "--yes"])
+        .assert()
+        .success()
+        .stdout(
+            contains("notes: uvx notes-mcp")
+                .and(contains("docs: npx").not())
+                .and(contains("search: https").not()),
+        );
+    assert_eq!(
+        sb.json("home/.claude.json")["mcpServers"]["notes"]["args"],
+        serde_json::json!(["other"])
+    );
+}
+
+#[test]
+fn local_profiles_apply_mcp_servers_as_before() {
+    let sb = Sandbox::empty();
+    std::fs::write(sb.home().join(".claude.json"), "{}").unwrap();
+    std::fs::create_dir_all(sb.path("local")).unwrap();
+    std::fs::write(sb.path("local/kitbag.toml"), GIT_SERVERS).unwrap();
+    sb.cli()
+        .args(["apply", "local", "--to", "claude-code", "--yes"])
+        .assert()
+        .success()
+        .stdout(contains("not applied (from a git source)").not());
+    assert_eq!(claude_servers(&sb), ["docs", "notes", "search"]);
 }

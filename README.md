@@ -18,10 +18,11 @@ OpenAI Codex CLI, Gemini CLI and Claude Desktop are supported, at user and proje
 >   fields, auth headers and URL passwords, but it is known to miss some formats (see the
 >   [open security issues](https://github.com/cargopete/kitbag/issues?q=is%3Aissue+is%3Aopen+label%3Asecurity)).
 >   Review a captured profile before you share or commit it.
-> - **Only apply profiles from git sources you trust.** A remote profile can add MCP servers
->   that run commands on your machine. kitbag drops its permission rules, hooks and shell
->   snippets unless you pass `--trust-source`, and lists every server it adds or changes.
->   `kitbag diff` shows what would change before you apply.
+> - **Only apply profiles from git sources you trust.** A remote profile can define MCP
+>   servers that run commands on your machine. kitbag doesn't add or change them unless you
+>   name them with `--allow-git-mcp`, and drops the profile's permission rules, hooks and
+>   shell snippets unless you pass `--trust-source`. `kitbag diff` shows what would change
+>   before you apply.
 >
 > Details and how to report a problem: [SECURITY.md](SECURITY.md).
 
@@ -187,7 +188,16 @@ defines `hooks`, and commands and skills that run shell snippets (``!`cmd` `` in
 `additionalDirectories`, every `permissions.allow` rule, `approval_policy = never` and
 `sandbox_mode = danger-full-access`. `ask` and `deny` rules still apply, since they restrict.
 The plan lists everything it left out. Profiles in a local directory apply them as written,
-with the warning above. From a git source, commands and skills that run shell snippets are
+with the warning above.
+
+**From a git source, MCP servers are opt-in.** A stdio server is a command that runs on your
+machine whenever the tool starts, so servers that a git profile would add, or change, are not
+applied by default. The plan lists each one under "MCP servers not applied (from a git
+source)" with its command and arguments (or URL) and the names of its env vars and headers.
+Pass `--allow-git-mcp docs,search` (repeatable) to apply the ones you name, `--allow-git-mcp`
+with no value for all of them, or `--trust-source`, which implies it. Servers already in
+place with the same definition are left as they are and aren't listed; servers from a local
+directory apply as written. From a git source, commands and skills that run shell snippets are
 skipped, and `hooks` and `allowed-tools` are removed from the frontmatter of the rest, unless
 you pass the same flag. The warning for local profiles names broad rules, judged case-insensitively and ignoring
 extra whitespace: bare tools (`Bash`, `Write`), any command (`Bash(*:*)`), the whole file system
@@ -295,7 +305,8 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
    managed block, because kitbag markers inside content are neutralised. It rejects path
    tricks in names and sub-directories, applies only allow-listed settings, and lists every
    MCP server it adds or changes before you confirm: the command and arguments it runs, or
-   the URL it connects to, and the names of the env vars and headers it sets.
+   the URL it connects to, and the names of the env vars and headers it sets. From a git
+   source, those servers are only applied when you opt in with `--allow-git-mcp`.
 
 ## Safe apply
 
@@ -356,7 +367,8 @@ Common options:
 
 - `--to` / `--from` take target ids (comma-separated), `all`, or `detected` (the default).
 - `--scope user|project` and `--project DIR` choose between global and per-project config.
-- `--secrets resolve|never`, `--no-overwrite` and `--allow-risky-settings` apply to `apply` and `diff`.
+- `--secrets resolve|never`, `--no-overwrite`, `--allow-git-mcp [NAMES]` and
+  `--allow-risky-settings` (`--trust-source`) apply to `apply` and `diff`.
 - `--path SUBDIR` selects a profile inside a repository.
 - `--home DIR` (or `KITBAG_HOME`) treats `DIR` as the home directory for sandboxes and tests.
   It also ignores `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME` and `APPDATA`.

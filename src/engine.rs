@@ -214,6 +214,9 @@ pub struct Plan {
     pub sensitive: BTreeSet<String>,
     /// MCP servers added or changed, for review before writing.
     pub servers: Vec<ServerReview>,
+    /// MCP servers from a git source that would be added or changed but were
+    /// held back because the user didn't opt in (see [`withhold_servers`]).
+    pub withheld: Vec<ServerReview>,
     /// Env vars left as placeholders because secrets were not resolved.
     pub kept_env: BTreeSet<String>,
     /// Settings that widen what agents may do without asking.
@@ -373,8 +376,56 @@ pub fn plan(
         sensitive: work.render.resolved,
         kept_env: work.render.kept,
         servers,
+        withheld: Vec::new(),
         risky,
     })
+}
+
+/// Which MCP servers from a git source may be added or changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitMcp {
+    /// Every server (`--allow-git-mcp` without names, or `--trust-source`).
+    All,
+    /// Only these (`--allow-git-mcp a,b`); none when empty.
+    Only(BTreeSet<String>),
+}
+
+impl GitMcp {
+    pub fn allows(&self, name: &str) -> bool {
+        match self {
+            GitMcp::All => true,
+            GitMcp::Only(names) => names.contains(name),
+        }
+    }
+}
+
+/// Plan an apply of a profile from a git source: MCP servers that would be
+/// added or changed are left out unless `allow` lets them in, and listed in
+/// [`Plan::withheld`]. Servers already in place, and everything that isn't
+/// an MCP server, apply as usual.
+pub fn plan_untrusted(
+    profile: &mut Profile,
+    targets: &[&dyn Adapter],
+    env: &Env,
+    opts: &ApplyOptions,
+    allow: &GitMcp,
+) -> Result<Plan> {
+    let first = plan(profile, targets, env, opts)?;
+    let withheld: Vec<ServerReview> = first
+        .servers
+        .iter()
+        .filter(|s| !allow.allows(&s.name))
+        .cloned()
+        .collect();
+    if withheld.is_empty() {
+        return Ok(first);
+    }
+    for s in &withheld {
+        profile.mcp_servers.remove(&s.name);
+    }
+    let mut out = plan(profile, targets, env, opts)?;
+    out.withheld = withheld;
+    Ok(out)
 }
 
 /// Write a plan to disk as an undoable transaction. Returns `None` when there is nothing to do.

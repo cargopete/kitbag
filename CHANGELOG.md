@@ -9,6 +9,7 @@ All notable changes to this project are documented here. The format follows
 ### Security
 
 - `undo --force` no longer follows a symbolic link that appeared or changed after the apply. Each apply records where every file's directory really was; undo leaves a file alone, even with `--force`, when its directory now resolves elsewhere or the file is now a link, reverts the rest and exits with status 1. Applies recorded by 0.1.1 are checked against the recorded path: any symbolic link in it is refused. `init --force` and `capture --force` replace symbolic links inside the profile directory instead of writing through them, and `init` without `--force` treats a dangling link as an existing file (#35).
+- MCP servers from git sources are opt-in. Servers a git profile would add or change are not applied by default; the plan lists each one (command and arguments or URL, env var and header names) under "MCP servers not applied (from a git source)". `--allow-git-mcp NAME[,NAME]` (repeatable) applies the named ones, `--allow-git-mcp` without a value all of them, and `--trust-source` / `--allow-risky-settings` implies it. Servers already in place, and local profiles, are unaffected (#36).
 
 ## [0.1.1] - 2026-11-25
 
