@@ -22,6 +22,7 @@ use crate::profile_io::{self, MANIFEST};
 use crate::remote;
 use crate::schema;
 use crate::secrets::{RefStyle, RenderState, render_refs};
+use crate::secrets_cmd::{self, FromArgs, SealArgs, SecretsCmd};
 use crate::source;
 use crate::txn::{Status, Store};
 use crate::ui::{self, BOLD, CYAN, DIM, GREEN, RED, YELLOW, paint, tildify, visible, visible_line};
@@ -109,9 +110,15 @@ enum Cmd {
         /// so applying them needs --apply-hooks. 'memory': the notes agents
         /// have written about you and your projects (Claude Code auto memory,
         /// Codex memories, Hermes MEMORY.md and USER.md); they can hold
-        /// personal data, so read memory/ before sharing the profile
+        /// personal data, so read memory/ before sharing the profile. 'secrets':
+        /// the values capture redacts (MCP env, headers, URLs, and a literal OAuth
+        /// client_secret) go, encrypted with age, to secrets.age next to
+        /// kitbag.toml, never into it; give --secrets-passphrase-file or
+        /// --secrets-recipient (or be asked for a passphrase on a terminal)
         #[arg(long, value_enum, value_delimiter = ',', value_name = "WHAT")]
         include: Vec<Include>,
+        #[command(flatten)]
+        seal: SealArgs,
     },
     /// Apply a profile: shows the plan, then asks before writing anything
     Apply {
@@ -129,6 +136,8 @@ enum Cmd {
         apply: ApplyArgs,
         #[command(flatten)]
         remote: RemoteArgs,
+        #[command(flatten)]
+        secrets_from: FromArgs,
     },
     /// Show exactly what 'apply' would change (never writes)
     Diff {
@@ -266,6 +275,11 @@ enum Cmd {
         mcp_timeout: u64,
     },
     /// Show supported tools, what each supports, and which are installed
+    /// Work with the encrypted secrets bundle (secrets.age)
+    Secrets {
+        #[command(subcommand)]
+        cmd: SecretsCmd,
+    },
     ListTargets {
         #[command(flatten)]
         place: Place,
@@ -314,6 +328,8 @@ enum Include {
     Hooks,
     /// Memory notes: Claude Code auto memory, Codex memories, Hermes MEMORY.md and USER.md
     Memory,
+    /// The redacted secret values, age-encrypted in secrets.age
+    Secrets,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -602,6 +618,7 @@ fn context(home_flag: Option<&Path>, place: Option<&Place>) -> Result<Ctx> {
             os: Os::current(),
             include_hooks: false,
             include_memory: false,
+            include_secrets: false,
         },
         state_dir,
     })
@@ -691,11 +708,18 @@ pub fn run(cli: Cli) -> Result<i32> {
             prune,
             dry_run,
             include,
+            seal,
         } => {
             let mut ctx = context(home, Some(&place))?;
             ctx.env.include_hooks = include.contains(&Include::Hooks);
             ctx.env.include_memory = include.contains(&Include::Memory);
-            cmd_capture(&ctx, &from, &out, name, force, prune, dry_run)
+            ctx.env.include_secrets = include.contains(&Include::Secrets);
+            if seal.is_set() && !ctx.env.include_secrets {
+                bail!(
+                    "--secrets-passphrase-file and --secrets-recipient only apply with --include secrets"
+                );
+            }
+            cmd_capture(&ctx, &from, &out, name, force, prune, dry_run, &seal)
         }
         Cmd::Apply {
             source,
@@ -704,7 +728,20 @@ pub fn run(cli: Cli) -> Result<i32> {
             dry_run,
             apply,
             remote,
+            secrets_from,
         } => {
+            if secrets_from.secrets_from.is_some() {
+                if remote.remote.is_some() {
+                    bail!(
+                        "--secrets-from can't be used with --remote: no secret value is sent to another machine (apply there with its own variables set)"
+                    );
+                }
+                if looks_remote(&source) {
+                    bail!(
+                        "--secrets-from isn't used with a git source: a profile you didn't write could name any variable. Clone it, review it, and apply the directory"
+                    );
+                }
+            }
             if let Some(host) = remote.remote.clone() {
                 return cmd_remote(
                     &host,
@@ -721,6 +758,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                 &targets,
                 &apply,
                 Mode::Apply { yes, dry_run },
+                Some(&secrets_from),
             )
         }
         Cmd::Diff {
@@ -746,6 +784,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                 &targets,
                 &apply,
                 Mode::Diff { exit_code },
+                None,
             )
         }
         Cmd::Inspect {
@@ -801,6 +840,9 @@ pub fn run(cli: Cli) -> Result<i32> {
                 git: git_mcp(trust_source, &allow_git_mcp),
             }),
         ),
+        Cmd::Secrets { cmd } => match cmd {
+            SecretsCmd::List { file, unlock } => secrets_cmd::list(file.as_deref(), &unlock),
+        },
         Cmd::ListTargets { place, json } => cmd_list_targets(&context(home, Some(&place))?, json),
     }
 }
@@ -964,6 +1006,7 @@ fn cmd_init(dir: &Path, name: Option<String>, force: bool) -> Result<i32> {
     Ok(0)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_capture(
     ctx: &Ctx,
     from: &str,
@@ -972,9 +1015,16 @@ fn cmd_capture(
     force: bool,
     prune: bool,
     dry_run: bool,
+    seal: &SealArgs,
 ) -> Result<i32> {
     let env = &ctx.env;
     check_name_flag(name.as_deref())?;
+    // Bad encryption flags fail now, before anything is read or written.
+    let seal_plan = if env.include_secrets {
+        Some(secrets_cmd::seal_plan(seal)?)
+    } else {
+        None
+    };
     let targets = select_targets(from, env, "from")?;
     let name = name.unwrap_or_else(|| {
         let base = std::path::absolute(out)
@@ -1132,9 +1182,40 @@ fn cmd_capture(
             );
         }
     }
+    // The values capture kept for the bundle move into one map; the copies on
+    // the redactions are dropped now, and the map once secrets.age is written.
+    let secrets = if env.include_secrets {
+        let b = secrets_cmd::bundle_of(&r.redactions)?;
+        for red in &mut r.redactions {
+            red.value = None;
+        }
+        b
+    } else {
+        crate::bundle::Bundle::default()
+    };
     if !r.notes.is_empty() {
         println!();
         print_notes(&r.notes);
+    }
+    if env.include_secrets {
+        if secrets.is_empty() {
+            println!(
+                "\nNo secret values were found, so no {} is written{}.",
+                crate::bundle::FILE,
+                if out.join(crate::bundle::FILE).exists() {
+                    " (the existing one is left as it is)"
+                } else {
+                    ""
+                }
+            );
+        } else {
+            println!(
+                "\n{} value(s) go to {}, encrypted; they are not written to {} or shown",
+                secrets.len(),
+                crate::bundle::FILE,
+                MANIFEST
+            );
+        }
     }
     if p.is_empty() {
         println!("\nNothing to capture.");
@@ -1144,7 +1225,42 @@ fn cmd_capture(
         println!("\n{} nothing written (--dry-run)", paint(DIM, "Dry run:"));
         return Ok(0);
     }
+    // Ask for the passphrase before writing anything, so a refusal leaves no
+    // half-written capture.
+    let sealed_with = match seal_plan {
+        Some(plan) if !secrets.is_empty() => Some(secrets_cmd::resolve_seal(plan)?),
+        _ => None,
+    };
+    // Encrypted before the profile is saved too: a failure here writes nothing.
+    let sealed = match &sealed_with {
+        Some(how) => Some(crate::bundle::seal(&secrets, how)?),
+        None => None,
+    };
+    drop(sealed_with);
+    drop(secrets);
     profile_io::save(p, out, force)?;
+    if let Some(bytes) = sealed {
+        let replaced = out.join(crate::bundle::FILE).exists();
+        let path = crate::bundle::write(out, &bytes)?;
+        let ignored = crate::bundle::ensure_gitignored(out)?;
+        println!(
+            "{} {}{}",
+            paint(GREEN, "Wrote encrypted secrets to"),
+            visible_line(&path.display().to_string()),
+            if replaced {
+                " (replaced the old one)"
+            } else {
+                ""
+            }
+        );
+        if ignored {
+            println!(
+                "  added {} to .gitignore: keep it out of git",
+                crate::bundle::FILE
+            );
+        }
+    }
+
     println!(
         "\n{} {}",
         paint(GREEN, "Wrote profile to"),
@@ -1488,10 +1604,24 @@ fn cmd_remote(
     )
 }
 
-fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) -> Result<i32> {
+fn cmd_apply(
+    ctx: &Ctx,
+    src: &str,
+    t: &TargetArgs,
+    a: &ApplyArgs,
+    mode: Mode,
+    secrets_from: Option<&FromArgs>,
+) -> Result<i32> {
     let (resolved, profile) = load_source(src, t.path.as_deref(), t.fetch())?;
     let targets = select_targets(&t.to, &ctx.env, "to")?;
     let (profile, mut plan) = plan_apply(ctx, &resolved, profile, &targets, a, &BTreeSet::new())?;
+    if let Some(from) = secrets_from {
+        // Names only: the bundle is opened in memory to check it, and no
+        // value goes anywhere.
+        let needed: Vec<String> = profile_io::required_env(&profile).into_keys().collect();
+        plan.notes
+            .extend(secrets_cmd::apply_notes(from, &needed, resolved.remote)?);
+    }
     if matches!(mode, Mode::Diff { .. }) {
         let found = tool_only_items(ctx, &profile, &plan, &targets)?;
         plan.notes.extend(tool_only_notes(&found, &ctx.env));
@@ -3584,6 +3714,65 @@ fn check_file(path: &Path) -> Option<String> {
     result.err().map(|e| format!("{e:#}"))
 }
 
+/// `doctor` on the encrypted secrets bundle: a plaintext secrets file in the
+/// profile directory is a problem, so is a `secrets.age` that is not age
+/// encrypted, and one git doesn't ignore is a warning. A git checkout's
+/// `secrets.age` is never used. Returns the number of problems.
+fn doctor_bundle(dir: &Path, from_git: bool) -> usize {
+    let mut problems = 0;
+    let bundle_path = dir.join(crate::bundle::FILE);
+    if from_git {
+        if bundle_path.exists() {
+            println!(
+                "  {} {} in a git source is ignored: a bundle is only read from a local file, with --secrets-from",
+                paint(YELLOW, "warn"),
+                crate::bundle::FILE
+            );
+        }
+        return 0;
+    }
+    for f in crate::bundle::plaintext_secret_files(dir) {
+        problems += 1;
+        println!(
+            "  {} {} looks like a plaintext secrets file in the profile directory; delete it (secrets belong only in the encrypted {})",
+            paint(RED, "secret"),
+            visible_line(&f),
+            crate::bundle::FILE
+        );
+    }
+    if bundle_path.is_file() {
+        let mut head = [0u8; 64];
+        let n = std::fs::File::open(&bundle_path)
+            .and_then(|mut f| std::io::Read::read(&mut f, &mut head))
+            .unwrap_or(0);
+        if crate::bundle::looks_like_age(&head[..n]) {
+            println!(
+                "  {} {} (encrypted; not read by doctor)",
+                paint(GREEN, "ok  "),
+                crate::bundle::FILE
+            );
+        } else {
+            problems += 1;
+            println!(
+                "  {} {} is not an age-encrypted file: it may hold secrets in plain text",
+                paint(RED, "secret"),
+                crate::bundle::FILE
+            );
+        }
+        if dir.join(".git").exists() {
+            let ignore = std::fs::read_to_string(dir.join(".gitignore")).unwrap_or_default();
+            if !crate::bundle::gitignore_covers(&ignore) {
+                println!(
+                    "  {} {} is not in .gitignore; keep the bundle out of git",
+                    paint(YELLOW, "warn"),
+                    crate::bundle::FILE
+                );
+            }
+        }
+    }
+    problems
+}
+
 /// What `doctor --mcp-tokens` was asked to do.
 struct McpTokens {
     /// How long each server gets.
@@ -3754,6 +3943,7 @@ fn cmd_doctor(
                     problems += 1;
                     println!("  {} {}", paint(RED, "secret"), visible_line(&leak));
                 }
+                problems += doctor_bundle(&resolved.dir, resolved.remote);
                 for (var, uses) in profile_io::required_env(&p) {
                     let set = env.vars.get(&var).is_some_and(|v| !v.is_empty());
                     println!(

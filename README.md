@@ -195,8 +195,9 @@ my-profile/
 │   └── terse.md           # output styles (Claude Code; Hermes personalities)
 ├── hooks/
 │   └── typecheck.sh       # scripts the [[hooks]] of kitbag.toml run (optional)
-└── memory/
-    └── claude-code/…      # memory notes, only with `capture --include memory` (optional)
+├── memory/
+│   └── claude-code/…      # memory notes, only with `capture --include memory` (optional)
+└── secrets.age            # encrypted secret values, only with `capture --include secrets` (optional, never in git)
 ```
 
 Every file is optional except `kitbag.toml`. A directory without one but with `rules/` at its
@@ -539,7 +540,9 @@ documents an in-app sign-in prompt and no keys. Amp's `amp.mcpServers` has no `o
 docs show only `amp mcp oauth login` flags, whose use needs `--server-url` and more), so its
 existing `oauth` object is kept while the URL is unchanged, as before, and nothing is captured
 or listed. Claude Desktop's docs name none. Moving a *signed-in* session to another tool or
-machine is not done here; it waits for the encrypted secrets bundle (#9).
+machine is not done here; it waits for the encrypted secrets bundle's later slices (#9, #18). A
+*literal* `client_secret` that capture leaves out of the profile is carried in `secrets.age` when
+you pass `--include secrets` (see item 6 of [Secrets: the security model](#secrets-the-security-model)).
 
 ### Rules: `rules/<name>.md`
 
@@ -1603,7 +1606,55 @@ after the plugin directory is gone.
    the URL it connects to, and the names of the env vars and headers it sets, with anything
    in them that looks like a secret masked. Servers already in place and unchanged are not
    listed. From a git source, those servers are only applied when you opt in with
-   `--allow-git-mcp`.
+   `--allow-git-mcp`. A git source never supplies a secrets bundle: a `secrets.age` in a
+   checkout is not read, and `--secrets-from` is refused for it.
+6. **An opt-in encrypted secrets bundle: `secrets.age`.** A bare capture never writes a secret
+   value. `kitbag capture --include secrets` additionally writes the values it just redacted
+   (the literals in MCP env, headers, args and URLs, and a literal OAuth `client_secret`, which
+   a bare capture leaves out of the profile) to **one** file next to `kitbag.toml`, encrypted with
+   [age](https://age-encryption.org) (the format `rage` also reads): a map of `${VAR}` name to
+   value, plus where capture found each. `kitbag.toml` keeps only the `${VAR}` references, and no
+   plaintext copy (`secrets.json`, `secrets.toml`, a temporary file) is ever written.
+   ```sh
+   kitbag capture -o ~/dotagents --include secrets --secrets-passphrase-file ~/.kitbag-pass
+   kitbag capture -o ~/dotagents --include secrets --secrets-recipient age1ql3z7hjy...
+   kitbag secrets list ~/dotagents --secrets-passphrase-file ~/.kitbag-pass   # names only
+   kitbag apply ~/dotagents --to cursor --secrets-from ~/dotagents/secrets.age \
+     --secrets-passphrase-file ~/.kitbag-pass
+   ```
+   - **Encryption** is age's own: a passphrase (age's scrypt), or public keys (`age1...`, SSH
+     `ssh-ed25519` / `ssh-rsa`, or a file of them, one per line; repeat `--secrets-recipient`).
+     age doesn't mix a passphrase with keys, so kitbag refuses both together. With neither flag a
+     terminal is asked for a passphrase twice; without a terminal capture stops before writing
+     anything. To open it: `--secrets-passphrase-file`, or `--secrets-identity` with an age
+     identity file or an unprotected SSH private key (passphrase-protected SSH keys aren't
+     supported yet), or a terminal prompt. A passphrase is never taken from the command line, and
+     is never printed.
+   - **Where it goes.** `secrets.age` is written `0600` on Unix (on Windows it keeps the access
+     of the folder it is in), and kitbag adds it to the profile's `.gitignore`, creating one if
+     needed. Committing it is left out of this first slice. Capturing again with `--force` and
+     `--include secrets` replaces it; a bare re-capture leaves it as it is.
+   - **Memory only.** Values are in memory only while a bundle is sealed or opened (zeroed on
+     drop, and printed as `<redacted>` by every `Debug`). `apply --secrets-from PATH` decrypts
+     the bundle to check it and to say which of the profile's variables it holds; **no value is
+     written into any tool's config file, the plan, the diff, a log, or the undo record.** Tools
+     keep getting `${VAR}` references, as before, and you set the variables in your environment.
+     `--secrets-from` is a local file only: it is refused for a git source (a profile you didn't
+     write could name any variable) and with `--remote` (nothing is sent to the host).
+   - **`kitbag secrets list [FILE|DIR]`** prints variable names and capture locations, never
+     values.
+   - **`kitbag doctor SOURCE`** fails when the profile directory holds a plaintext secrets file
+     (`secrets.json`, `secrets.toml`, `secrets.decrypted`, `.env` ...), when `secrets.age` isn't an
+     age file, or when `kitbag.toml` itself holds a literal secret, and warns when a git
+     repository doesn't ignore `secrets.age`.
+   - **Not done yet (#9 stays open):** resolving bundle values into tools that can't read env
+     vars (that needs a way to do it without the value reaching the undo record), an OS keychain
+     or helper, `secrets set` / `rotate`, committing the encrypted file, opening a bundle on a
+     `--remote` host, and OAuth tokens (#18).
+   - **Skipped on purpose (checked 2026-11-27).** kitbag doesn't read the OS keychain, shell
+     profiles, or tools' undocumented auth files (Codex's `~/.codex/auth.json`, Hermes's `.env`
+     and `auth.json`, the Claude Code and Cursor sign-ins): only values it already redacts from
+     the configs it captures go in the bundle.
 
 ## Safe apply
 
@@ -1826,7 +1877,7 @@ the host if you want `undo` there later. The download runs on the host and needs
 
 What is sent, and what is not:
 
-- The profile's files, except `.git`, `.env` and `.env.*` files and symlinks. No resolved
+- The profile's files, except `.git`, `.env` and `.env.*` files, `secrets.age` and symlinks. No resolved
   secret ever leaves this machine: the profile holds `${VAR}` references, the host's kitbag
   resolves them from the host's own environment (so set the variables there; `--secrets never`
   keeps them as references in the tools that can't read them), and a profile that holds what looks
@@ -1839,7 +1890,9 @@ Limits of this first version: the source must be a profile or plugin directory o
 SSH remote-development workspaces and devcontainer paths are not handled yet), and not on Windows.
 `--home` and `KITBAG_HOME` only affect this machine. The host's history records the temporary
 directory as the apply's source, so `kitbag status SOURCE` and `sync` there can't compare against
-it. Sending secrets themselves is not offered; an encrypted bundle is tracked in #9.
+it. Sending secrets themselves is not offered: `--secrets-from` is refused with `--remote`, and a
+`secrets.age` (and anything named like a plaintext secrets file) at the top of the profile is not
+copied to the host. Opening a bundle on the host is left for later (#9).
 
 ## Which instruction files does a tool load?
 
@@ -1944,10 +1997,10 @@ wrapping of their own.
 | Command | What it does |
 |---|---|
 | `kitbag init [DIR]` | Write a commented starter profile |
-| `kitbag capture [--from IDS] [-o DIR] [--dry-run] [--force] [--prune] [--include hooks,memory]` | Read the current setup into a profile (secrets redacted). Writes only into a new or empty directory. `--force` replaces an existing profile's files and leaves anything else in the directory alone; the profile's MCP servers (and rules, commands, skills and agents with `targets` / `disabled_on`) found in no tool are kept unless `--prune`. With several tools, one whose config can't be read is reported and the rest are captured |
+| `kitbag capture [--from IDS] [-o DIR] [--dry-run] [--force] [--prune] [--include hooks,memory,secrets] [--secrets-passphrase-file PATH \| --secrets-recipient KEY]` | Read the current setup into a profile (secrets redacted). Writes only into a new or empty directory. `--force` replaces an existing profile's files and leaves anything else in the directory alone; the profile's MCP servers (and rules, commands, skills and agents with `targets` / `disabled_on`) found in no tool are kept unless `--prune`. With several tools, one whose config can't be read is reported and the rest are captured |
 | `kitbag disable ITEM [--on IDS] [PROFILE]`, `kitbag enable ...` | Turn an MCP server, rule, command, skill, agent or output style off or on for some tools (default: all) by editing its `targets` / `disabled_on` in a local profile; applies nothing |
 | `kitbag diff <SOURCE> [--to IDS] [--exit-code] [--remote HOST]` | Show exactly what `apply` would change; never writes. With `--remote`, on that host over ssh ([details](#applying-on-a-remote-host-over-ssh)) |
-| `kitbag apply <SOURCE> [--to IDS] [--yes] [--dry-run] [--apply-hooks] [--remote HOST [--remote-kitbag PATH \| --remote-download]]` | Plan, confirm, write with backups; hooks only with `--apply-hooks` (and, from a git source, `--trust-source`). With `--remote`, copies the profile to the host over ssh and applies it there, with the host's own undo |
+| `kitbag apply <SOURCE> [--to IDS] [--yes] [--dry-run] [--apply-hooks] [--secrets-from PATH] [--remote HOST [--remote-kitbag PATH \| --remote-download]]` | Plan, confirm, write with backups; hooks only with `--apply-hooks` (and, from a git source, `--trust-source`). With `--remote`, copies the profile to the host over ssh and applies it there, with the host's own undo |
 | `kitbag inspect <SOURCE> [--to IDS] [--json]` | What a profile or plugin holds, what in it runs commands, reads env vars, installs executables or connects to the network, and (for the tools in `--to`, default `detected`) which files `apply` would write; never writes or starts anything |
 | `kitbag status [SOURCE] [--to IDS] [--exit-code [--strict]] [--json]` | Which managed instructions and rules differ from the profile, or changed since the last apply; never writes |
 | `kitbag sync <SOURCE> [--to IDS] [--from ID [--adopt] \| --overwrite]` | Apply without overwriting instructions edited in a tool; pull an edit back with `--from`, and what is only in that tool with `--adopt` |
@@ -1956,6 +2009,7 @@ wrapping of their own.
 | `kitbag doctor [SOURCE]` | Check installed tools' configs, a profile, required env vars, risky settings, interrupted applies |
 | `kitbag doctor [SOURCE] --mcp-tokens [--mcp-timeout SECS] [--allow-git-mcp [NAMES]] [--trust-source]` | Also start each local MCP server to list its tools, and estimate the tokens its tool definitions take up in each tool |
 | `kitbag doctor --why [DIR] [--to IDS]` | Which instruction files each tool loads in `DIR` (default: the current directory), in order, which it skips and why, and known traps |
+| `kitbag secrets list [FILE\|DIR] [--secrets-passphrase-file PATH \| --secrets-identity PATH]` | The variable names in an encrypted `secrets.age` (never values) |
 | `kitbag list-targets [--json]` | Targets, what they support, which are detected, file locations |
 
 Common options:

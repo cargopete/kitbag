@@ -10,6 +10,7 @@
 //! [`adapters`], and [`engine::commit`] it as an undoable transaction.
 
 pub mod adapters;
+pub mod bundle;
 pub mod cli;
 pub mod edit;
 pub mod editor;
@@ -28,6 +29,7 @@ pub mod profile_io;
 pub mod remote;
 pub mod schema;
 pub mod secrets;
+pub mod secrets_cmd;
 pub mod source;
 pub mod sync;
 pub mod toggle;

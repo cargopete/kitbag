@@ -605,6 +605,10 @@ pub struct Redaction {
     /// The MCP server the value came from. Server names may contain dots
     /// (`a.b`), so the server can't be read back from `location` reliably.
     pub server: Option<String>,
+    /// The value itself, only when capture was asked to keep it for the
+    /// encrypted bundle (`--include secrets`). It never prints, and is dropped
+    /// once `secrets.age` is written.
+    pub value: Option<crate::bundle::Secret>,
 }
 
 /// `ENV_VAR_NAME` built from parts (`"github", "apiKey"` -> `GITHUB_API_KEY`).
@@ -654,6 +658,8 @@ pub fn fingerprint(secret: &str) -> String {
 /// up sharing a variable.
 #[derive(Default)]
 struct Found {
+    /// Keep the redacted values on the [`Redaction`]s.
+    keep: bool,
     redactions: Vec<Redaction>,
     /// Env var name -> fingerprint of the secret it stands for.
     names: HashMap<String, String>,
@@ -680,6 +686,7 @@ impl Found {
             reason,
             fingerprint: Some(fp),
             server: None,
+            value: self.keep.then(|| crate::bundle::Secret::new(secret)),
         });
         name
     }
@@ -687,8 +694,22 @@ impl Found {
 
 /// Replace secret-looking values in an MCP server definition with env references.
 pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Redaction>) {
+    redact_server_keeping(server_name, input, false)
+}
+
+/// [`redact_server`], and with `keep` the redacted values stay on the
+/// returned [`Redaction`]s (for the encrypted bundle), a literal OAuth
+/// `client_secret` included.
+pub fn redact_server_keeping(
+    server_name: &str,
+    input: &McpServer,
+    keep: bool,
+) -> (McpServer, Vec<Redaction>) {
     let mut s = input.clone();
-    let mut found = Found::default();
+    let mut found = Found {
+        keep,
+        ..Found::default()
+    };
     let loc = format!("mcp_servers.{server_name}");
 
     // `${API_KEY:-literal}`: the literal is written wherever API_KEY is unset.
@@ -707,6 +728,7 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
                             reason: "secret-fallback",
                             fingerprint: Some(fp),
                             server: None,
+                            value: keep.then(|| crate::bundle::Secret::new(fb.as_str())),
                         });
                         reference(&c[1])
                     }
@@ -725,6 +747,23 @@ pub fn redact_server(server_name: &str, input: &McpServer) -> (McpServer, Vec<Re
             // `API_BASE = "https://x/v1?token=..."`: keep the URL, lose the token.
             *v = redact_url_into(server_name, v, &at, &mut found);
         }
+    }
+
+    // A literal OAuth client secret: with `keep` it goes to the bundle under a
+    // variable of its own; without, capture leaves it out (see `oauth`).
+    if keep
+        && let Some(o) = s.oauth.as_mut()
+        && let Some(v) = o.client_secret.clone()
+        && !v.trim().is_empty()
+        && !sole_ref(&v).is_some_and(|r| r.fallback.is_none())
+    {
+        let env_var = found.add(
+            &format!("{loc}.oauth.client_secret"),
+            env_var_name(&[server_name, "client_secret"]),
+            "oauth-client-secret",
+            &v,
+        );
+        o.client_secret = Some(reference(&env_var));
     }
 
     for (k, v) in s.headers.iter_mut() {
