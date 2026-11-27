@@ -131,10 +131,16 @@ fn claude_code_to_antigravity_user() {
     assert_eq!(b.instructions, a.instructions);
     assert!(!a.rules.is_empty() && !a.skills.is_empty());
     assert_eq!(b.rules, a.rules);
-    assert_eq!(b.skills.len(), a.skills.len());
-    for (x, y) in a.skills.iter().zip(&b.skills) {
-        assert_eq!(x.name, y.name);
+    // The skills, then the commands as skills (Antigravity's workflow migration).
+    assert_eq!(b.skills.len(), a.skills.len() + a.commands.len());
+    assert!(!a.commands.is_empty());
+    assert!(b.commands.is_empty());
+    for x in &a.skills {
+        let y = b.skills.iter().find(|y| y.name == x.name).unwrap();
         assert_eq!(x.files.len(), y.files.len());
+    }
+    for c in &a.commands {
+        assert!(b.skills.iter().any(|y| y.name == c.name), "{}", c.name);
     }
 }
 
@@ -267,10 +273,17 @@ fn claude_code_project_to_copilot_project() {
 fn claude_code_to_copilot_user_skills() {
     let (a, b) = round_trip("claude-code", "copilot", Scope::User);
     assert!(!a.skills.is_empty());
-    assert_eq!(
-        b.skills.iter().map(|s| &s.name).collect::<Vec<_>>(),
-        a.skills.iter().map(|s| &s.name).collect::<Vec<_>>()
-    );
+    // The skills, and the commands as skills (no user prompt-file folder).
+    let mut want: Vec<_> = a
+        .skills
+        .iter()
+        .map(|s| &s.name)
+        .chain(a.commands.iter().map(|c| &c.name))
+        .collect();
+    want.sort();
+    let mut got: Vec<_> = b.skills.iter().map(|s| &s.name).collect();
+    got.sort();
+    assert_eq!(got, want);
     assert!(b.commands.is_empty(), "no user prompt files");
 }
 

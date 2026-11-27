@@ -221,6 +221,89 @@ fn check_redacted(
     }
 }
 
+/// A command as the skill a tool's own migration turns it into: a folder
+/// named for the command with a `SKILL.md` that holds its prompt. With
+/// `explicit_only` the skill also carries the command's `argument-hint` and
+/// `disable-model-invocation: true`, VS Code's mapping of a prompt file, so
+/// the agent never loads it by itself.
+pub fn command_as_skill(c: &Command, explicit_only: bool) -> Skill {
+    let description = c
+        .description
+        .clone()
+        .unwrap_or_else(|| format!("Instructions from the {} command", c.name));
+    let mut entries = vec![
+        ("name", Value::String(c.name.clone())),
+        ("description", Value::String(description.clone())),
+    ];
+    if explicit_only {
+        entries.push((
+            "argument-hint",
+            c.argument_hint.clone().map_or(Value::Null, Value::String),
+        ));
+        entries.push(("disable-model-invocation", Value::Bool(true)));
+    }
+    let text = frontmatter::render(&entries, &c.body);
+    Skill {
+        name: c.name.clone(),
+        description: Some(description),
+        files: vec![SkillFile {
+            path: "SKILL.md".into(),
+            content: text.into_bytes(),
+            executable: false,
+        }],
+        ..Default::default()
+    }
+}
+
+/// The profile's skills followed by its commands written as skills, for a
+/// tool whose docs replace slash commands with skills. A command named like
+/// a skill is skipped with a warning, and what a skill can't hold (an
+/// arguments template, other frontmatter) is reported.
+pub fn commands_as_skills(
+    work: &mut Work,
+    id: &str,
+    tool: &str,
+    skills: &[Skill],
+    commands: &[Command],
+    explicit_only: bool,
+) -> Vec<Skill> {
+    let mut out = skills.to_vec();
+    for c in commands {
+        if out.iter().any(|s| s.name == c.name) {
+            work.warn(
+                id,
+                format!(
+                    "command '{}' skipped: the profile already has a skill of that name, and {tool} has no commands to keep them apart",
+                    c.name
+                ),
+            );
+            continue;
+        }
+        let mut lost = Vec::new();
+        if c.argument_hint.is_some() && !explicit_only {
+            lost.push("argument-hint");
+        }
+        if !c.extra.is_empty() {
+            lost.push("its other frontmatter");
+        }
+        if c.body.contains("$ARGUMENTS") || (1..=9).any(|n| c.body.contains(&format!("${n}"))) {
+            lost.push("$ARGUMENTS and $1..$9 substitution");
+        }
+        if !lost.is_empty() {
+            work.info(
+                id,
+                format!(
+                    "command '{}' becomes a skill and loses {} (skills take no arguments template)",
+                    c.name,
+                    lost.join(", ")
+                ),
+            );
+        }
+        out.push(command_as_skill(c, explicit_only));
+    }
+    out
+}
+
 /// SKILL.md with the `name` / `description` frontmatter some tools require.
 pub fn skill_with_required_frontmatter(skill: &Skill) -> Skill {
     let mut s = skill.clone();

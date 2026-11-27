@@ -274,10 +274,10 @@ fn list_targets_json() {
         ]
     );
     assert_eq!(v[2]["support"]["rules"], "folded");
-    // Antigravity: rules and skills in files of its own; commands (workflows) not carried.
+    // Antigravity: rules and skills in files of its own; commands (workflows) are written as skills.
     assert_eq!(v[5]["support"]["rules"], "native");
     assert_eq!(v[5]["support"]["skills"], "native");
-    assert_eq!(v[5]["support"]["commands"], "-");
+    assert_eq!(v[5]["support"]["commands"], "folded");
     assert_eq!(v[0]["detected"], true);
     sb.cli()
         .arg("list-targets")

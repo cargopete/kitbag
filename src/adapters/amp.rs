@@ -50,14 +50,14 @@ use anyhow::Result;
 use serde_json::{Map, Value, json};
 
 use super::common::{
-    capture_instructions, capture_skills_dir, import_server, merge_json_servers, render_server,
-    server_entries, server_from_json, servers_for, skill_with_required_frontmatter,
-    write_instructions, write_skill,
+    capture_instructions, capture_skills_dir, commands_as_skills, import_server,
+    merge_json_servers, render_server, server_entries, server_from_json, servers_for,
+    skill_with_required_frontmatter, write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
 use crate::frontmatter;
-use crate::model::{McpServer, Profile, Skill, SkillFile, Transport};
+use crate::model::{McpServer, Profile, Skill, Transport};
 use crate::secrets::RefStyle;
 
 const ID: &str = "amp";
@@ -173,32 +173,6 @@ fn skill_names(dir: &Path) -> Vec<String> {
         .collect();
     names.sort();
     names
-}
-
-/// A command as the skill Amp's migration turns it into: a folder named for
-/// the command with a `SKILL.md` that holds its prompt.
-fn command_as_skill(c: &crate::model::Command) -> Skill {
-    let description = c
-        .description
-        .clone()
-        .unwrap_or_else(|| format!("Instructions from the {} command", c.name));
-    let text = frontmatter::render(
-        &[
-            ("name", Value::String(c.name.clone())),
-            ("description", Value::String(description.clone())),
-        ],
-        &c.body,
-    );
-    Skill {
-        name: c.name.clone(),
-        description: Some(description),
-        files: vec![SkillFile {
-            path: "SKILL.md".into(),
-            content: text.into_bytes(),
-            executable: false,
-        }],
-        ..Default::default()
-    }
 }
 
 /// `skill` without the MCP servers it declares itself: `mcp.json` and the
@@ -348,40 +322,7 @@ fn capture_amp_skills(cap: &mut Captured, env: &Env, settings: &Value) {
 /// migration for the custom commands it removed).
 fn apply_skills(profile: &Profile, env: &Env, opts: &ApplyOptions, work: &mut Work) -> Result<()> {
     let dir = skills_dir(env);
-    let mut skills: Vec<Skill> = profile.skills.clone();
-    for c in &profile.commands {
-        if skills.iter().any(|s| s.name == c.name) {
-            work.warn(
-                ID,
-                format!(
-                    "command '{}' skipped: the profile already has a skill of that name, and Amp has no commands to keep them apart",
-                    c.name
-                ),
-            );
-            continue;
-        }
-        let mut lost = Vec::new();
-        if c.argument_hint.is_some() {
-            lost.push("argument-hint");
-        }
-        if !c.extra.is_empty() {
-            lost.push("its other frontmatter");
-        }
-        if c.body.contains("$ARGUMENTS") || (1..=9).any(|n| c.body.contains(&format!("${n}"))) {
-            lost.push("$ARGUMENTS and $1..$9 substitution");
-        }
-        if !lost.is_empty() {
-            work.info(
-                ID,
-                format!(
-                    "command '{}' becomes a skill and loses {} (skills take no arguments template)",
-                    c.name,
-                    lost.join(", ")
-                ),
-            );
-        }
-        skills.push(command_as_skill(c));
-    }
+    let skills = commands_as_skills(work, ID, "Amp", &profile.skills, &profile.commands, false);
     if !profile.commands.is_empty() {
         work.info(
             ID,

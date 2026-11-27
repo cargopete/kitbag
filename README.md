@@ -9,7 +9,7 @@ kitbag captures your MCP servers, instructions, rules, slash commands, skills an
 from the AI coding tools you already use. It stores them as a small, git-friendly **profile** with secrets
 redacted and applies that profile to any other tool in one step. Claude Code, Cursor,
 OpenAI Codex CLI, Gemini CLI, Claude Desktop, Google Antigravity, opencode (the last two
-for MCP servers and instructions), GitHub Copilot (MCP servers, instructions, rules, prompt files and skills)
+for MCP servers and instructions), GitHub Copilot (MCP servers, instructions, rules, prompt files and skills; user-level commands as skills)
 xAI's Grok Build CLI, Windsurf, Zed, Hermes Agent, Amp, Cline, Roo Code and Continue (the last seven for MCP servers and instructions; Hermes also for skills and shell hooks, Zed and Amp also for skills, Windsurf also for commands (workflows) and, in a project, rules and skills, Continue also for project rules and, at user scope, commands, Cline and Roo Code also for rules, commands and skills) are supported, at user and
 project scope.
 
@@ -95,9 +95,9 @@ preview with `kitbag diff github:cargopete/dotagents --to all`.
 | `codex`          | OpenAI Codex CLI  | user, project | ✓   | ✓            | folded     | user         | ✓      | ✓      | ✓        |
 | `gemini-cli`     | Gemini CLI        | user, project | ✓   | ✓            | folded     | ✓            | ✓      | ✓      | ✓        |
 | `claude-desktop` | Claude Desktop    | user          | ✓ (local servers) | -  | -          | -            | -      | -      | -        |
-| `antigravity`    | Google Antigravity | user, project | ✓  | ✓            | ✓          | -            | ✓      | ✓      | -        |
+| `antigravity`    | Google Antigravity | user, project | ✓  | ✓            | ✓          | as skills    | ✓      | ✓      | -        |
 | `opencode`       | opencode          | user, project | ✓   | ✓            | folded     | ✓            | ✓      | ✓      | -        |
-| `copilot`        | GitHub Copilot (CLI, VS Code) | user, project | ✓ | ✓    | ✓          | project      | ✓      | ✓      | -        |
+| `copilot`        | GitHub Copilot (CLI, VS Code) | user, project | ✓ | ✓    | ✓          | project; user as skills | ✓ | ✓ | -  |
 | `grok-build`     | Grok Build        | user, project | ✓   | ✓            | ✓*         | ✓            | ✓      | -      | -        |
 | `windsurf`       | Windsurf          | user, project | user | ✓           | project    | ✓            | project | -     | -        |
 | `zed`            | Zed               | user, project | ✓   | ✓            | -          | -            | ✓      | -      | -        |
@@ -130,7 +130,7 @@ Where things go:
 | Codex CLI | `$CODEX_HOME/config.toml` (default `~/.codex`), `$CODEX_HOME/AGENTS.md`, `$CODEX_HOME/prompts/`, `~/.agents/skills/`, `$CODEX_HOME/agents/*.toml` | `.codex/config.toml` (trusted projects only), `AGENTS.md`, `.agents/skills/`, `.codex/agents/*.toml` |
 | Gemini CLI | `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`, `~/.gemini/commands/*.toml`, `~/.gemini/skills/`, `~/.gemini/agents/*.md` | `.gemini/settings.json`, `GEMINI.md`, `.gemini/commands/`, `.gemini/skills/`, `.gemini/agents/*.md` |
 | Claude Desktop | `claude_desktop_config.json` in `~/Library/Application Support/Claude` (macOS), `%APPDATA%\Claude` (Windows), `~/.config/Claude` (Linux) | n/a |
-| Antigravity | `~/.gemini/config/mcp_config.json`, `~/.gemini/GEMINI.md` (the same file and managed block as Gemini CLI); capture also reads `~/.gemini/AGENTS.md` and `~/.gemini/config/{AGENTS,GEMINI}.md`; `~/.gemini/config/rules/*.md`, `~/.gemini/config/skills/`, `~/.gemini/config/agents/<name>.md` | `.agents/mcp_config.json`, `AGENTS.md` (shared with Codex and Cursor); capture also reads `GEMINI.md` and `.agents/{AGENTS,GEMINI}.md`; `.agents/rules/*.md`, `.agents/skills/` (the same directory as Codex's project skills), `.agents/agents/<name>.md` |
+| Antigravity | `~/.gemini/config/mcp_config.json`, `~/.gemini/GEMINI.md` (the same file and managed block as Gemini CLI); capture also reads `~/.gemini/AGENTS.md` and `~/.gemini/config/{AGENTS,GEMINI}.md`; `~/.gemini/config/rules/*.md`, `~/.gemini/config/skills/` (also where commands go, as skills), `~/.gemini/config/agents/<name>.md` | `.agents/mcp_config.json`, `AGENTS.md` (shared with Codex and Cursor); capture also reads `GEMINI.md` and `.agents/{AGENTS,GEMINI}.md`; `.agents/rules/*.md`, `.agents/skills/` (the same directory as Codex's project skills; commands go there too, as skills), `.agents/agents/<name>.md` |
 | opencode | `~/.config/opencode/opencode.json` or `opencode.jsonc` (`mcp.servers`), `~/.config/opencode/{AGENTS.md, commands/*.md, skills/<name>/, agents/*.md}` (plugins, by reference: the npm packages in the config's `plugins` array); honours `XDG_CONFIG_HOME` | `opencode.json(c)` or `.opencode/opencode.json(c)` (the first that exists, else `opencode.json`), `AGENTS.md` (shared with Codex, Cursor and Antigravity), `.opencode/{commands,skills,agents}/`; capture reads every config file there is |
 | Grok Build | `$GROK_HOME/config.toml` (`[mcp_servers.<name>]`, default `~/.grok`), `$GROK_HOME/{AGENTS.md, rules/*.md, commands/*.md, skills/}` | `.grok/config.toml`, `AGENTS.md` (shared with Codex, Cursor, Antigravity and opencode), `.grok/{rules,commands,skills}/`; Grok reads project files only in folders you have trusted |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` (`mcpServers`), `~/.codeium/windsurf/memories/global_rules.md`, `~/.codeium/windsurf/global_workflows/<name>.md` | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode and Grok Build); capture also reads the legacy `.windsurfrules`; `.windsurf/rules/<name>.md`, `.windsurf/workflows/<name>.md`, `.windsurf/skills/<name>/`; Windsurf's docs describe no project MCP file, so MCP servers are not written at project scope |
@@ -140,7 +140,7 @@ Where things go:
 | Cline | `~/.cline/data/settings/cline_mcp_settings.json` (`mcpServers`; `CLINE_MCP_SETTINGS_PATH` names the file, `CLINE_DATA_DIR` replaces `~/.cline/data`, `CLINE_DIR` replaces `~/.cline`), `~/.cline/rules/kitbag.md` (instructions: a managed block in a file of its own; Cline reads every file in that directory), `~/.cline/rules/<name>.md`, `~/.cline/workflows/<name>.md`, `~/.cline/skills/<name>/`; capture also reads `~/Documents/Cline/Rules/`, `~/Cline/Rules/`, `~/Documents/Cline/Workflows/` and `~/.agents/skills/` | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build, Windsurf and Zed), `.cline/rules/<name>.md`, `.cline/workflows/<name>.md`, `.cline/skills/<name>/`; capture also reads the older `.clinerules/` (rules, `workflows/`, `skills/`) and `.agents/skills/`; Cline's docs describe no project MCP file, so MCP servers are not written at project scope |
 | Roo Code | `mcp_settings.json` in `<editor user data>/User/globalStorage/rooveterinaryinc.roo-cline/settings/` (`mcpServers`; the editor is VS Code, else VS Code Insiders, VSCodium or Cursor, whichever has the extension's folder: `~/.config/Code` or `$XDG_CONFIG_HOME/Code` on Linux, `~/Library/Application Support/Code` on macOS, `%APPDATA%\Code` on Windows), `~/.roo/rules/kitbag.md` (instructions: a managed block in a file of its own; Roo reads every file in that directory), `~/.roo/rules/<name>.md`, `~/.roo/commands/<name>.md`, `~/.roo/skills/<name>/`; capture also reads `~/.agents/skills/` | `.roo/mcp.json` (`mcpServers`; wins over the user file for a server of the same name), `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build, Windsurf and Zed), `.roo/rules/<name>.md`, `.roo/commands/<name>.md`, `.roo/skills/<name>/`; capture also reads `.agents/skills/` |
 | Continue | `~/.continue/config.yaml` (`%USERPROFILE%\.continue\config.yaml` on Windows): `mcpServers`, for instructions a `kitbag-instructions` entry of `rules`, and for commands the `prompts` list | `.continue/mcpServers/*.yaml` (a server already defined in one of those files is edited there, new ones go to `kitbag.yaml`; JSON files there are read, not written), `.continue/rules/<name>.md`, and the instructions in `.continue/rules/kitbag-instructions.md`; `AGENTS.md` is not used, since Continue's docs don't mention it |
-| GitHub Copilot | `$COPILOT_HOME/mcp-config.json` (`mcpServers`, default `~/.copilot`), `$COPILOT_HOME/copilot-instructions.md`, `$COPILOT_HOME/instructions/*.instructions.md`, `$COPILOT_HOME/skills/`, `$COPILOT_HOME/agents/*.agent.md` | `.mcp.json` (shared with Claude Code, written in Claude Code's shape), `.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` (`applyTo`), `.github/prompts/*.prompt.md`, `.github/skills/`, `.github/agents/*.agent.md`; capture also reads `.github/mcp.json`, legacy chat modes in `.github/chatmodes/` and `.vscode/mcp.json` (`servers`), and `disabledMcpServers` from Copilot's `settings.json` |
+| GitHub Copilot | `$COPILOT_HOME/mcp-config.json` (`mcpServers`, default `~/.copilot`), `$COPILOT_HOME/copilot-instructions.md`, `$COPILOT_HOME/instructions/*.instructions.md`, `$COPILOT_HOME/skills/` (commands too, as skills), `$COPILOT_HOME/agents/*.agent.md` | `.mcp.json` (shared with Claude Code, written in Claude Code's shape), `.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` (`applyTo`), `.github/prompts/*.prompt.md`, `.github/skills/`, `.github/agents/*.agent.md`; capture also reads `.github/mcp.json`, legacy chat modes in `.github/chatmodes/` and `.vscode/mcp.json` (`servers`), and `disabledMcpServers` from Copilot's `settings.json` |
 
 How each tool receives `${VAR}` references:
 
@@ -427,7 +427,13 @@ Review the staged diff. Focus on: $ARGUMENTS
 ```
 
 `$ARGUMENTS` is the text after the command. Gemini CLI gets `{{args}}` in a `.toml` command,
-Codex gets a custom prompt, and Cursor gets a plain Markdown command. Other frontmatter keys,
+Codex gets a custom prompt, and Cursor gets a plain Markdown command. Amp, Antigravity and
+Copilot (at user scope) have no commands folder kitbag can write, and their docs migrate
+commands into skills, so a command is written as a skill there (`skills/<name>/SKILL.md` with
+`name`, `description` and the prompt as the body; Copilot's also carries `argument-hint` and
+`disable-model-invocation: true`, as VS Code's prompt-file migration does, so only `/<name>`
+runs it). A skill has no arguments template, so the plan notes what is lost (`$ARGUMENTS`,
+other frontmatter), and a command named like a skill of the profile is skipped with a warning. Other frontmatter keys,
 such as Claude Code's `allowed-tools`, are preserved and passed only to Claude Code.
 
 ### Skills: `skills/<name>/`
@@ -1354,9 +1360,13 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   definitions in a plugin's `commands/` directory; the only plugin folder those docs name is an
   administrator-owned organization directory, which kitbag doesn't write (see the plugins section).
   Copilot's user-level prompt files live in VS Code's profile storage, with no path the docs
-  name, and VS Code is deprecating prompt files in favour of skills. Codex custom prompts are
-  documented for `~/.codex/prompts/` only, and are deprecated for skills. Continue documents no
-  prompts folder. Zed and Antigravity workflows: see their notes.
+  name; user-level commands are written as skills instead (see the Copilot note). Codex custom
+  prompts are documented for `~/.codex/prompts/` only ("not shared through your repository"),
+  and are deprecated for skills with no migration described. Continue's prompts docs
+  (`invokable: true` in a markdown file) name no folder. Zed's docs name no commands folder
+  (a `.zed/commands/` directory is only a feature request). Hermes's docs only advise putting
+  reusable prompts in a skill, with no mapping, so kitbag doesn't convert for it. Antigravity
+  workflows: see its note.
 - **Claude Desktop** has no official Linux build. The `~/.config/Claude` path matches community
   builds.
 - At project scope, Cursor, Codex and opencode all read `AGENTS.md`. When Cursor is targeted
@@ -1377,8 +1387,11 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   trigger from its file), and the plan says so; the two tools' skills go to different directories
   (`~/.gemini/skills/` for Gemini CLI), which the Antigravity CLI reads both of and the app only
   `~/.gemini/config/skills/`. Workflows (`.agents/workflows/`, Antigravity's older commands) are
-  not carried: Google has deprecated them in favour of skills, and its docs list two different
-  global directories for them (the migration guide scans `global_workflows/` and `workflows/`). Hooks are
+  not written: Google has deprecated them in favour of skills, and its docs list two different
+  global directories for them (the migration guide scans `global_workflows/` and `workflows/`).
+  Its workflows-to-skills migration guide (docs checked 2026-11-27) turns a workflow into
+  `skills/<name>/SKILL.md` (the body kept, `name` and `description` in the frontmatter, run as
+  `/<name>`), so a profile's commands are written that way, to the skill folders above. Hooks are
   carried (see Hooks) and so are agents (see Agents); plugins aren't. kitbag leaves
   Antigravity's MCP tool approvals (Ask by default) alone.
 - **opencode** 2 keeps MCP servers under `mcp.servers` and turns one off with `disabled: true`;
@@ -1671,9 +1684,14 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   Rules become `*.instructions.md` files: an always-on rule gets `applyTo: "**"`, an on-demand
   rule no `applyTo`. A server using VS Code's `${input:...}` or `${command:...}` variables in
   `.vscode/mcp.json` is skipped at capture. Commands become VS Code prompt files
-  (`.github/prompts/<name>.prompt.md`) at project scope only: VS Code keeps user prompt files
-  in its own profile storage, and Copilot CLI's docs don't list prompt files among what it
-  reads. A prompt file keeps `description`, `argument-hint` and VS Code's
+  (`.github/prompts/<name>.prompt.md`) at project scope: VS Code keeps user prompt files
+  in its own profile storage, which its docs give no path for, and Copilot CLI's docs don't
+  list prompt files among what it reads. At user scope a command is written as a skill,
+  `$COPILOT_HOME/skills/<name>/SKILL.md`, as VS Code's migration guide converts prompt files
+  (docs checked 2026-11-27; the Local harness that loads prompt files is deprecated there for
+  February 2027): `name`, `description`, `argument-hint` and `disable-model-invocation: true`
+  (it only runs when you type `/<name>`); `agent`, `model` and `tools` are not carried, as the
+  guide says. A prompt file keeps `description`, `argument-hint` and VS Code's
   `name`, `agent`, `model` and `tools`; other command keys (`allowed-tools` ...) are left out with
   a note, and `$ARGUMENTS` is written as is with a warning, since VS Code documents
   `${input:NAME}` instead. Skills go to `$COPILOT_HOME/skills/` and `.github/skills/`, which

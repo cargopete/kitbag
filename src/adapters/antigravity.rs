@@ -30,10 +30,14 @@
 //!   `description` is required. The CLI also reads `~/.gemini/skills/`, which
 //!   is Gemini CLI's directory, so with both targets the CLI sees a skill
 //!   from each; the app reads only `~/.gemini/config/skills/`.
-//! * Workflows (`.agents/workflows/<name>.md`) are deprecated by Google in
-//!   favour of skills, and its docs give two global directories
+//! * Commands: workflows (`.agents/workflows/<name>.md`) are deprecated by
+//!   Google in favour of skills, and its docs give two global directories
 //!   (`~/.gemini/config/global_workflows/` and `.../workflows/`), so kitbag
-//!   doesn't carry them. Hooks are carried by `hook_files`; plugins aren't.
+//!   writes no workflows. Its migration guide (workflows-to-skills) turns a
+//!   workflow into `skills/<name>/SKILL.md` with `name` and `description`
+//!   and the body kept, invoked as `/<name>` as before, and kitbag writes a
+//!   command the same way (as Amp does). Hooks are carried by `hook_files`;
+//!   plugins aren't.
 //! * Subagents: `~/.gemini/config/agents/<name>.md` (user) and
 //!   `.agents/agents/<name>.md` (workspace); Antigravity also reads
 //!   `<name>/agent.md` in those directories, which capture reads too, and
@@ -57,8 +61,8 @@ use serde_json::{Map, Value, json};
 
 use super::common::{
     AgentName, Resolver, add_rule, capture_agent_dir, capture_instructions, capture_skills_dir,
-    claim_name, documented_agent, import_server, merge_json_servers_off, name_from_rel,
-    note_agent_keys, read_text_item, server_entries, server_from_json, servers_for,
+    claim_name, commands_as_skills, documented_agent, import_server, merge_json_servers_off,
+    name_from_rel, note_agent_keys, read_text_item, server_entries, server_from_json, servers_for,
     set_disabled_true, skill_with_required_frontmatter, str_of, write_agent, write_instructions,
     write_rule, write_skill,
 };
@@ -277,6 +281,10 @@ impl Adapter for Antigravity {
                         | Feature::Agents
                 ) {
                     Support::Native
+                } else if f == Feature::Commands {
+                    // Workflows are deprecated; Google's migration guide turns
+                    // each into a skill, so that is what is written.
+                    Support::Folded
                 } else {
                     Support::None
                 },
@@ -519,7 +527,24 @@ impl Adapter for Antigravity {
                 "Antigravity reads Gemini CLI's rules block in ~/.gemini/GEMINI.md as well as its own rules/ files, so in this setup it sees each rule twice: always on from the block, and with its own trigger from the file",
             );
         }
-        for s in &profile.skills {
+        let skills = commands_as_skills(
+            work,
+            ID,
+            "Antigravity",
+            &profile.skills,
+            &profile.commands,
+            false,
+        );
+        if !profile.commands.is_empty() {
+            work.info(
+                ID,
+                format!(
+                    "Antigravity deprecated workflows in favour of skills, so commands are written as skills in {} (as its workflows-to-skills migration guide does); no workflows folder is written",
+                    crate::ui::tildify(&p.skills, &work.home)
+                ),
+            );
+        }
+        for s in &skills {
             let s = skill_with_required_frontmatter(s);
             write_skill(work, &p.skills.join(&s.name), &s, opts, ID)?;
         }
