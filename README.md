@@ -10,7 +10,7 @@ from the AI coding tools you already use. It stores them as a small, git-friendl
 redacted and applies that profile to any other tool in one step. Claude Code, Cursor,
 OpenAI Codex CLI, Gemini CLI, Claude Desktop, Google Antigravity, opencode (the last two
 for MCP servers and instructions), GitHub Copilot (MCP servers, instructions, rules, prompt files and skills)
-xAI's Grok Build CLI, Windsurf, Zed, Hermes Agent, Amp, Cline, Roo Code and Continue (the last seven for MCP servers and instructions; Hermes also for shell hooks, Zed and Amp also for skills, Windsurf also for commands (workflows) and, in a project, rules and skills, Continue also for project rules and, at user scope, commands, Cline and Roo Code also for rules, commands and skills) are supported, at user and
+xAI's Grok Build CLI, Windsurf, Zed, Hermes Agent, Amp, Cline, Roo Code and Continue (the last seven for MCP servers and instructions; Hermes also for skills and shell hooks, Zed and Amp also for skills, Windsurf also for commands (workflows) and, in a project, rules and skills, Continue also for project rules and, at user scope, commands, Cline and Roo Code also for rules, commands and skills) are supported, at user and
 project scope.
 
 > [!IMPORTANT]
@@ -101,7 +101,7 @@ preview with `kitbag diff github:cargopete/dotagents --to all`.
 | `grok-build`     | Grok Build        | user, project | ✓   | ✓            | ✓*         | ✓            | ✓      | -      | -        |
 | `windsurf`       | Windsurf          | user, project | user | ✓           | project    | ✓            | project | -     | -        |
 | `zed`            | Zed               | user, project | ✓   | ✓            | -          | -            | ✓      | -      | -        |
-| `hermes`         | Hermes Agent      | user, project | user | ✓           | -          | -            | -      | -      | -        |
+| `hermes`         | Hermes Agent      | user, project | user | ✓           | -          | -            | ✓      | -      | -        |
 | `amp`            | Amp               | user, project | ✓   | ✓            | -          | as skills    | ✓      | -      | -        |
 | `cline`          | Cline             | user, project | user | ✓           | ✓          | ✓            | ✓      | -      | -        |
 | `roo`            | Roo Code (alias: `roo-code`) | user, project | ✓ | ✓    | ✓          | ✓            | ✓      | -      | -        |
@@ -135,7 +135,7 @@ Where things go:
 | Grok Build | `$GROK_HOME/config.toml` (`[mcp_servers.<name>]`, default `~/.grok`), `$GROK_HOME/{AGENTS.md, rules/*.md, commands/*.md, skills/}` | `.grok/config.toml`, `AGENTS.md` (shared with Codex, Cursor, Antigravity and opencode), `.grok/{rules,commands,skills}/`; Grok reads project files only in folders you have trusted |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` (`mcpServers`), `~/.codeium/windsurf/memories/global_rules.md`, `~/.codeium/windsurf/global_workflows/<name>.md` | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode and Grok Build); capture also reads the legacy `.windsurfrules`; `.windsurf/rules/<name>.md`, `.windsurf/workflows/<name>.md`, `.windsurf/skills/<name>/`; Windsurf's docs describe no project MCP file, so MCP servers are not written at project scope |
 | Zed | `settings.json` in `~/.config/zed` (macOS), `$XDG_CONFIG_HOME/zed` or `~/.config/zed` (Linux), `%APPDATA%\Zed` (Windows) (`context_servers`), and `AGENTS.md` next to it (Zed's personal instructions), `~/.agents/skills/<name>/` (skills) | `.zed/settings.json` (`context_servers`; Zed starts these only in a trusted worktree); instructions go to the first of `.rules`, `.cursorrules`, `.windsurfrules`, `.clinerules`, `.github/copilot-instructions.md`, `AGENT.md`, `AGENTS.md`, `CLAUDE.md` and `GEMINI.md` that exists, since Zed reads only that one, and to `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build and Windsurf) when none does; `.agents/skills/<name>/` (skills; Amp writes its project skills to the same folder) |
-| Hermes Agent | `$HERMES_HOME/config.yaml` (`mcp_servers`, default `~/.hermes`), `$HERMES_HOME/SOUL.md` (Hermes's identity file, the only global file it reads for instructions; capture reads only a kitbag-managed block in it) | `.hermes.md` or `HERMES.md` when the project has one (Hermes loads it before `AGENTS.md`), otherwise `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf and Grok Build); Hermes documents no project MCP file, so MCP servers are not written at project scope |
+| Hermes Agent | `$HERMES_HOME/config.yaml` (`mcp_servers`, default `~/.hermes`), `$HERMES_HOME/SOUL.md` (Hermes's identity file, the only global file it reads for instructions; capture reads only a kitbag-managed block in it), `$HERMES_HOME/skills/<name>/` (skills; capture also looks in category folders such as `skills/devops/<name>/`, and skips the skills Hermes bundled or installed from its hub) | `.hermes.md` or `HERMES.md` when the project has one (Hermes loads it before `AGENTS.md`), otherwise `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf and Grok Build); Hermes documents no project MCP file, so MCP servers are not written at project scope; `.hermes/skills/<name>/` (skills; Hermes loads them once you run `hermes skills trust`, and also reads `.agents/skills/`, which kitbag leaves to the tools that own it) |
 | Amp | `~/.config/amp/settings.json` or `settings.jsonc` (`amp.mcpServers`; `%USERPROFILE%\.config\amp` on Windows), `~/.config/amp/AGENTS.md`, `~/.config/agents/skills/<name>/` | `.amp/settings.json` or `settings.jsonc` (`amp.mcpServers`; Amp asks you to approve these servers, `amp mcp approve`), `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf, Grok Build and Hermes), or `AGENT.md` / `CLAUDE.md` when that is the file Amp reads, `.agents/skills/<name>/` |
 | Cline | `~/.cline/data/settings/cline_mcp_settings.json` (`mcpServers`; `CLINE_MCP_SETTINGS_PATH` names the file, `CLINE_DATA_DIR` replaces `~/.cline/data`, `CLINE_DIR` replaces `~/.cline`), `~/.cline/rules/kitbag.md` (instructions: a managed block in a file of its own; Cline reads every file in that directory), `~/.cline/rules/<name>.md`, `~/.cline/workflows/<name>.md`, `~/.cline/skills/<name>/`; capture also reads `~/Documents/Cline/Rules/`, `~/Cline/Rules/`, `~/Documents/Cline/Workflows/` and `~/.agents/skills/` | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build, Windsurf and Zed), `.cline/rules/<name>.md`, `.cline/workflows/<name>.md`, `.cline/skills/<name>/`; capture also reads the older `.clinerules/` (rules, `workflows/`, `skills/`) and `.agents/skills/`; Cline's docs describe no project MCP file, so MCP servers are not written at project scope |
 | Roo Code | `mcp_settings.json` in `<editor user data>/User/globalStorage/rooveterinaryinc.roo-cline/settings/` (`mcpServers`; the editor is VS Code, else VS Code Insiders, VSCodium or Cursor, whichever has the extension's folder: `~/.config/Code` or `$XDG_CONFIG_HOME/Code` on Linux, `~/Library/Application Support/Code` on macOS, `%APPDATA%\Code` on Windows), `~/.roo/rules/kitbag.md` (instructions: a managed block in a file of its own; Roo reads every file in that directory), `~/.roo/rules/<name>.md`, `~/.roo/commands/<name>.md`, `~/.roo/skills/<name>/`; capture also reads `~/.agents/skills/` | `.roo/mcp.json` (`mcpServers`; wins over the user file for a server of the same name), `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build, Windsurf and Zed), `.roo/rules/<name>.md`, `.roo/commands/<name>.md`, `.roo/skills/<name>/`; capture also reads `.agents/skills/` |
@@ -1284,8 +1284,22 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   the other tools' instructions, and says so; in a project, to `.hermes.md` or `HERMES.md` if there is
   one, since Hermes loads that before `AGENTS.md`, otherwise to `AGENTS.md`, with a warning when
   an `AGENTS.override.md` would shadow it. `.env`, `auth.json` and `mcp-tokens/` are never read
-  or written (capture warns when it finds them), and Hermes's skills, memories, sessions and
-  profiles are not carried yet. Its shell hooks (the `hooks:` block of `config.yaml`) are carried
+  or written (capture warns when it finds them), and Hermes's memories, sessions, profiles and
+  skill bundles are not carried (capture says which of them it found and left). Skills
+  (docs: hermes-agent.nousresearch.com/docs/user-guide/features/skills, checked 2026-11-27)
+  go to `$HERMES_HOME/skills/<name>/` ("the primary directory and source of truth") and, in a
+  project, to `.hermes/skills/<name>/`, Hermes's own project folder, never to `.agents/skills/`,
+  which Amp and Zed write to (the plan notes a skill of the same name there, since Hermes then
+  refuses both). Hermes finds skills at any depth and groups them in category folders
+  (`skills/mlops/axolotl/`), so capture looks in those too, and apply updates a skill where it
+  already is and otherwise writes it directly in `skills/`. The skills Hermes put there itself,
+  named in `skills/.bundled_manifest` or in the `installed` list of `skills/.hub/lock.json`, are
+  not captured and not overwritten (a profile skill of the same name is skipped with a warning).
+  Hermes loads project skills only after you run `hermes skills trust` in the repository, and
+  the plan says so. `skills.external_dirs` in `config.yaml` is not captured or edited. Hermes's
+  docs name no rules folder and no commands folder (reusable prompts are skills, and every
+  skill is already a slash command), so rules and commands are skipped for Hermes and the plan
+  says so. Its shell hooks (the `hooks:` block of `config.yaml`) are carried
   with `--include hooks` / `--apply-hooks` (see Hooks above).
 - **Amp** keeps MCP servers under the flat key `amp.mcpServers` in `~/.config/amp/settings.json`
   or `settings.jsonc` (the same path under `%USERPROFILE%` on Windows; Amp's docs name no

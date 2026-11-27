@@ -26,26 +26,46 @@
 //!   gateway hooks (`hooks/<name>/HOOK.yaml` + `handler.py`), plugin hooks
 //!   (`ctx.register_hook()`) and outbound webhooks (`hooks.outbound`, left as
 //!   it is when `hooks:` is edited).
+//! * Skills: `<name>/SKILL.md` (`name` and `description` frontmatter, plus
+//!   optional `references/`, `templates/`, `scripts/`, `assets/`) in
+//!   `$HERMES_HOME/skills/` (the "primary directory and source of truth") and,
+//!   in a project, `.hermes/skills/`, Hermes's own project folder. Hermes also
+//!   reads a project's `.agents/skills/` (shared with Amp and Zed) and any
+//!   `skills.external_dirs`, but kitbag writes only to the Hermes-owned folders.
+//!   Hermes loads project skills only once you run `hermes skills trust` in the
+//!   repository. It finds skills at any depth (the docs group them in category
+//!   folders, `mlops/axolotl/SKILL.md`), so capture looks in category folders
+//!   too and apply updates a skill where it already is, else writes it flat.
+//!   The skills Hermes put there itself, named in `skills/.bundled_manifest`
+//!   (bundled) or `skills/.hub/lock.json` (installed from the hub), are neither
+//!   captured nor overwritten; Hermes keeps those up to date.
+//! * Rules and commands: Hermes's docs name no rules folder (its context-file
+//!   list only reads Cursor's `.cursorrules` and `.cursor/rules/*.mdc`, which
+//!   Cursor owns) and no commands folder (`quick_commands` in `config.yaml` are
+//!   shell or alias entries, and the docs say to put reusable prompts in a
+//!   skill; every skill is already a slash command), so neither is carried.
 //! * Never read or written: `.env`, `auth.json`, `mcp-tokens/` (credentials),
-//!   and Hermes' own stores (`skills/`, `memories/`, sessions, `profiles/`).
-//!   Run kitbag with `HERMES_HOME` set to a profile's directory to use that
-//!   profile.
+//!   and Hermes' own stores (`memories/`, sessions, `profiles/`,
+//!   `skill-bundles/`). Run kitbag with `HERMES_HOME` set to a profile's
+//!   directory to use that profile.
 //!
 //! Docs: <https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp>,
+//! <https://hermes-agent.nousresearch.com/docs/user-guide/features/skills>,
 //! <https://hermes-agent.nousresearch.com/docs/user-guide/features/context-files>,
 //! <https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks>,
 //! <https://hermes-agent.nousresearch.com/docs/user-guide/configuration/>.
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde_json::{Map, Value, json};
 
 use super::common::{
-    capture_instructions, capture_managed_instructions, import_server, merge_server_def,
-    note_dropped_server_keys, off_skipped_server, record_server_write, render_server,
-    server_entries, server_from_json, servers_for, set_enabled_false, skipped_servers, str_of,
-    write_instructions,
+    capture_instructions, capture_managed_instructions, capture_skill, import_server,
+    merge_server_def, note_dropped_server_keys, off_skipped_server, record_server_write,
+    render_server, server_entries, server_from_json, servers_for, set_enabled_false,
+    skill_with_required_frontmatter, skipped_servers, str_of, write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::yaml::{YamlDoc, parse_map};
@@ -68,7 +88,11 @@ const MANAGED_KEYS: &[&str] = &[
 /// Credential files and directories in the Hermes home that are never read.
 const CREDENTIALS: &[&str] = &[".env", "auth.json", "mcp-tokens"];
 /// Hermes-only stores kitbag does not carry (yet).
-const OTHER_STORES: &[&str] = &["skills", "memories", "sessions", "profiles"];
+const OTHER_STORES: &[&str] = &["memories", "sessions", "profiles", "skill-bundles"];
+/// Folders Hermes never looks for skills in (besides hidden ones).
+const EXCLUDED_SKILL_DIRS: &[&str] = &["node_modules"];
+/// How many category folders deep capture looks for skills.
+const MAX_SKILL_DEPTH: usize = 3;
 
 pub struct Hermes;
 
@@ -81,6 +105,16 @@ struct Paths {
 pub(super) fn hermes_home(env: &Env) -> PathBuf {
     env.location_var("HERMES_HOME")
         .unwrap_or_else(|| env.home.join(".hermes"))
+}
+
+/// Hermes's own skills folder: `$HERMES_HOME/skills`, or a project's
+/// `.hermes/skills` (its native project location; `.agents/skills` is shared
+/// with other tools).
+fn skills_dir(env: &Env) -> PathBuf {
+    match env.scope {
+        Scope::User => hermes_home(env).join("skills"),
+        Scope::Project => env.project.join(".hermes").join("skills"),
+    }
 }
 
 fn paths(env: &Env) -> Paths {
@@ -127,7 +161,7 @@ impl Adapter for Hermes {
         Feature::ALL.map(|f| {
             let s = match f {
                 Feature::Mcp if scope == Scope::User => Support::Native,
-                Feature::Instructions => Support::Native,
+                Feature::Instructions | Feature::Skills => Support::Native,
                 _ => Support::None,
             };
             (f, s)
@@ -141,6 +175,7 @@ impl Adapter for Hermes {
             out.push(("mcp", c));
         }
         out.push(("instructions", p.instructions));
+        out.push(("skills", skills_dir(env)));
         out
     }
 
@@ -148,9 +183,12 @@ impl Adapter for Hermes {
         match env.scope {
             Scope::User => hermes_home(env).exists(),
             // AGENTS.md is shared with other tools and says nothing about Hermes.
-            Scope::Project => [".hermes.md", "HERMES.md"]
-                .iter()
-                .any(|n| env.project.join(n).is_file()),
+            Scope::Project => {
+                [".hermes.md", "HERMES.md"]
+                    .iter()
+                    .any(|n| env.project.join(n).is_file())
+                    || skills_dir(env).is_dir()
+            }
         }
     }
 
@@ -164,6 +202,16 @@ impl Adapter for Hermes {
                 let doc = Value::Object(parse_map(Some(&text), config)?);
                 for (name, def) in server_entries(&mut cap, ID, config, SECTION, doc.get(SECTION)) {
                     capture_server(&mut cap, name, def);
+                }
+                let external = doc
+                    .pointer("/skills/external_dirs")
+                    .and_then(Value::as_array)
+                    .is_some_and(|a| !a.is_empty());
+                if external {
+                    cap.info(
+                        ID,
+                        "skills.external_dirs in config.yaml is not captured: those folders belong to whatever tool owns them, and Hermes only reads them",
+                    );
                 }
             }
             let home = hermes_home(env);
@@ -201,6 +249,8 @@ impl Adapter for Hermes {
             super::hook_files::capture_for(&mut cap, env, &super::hook_files::HERMES)?;
             other_hook_systems(&mut cap, &hermes_home(env), &env.home);
         }
+
+        capture_skills(&mut cap, env)?;
 
         if env.scope == Scope::User {
             // SOUL.md is Hermes's persona (a fresh install seeds one); its own
@@ -264,6 +314,7 @@ impl Adapter for Hermes {
         // Codex, Cursor, Antigravity, opencode, Windsurf and Grok Build:
         // applying several plans the same block more than once, which leaves one.
         write_instructions(work, &p.instructions, profile, opts, false, ID)?;
+        apply_skills(profile, env, opts, work)?;
         super::hook_files::apply_for(profile, env, opts, work, &super::hook_files::HERMES)?;
         if profile.settings.contains_key(ID) {
             work.info(
@@ -273,6 +324,145 @@ impl Adapter for Hermes {
         }
         Ok(())
     }
+}
+
+/// Every skill folder under `root`, as (its parent, its name): a folder with a
+/// `SKILL.md`, in `root` or in category folders below it. Hidden folders
+/// (`.hub`, `.git`, `.archive`, `.venv`) are not looked into, and neither is a
+/// skill's own folder.
+fn find_skills(root: &Path) -> Vec<(PathBuf, String)> {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, String)>) {
+        for name in crate::plan_fs::subdirs(dir).unwrap_or_default() {
+            if name.starts_with('.') || EXCLUDED_SKILL_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            let path = dir.join(&name);
+            if path.join("SKILL.md").is_file() {
+                out.push((dir.to_path_buf(), name));
+            } else if depth < MAX_SKILL_DEPTH {
+                walk(&path, depth + 1, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, 1, &mut out);
+    out
+}
+
+/// Names of the skills Hermes manages itself in a skills folder: the bundled
+/// ones listed in `.bundled_manifest` (`name:hash` lines, or bare names in
+/// the older format) and those installed from the hub (the keys of `installed`
+/// in `.hub/lock.json`).
+fn hermes_managed_skills(skills: &Path) -> BTreeSet<String> {
+    let read = |p: PathBuf| {
+        std::fs::metadata(&p)
+            .ok()
+            .filter(|m| m.is_file() && m.len() <= crate::profile_io::MAX_FILE_BYTES)
+            .and_then(|_| std::fs::read_to_string(p).ok())
+    };
+    let mut names = BTreeSet::new();
+    if let Some(text) = read(skills.join(".bundled_manifest")) {
+        for line in text.lines() {
+            let name = line.split(':').next().unwrap_or_default().trim();
+            if !name.is_empty() {
+                names.insert(name.to_string());
+            }
+        }
+    }
+    if let Some(text) = read(skills.join(".hub").join("lock.json"))
+        && let Ok(doc) = serde_json::from_str::<Value>(&text)
+        && let Some(installed) = doc.get("installed").and_then(Value::as_object)
+    {
+        names.extend(installed.keys().cloned());
+    }
+    names
+}
+
+fn capture_skills(cap: &mut Captured, env: &Env) -> Result<()> {
+    let dir = skills_dir(env);
+    // Only the user's folder is Hermes's to fill: a project's .hermes/skills
+    // holds what the project put there.
+    let managed = if env.scope == Scope::User {
+        hermes_managed_skills(&dir)
+    } else {
+        BTreeSet::new()
+    };
+    let mut seen = BTreeSet::new();
+    let mut left = Vec::new();
+    for (parent, name) in find_skills(&dir) {
+        if managed.contains(&name) {
+            left.push(name);
+            continue;
+        }
+        if !seen.insert(name.clone()) {
+            cap.warn(
+                ID,
+                format!(
+                    "skill '{name}' is in more than one folder of {}; only the first was captured",
+                    crate::ui::tildify(&dir, &env.home)
+                ),
+            );
+            continue;
+        }
+        capture_skill(cap, &parent, name, ID)?;
+    }
+    left.sort();
+    if !left.is_empty() {
+        cap.info(
+            ID,
+            format!(
+                "{} skill(s) that Hermes bundled or installed from its hub were not captured (Hermes keeps those up to date): {}",
+                left.len(),
+                left.join(", ")
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// Write the profile's skills to Hermes's skills folder.
+fn apply_skills(profile: &Profile, env: &Env, opts: &ApplyOptions, work: &mut Work) -> Result<()> {
+    let dir = skills_dir(env);
+    let managed = if env.scope == Scope::User {
+        hermes_managed_skills(&dir)
+    } else {
+        BTreeSet::new()
+    };
+    let existing = find_skills(&dir);
+    let mut wrote_any = false;
+    for s in &profile.skills {
+        if managed.contains(&s.name) {
+            work.warn(
+                ID,
+                format!(
+                    "skill '{}' skipped: Hermes bundled it or installed it from its hub, and keeps it up to date itself; rename the skill to carry your own",
+                    s.name
+                ),
+            );
+            continue;
+        }
+        let s = skill_with_required_frontmatter(s);
+        // Where it already is (Hermes groups skills in category folders), else flat.
+        let target = existing
+            .iter()
+            .find(|(_, n)| *n == s.name)
+            .map(|(parent, n)| parent.join(n))
+            .unwrap_or_else(|| dir.join(&s.name));
+        if env.scope == Scope::Project {
+            // Two skills of one name in one tier make Hermes refuse both.
+            let shared = env.project.join(".agents").join("skills");
+            super::common::note_shadowed_skill(work, ID, &[dir.clone(), shared], &s.name);
+        }
+        write_skill(work, &target, &s, opts, ID)?;
+        wrote_any = true;
+    }
+    if wrote_any && env.scope == Scope::Project {
+        work.info(
+            ID,
+            "Hermes loads the skills of a project's .hermes/skills only once you run `hermes skills trust` in the repository (its root is the nearest folder with a .git); kitbag leaves that choice to you",
+        );
+    }
+    Ok(())
 }
 
 /// Hermes's gateway hooks (`hooks/<name>/HOOK.yaml`) and plugin hooks
