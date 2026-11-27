@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-11-28
+
 ### Added
 
 - Opt-in encrypted secrets bundle, first slice of #9 (follow-ups #136–#139). `kitbag capture --include secrets` (a bare capture never writes the bundle) writes the values it redacts (MCP env, header, argument and URL literals, and a literal OAuth `client_secret` that a bare capture leaves out) only to a sibling `secrets.age`, a map of `${VAR}` name to value encrypted with age, never into `kitbag.toml` or any plaintext file; `kitbag.toml` keeps the `${VAR}` references. It is encrypted to a passphrase (age's scrypt; `--secrets-passphrase-file PATH`, or a terminal prompt, never the command line) or to age or SSH public keys (`--secrets-recipient`, repeatable; age doesn't mix the two), written `0600` on Unix, and listed in a `.gitignore` that capture creates or extends. `kitbag apply --secrets-from PATH` decrypts a local bundle in memory to check it and to say which of the profile's variables it holds, and writes no value into any tool config, plan, diff, log or undo record (tools keep getting `${VAR}` references); it is refused for git sources (which never supply a bundle, and a `secrets.age` in a checkout is ignored) and with `--remote` (which also never copies `secrets.age` to the host). `kitbag secrets list [FILE|DIR]` prints variable names only. `kitbag doctor` fails on a plaintext secrets file in the profile directory (`secrets.json`, `secrets.decrypted`, `.env` ...) or a `secrets.age` that isn't age-encrypted, as it already did for a literal secret in `kitbag.toml`. Dedicated tests look for fake secrets and passphrases in the profile directory, the state (undo) directory, tool configs, stdout and stderr. Left for later (`Part of #9`): resolving values into tools that can't read env vars without reaching the undo record, an OS keychain or helper, `secrets set` / `rotate`, committing the encrypted file, opening a bundle on a `--remote` host. kitbag does not read the OS keychain, shell profiles or undocumented auth files (checked 2026-11-27) (#9)
@@ -311,7 +313,8 @@ All notable changes to this project are documented here. The format follows
 - `capture` with several tools (`--from all`, `detected` or a list) reports a tool whose config can't be read and captures the rest; it fails only if nothing could be read. A single `--from` still fails loudly.
 - `install.sh` and `install.ps1` download `kitbag-<target>.sha256`, the checksum name the release workflow uploads (found in the v0.1.0-rc.1 dry run).
 
-[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.10...HEAD
+[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.11...HEAD
+[0.1.11]: https://github.com/cargopete/kitbag/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/cargopete/kitbag/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/cargopete/kitbag/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/cargopete/kitbag/compare/v0.1.7...v0.1.8
