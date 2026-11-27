@@ -19,6 +19,7 @@ pub mod amp;
 pub mod antigravity;
 pub mod claude_code;
 pub mod claude_desktop;
+pub mod cline;
 pub mod codex;
 pub mod common;
 pub mod copilot;
@@ -28,6 +29,7 @@ pub mod grok_build;
 pub mod hermes;
 pub(crate) mod hook_files;
 pub mod opencode;
+pub mod roo;
 pub mod windsurf;
 pub mod zed;
 
@@ -98,6 +100,9 @@ impl Env {
 /// Environment variables that move tool configuration around.
 pub const LOCATION_VARS: &[&str] = &[
     "CLAUDE_CONFIG_DIR",
+    "CLINE_DIR",
+    "CLINE_DATA_DIR",
+    "CLINE_MCP_SETTINGS_PATH",
     "CODEX_HOME",
     "COPILOT_HOME",
     "HERMES_HOME",
@@ -484,13 +489,19 @@ pub fn all() -> &'static [&'static dyn Adapter] {
         &zed::Zed,
         &hermes::Hermes,
         &amp::Amp,
+        &cline::Cline,
+        &roo::Roo,
     ]
 }
 
 /// Other names accepted for a target id, as (alias, canonical id). Only ever
 /// used to read user input; output, state files and profiles use the
 /// canonical id.
-pub const ALIASES: &[(&str, &str)] = &[("claude", "claude-code"), ("grok", "grok-build")];
+pub const ALIASES: &[(&str, &str)] = &[
+    ("claude", "claude-code"),
+    ("grok", "grok-build"),
+    ("roo-code", "roo"),
+];
 
 /// The canonical id for `id`: an alias becomes the id it stands for, anything
 /// else is returned unchanged. Case-sensitive, like the ids themselves.

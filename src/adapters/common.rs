@@ -1253,6 +1253,40 @@ pub fn read_text_item(cap: &mut Captured, path: &Path, target: &str) -> Option<S
     }
 }
 
+/// Say which files in a tool's rules directory `dir` capture did not read
+/// (everything except `own`, the one file kitbag writes), so a user with rule
+/// files of their own sees they were left behind. Silent when there are none.
+pub fn note_unread_rule_files(
+    cap: &mut Captured,
+    target: &str,
+    dir: &Path,
+    own: Option<&Path>,
+    home: &Path,
+) {
+    if cap.escapes(dir, target) {
+        return;
+    }
+    let Ok(files) = crate::plan_fs::walk_files(dir, 200) else {
+        return;
+    };
+    let others: Vec<String> = files
+        .into_iter()
+        .filter(|rel| own != Some(crate::plan_fs::join_rel(dir, rel).as_path()))
+        .collect();
+    if others.is_empty() {
+        return;
+    }
+    cap.info(
+        target,
+        format!(
+            "{} rule file(s) in {} were not captured (kitbag carries instructions in one file; per-file rules are not supported on this target yet): {}",
+            others.len(),
+            crate::ui::tildify(dir, home),
+            others.join(", ")
+        ),
+    );
+}
+
 /// Read an instructions file: user content plus kitbag-managed blocks, with folded rules recovered.
 pub fn capture_instructions(cap: &mut Captured, path: &Path, target: &str) -> Result<()> {
     capture_instructions_from(cap, path, target, false).map(|_| ())

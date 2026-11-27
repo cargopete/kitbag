@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "project-db": {
+      "command": "node",
+      "args": ["tools/db-mcp.js"],
+      "env": { "DB_URL": "${env:DB_URL}" },
+      "watchPaths": ["tools/db-mcp.js"]
+    }
+  }
+}
