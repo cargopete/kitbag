@@ -509,16 +509,17 @@ block of `config.yaml`, where each event (`pre_tool_call`, `post_tool_call`, `pr
 `on_session_start` ...) has a list of `{matcher, command, timeout, fail_closed}` entries. Hermes
 documents no project hook file, so hooks are written at user scope only (at project scope the
 plan says so and writes nothing); `HERMES_HOME` is honoured. The neutral events it has an
-equivalent for are `session-start` (`on_session_start`), `session-end` (`on_session_finalize`,
-the teardown; Hermes's `on_session_end` fires after every turn, so it is `hermes:on_session_end`),
-`prompt-submit` (`pre_llm_call`, which Hermes's docs name as the counterpart of Claude Code's
-`UserPromptSubmit`), `pre-tool`, `post-tool`, `subagent-start`, `subagent-stop` and
-`post-compact` (`post_compaction`); `stop`, `post-tool-failure`, `notification`,
-`permission-request` and `pre-compact` have none and are reported, and its other events are
-`hermes:<event>` (`hermes:post_llm_call`). A matcher is written only for `pre_tool_call` and
+equivalent for are `session-start` (`on_session_start`), `prompt-submit` (`pre_llm_call`, which
+Hermes's docs name as the counterpart of Claude Code's `UserPromptSubmit`), `pre-tool`,
+`post-tool`, `subagent-start` and `subagent-stop`; `stop`, `post-tool-failure`, `notification`,
+`permission-request` and `pre-compact` have none and are reported, and so are `session-end` and
+`post-compact`, because Hermes's docs don't tie its `on_session_finalize` (teardown) or
+`post_compaction` to them. Its own events are `hermes:<event>`: `hermes:on_session_finalize`,
+`hermes:post_compaction`, `hermes:on_session_end` (which fires after every turn), or any other of its events, such as
+`hermes:post_llm_call`. A matcher is written only for `pre_tool_call` and
 `post_tool_call`, the events Hermes applies it to; its `fail_closed` (and Cursor's `failClosed`)
 is kept. kitbag edits `config.yaml` in place: the entries of an event it adds to are rewritten
-(comments inside that event's list go), and your other events, `hooks_auto_accept`, MCP servers
+(comments inside that event's list go, and your own entries there may be re-quoted), and your other events, `hooks_auto_accept`, MCP servers
 and comments stay; a layout it can't edit in place (for example `hooks:` written as a one-line
 flow mapping) is reported and left alone. Scripts go to `~/.hermes/agent-hooks/kitbag/`, the
 directory Hermes's docs suggest, and never to `~/.hermes/hooks/`, where Hermes loads gateway

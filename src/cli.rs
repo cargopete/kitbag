@@ -102,9 +102,9 @@ enum Cmd {
         dry_run: bool,
         /// Also capture what is left out by default. 'hooks': the hooks of the
         /// tools that have them (Claude Code, Cursor, Codex, Gemini CLI, Grok
-        /// Build, Antigravity, Copilot, Hermes), and the scripts they run (redacted like
-        /// everything else). Hooks run commands by themselves, so applying
-        /// them needs --apply-hooks
+        /// Build, Antigravity, Copilot, Hermes), and the scripts they run
+        /// (redacted like everything else). Hooks run commands by themselves,
+        /// so applying them needs --apply-hooks
         #[arg(long, value_enum, value_delimiter = ',', value_name = "WHAT")]
         include: Vec<Include>,
     },

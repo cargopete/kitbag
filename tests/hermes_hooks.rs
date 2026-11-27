@@ -303,9 +303,11 @@ fn events_hermes_names_differently_or_lacks_are_reported_not_guessed() {
     write(
         &sb.path("p/kitbag.toml"),
         "kitbag = 1\nname = \"p\"\n\n\
-         [[hooks]]\nevent = \"session-end\"\ncommand = \"echo end\"\n\n\
+         [[hooks]]\nevent = \"hermes:on_session_finalize\"\ncommand = \"echo end\"\n\n\
          [[hooks]]\nevent = \"prompt-submit\"\ncommand = \"echo prompt\"\n\n\
-         [[hooks]]\nevent = \"post-compact\"\ncommand = \"echo compacted\"\n\n\
+         [[hooks]]\nevent = \"hermes:post_compaction\"\ncommand = \"echo compacted\"\n\n\
+         [[hooks]]\nevent = \"session-end\"\ncommand = \"echo not guessed\"\n\n\
+         [[hooks]]\nevent = \"post-compact\"\ncommand = \"echo not guessed either\"\n\n\
          [[hooks]]\nevent = \"hermes:on_session_end\"\ncommand = \"echo turn\"\n\n\
          [[hooks]]\nevent = \"session-start\"\nmatcher = \"startup\"\ncommand = \"echo start\"\n\n\
          [[hooks]]\nevent = \"post-tool-failure\"\ncommand = \"echo failed\"\n\n\
@@ -314,6 +316,8 @@ fn events_hermes_names_differently_or_lacks_are_reported_not_guessed() {
     let prof = sb.path("p").display().to_string();
     apply_hooks(&sb, &prof).stdout(
         contains("'post-tool-failure' has no equivalent event in Hermes Agent")
+            .and(contains("'session-end' has no equivalent event"))
+            .and(contains("'post-compact' has no equivalent event"))
             .and(contains(
                 "'claude-code:FileChanged' has no equivalent event",
             ))

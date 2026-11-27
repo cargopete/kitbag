@@ -378,13 +378,11 @@ pub(crate) const HERMES: Format = Format {
     name: "Hermes Agent",
     events: &[
         ("session-start", "on_session_start"),
-        ("session-end", "on_session_finalize"),
         ("prompt-submit", "pre_llm_call"),
         ("pre-tool", "pre_tool_call"),
         ("post-tool", "post_tool_call"),
         ("subagent-start", "subagent_start"),
         ("subagent-stop", "subagent_stop"),
-        ("post-compact", "post_compaction"),
     ],
     only: &[
         "transform_tool_result",
@@ -404,6 +402,8 @@ pub(crate) const HERMES: Format = Format {
         "on_interim_message",
         "on_session_open",
         "on_session_end",
+        "on_session_finalize",
+        "post_compaction",
         "on_session_reset",
         "on_session_delete",
         "post_curator_run",
@@ -1826,9 +1826,16 @@ mod tests {
     fn hermes_events_are_the_documented_equivalents_and_the_rest_are_its_own() {
         assert_eq!(HERMES.native_event("pre-tool"), Some("pre_tool_call"));
         assert_eq!(HERMES.native_event("prompt-submit"), Some("pre_llm_call"));
+        // The docs don't tie these two to `session-end` / `post-compact`.
+        assert_eq!(HERMES.native_event("session-end"), None);
+        assert_eq!(HERMES.native_event("post-compact"), None);
         assert_eq!(
-            HERMES.native_event("session-end"),
+            HERMES.native_event("hermes:on_session_finalize"),
             Some("on_session_finalize")
+        );
+        assert_eq!(
+            HERMES.neutral_event("post_compaction").as_deref(),
+            Some("hermes:post_compaction")
         );
         // `on_session_end` fires after every turn, so it is not `session-end`.
         assert_eq!(
@@ -1846,6 +1853,8 @@ mod tests {
             "notification",
             "pre-compact",
             "permission-request",
+            "session-end",
+            "post-compact",
         ] {
             assert_eq!(HERMES.native_event(e), None, "{e}");
         }
