@@ -78,7 +78,7 @@ fn tilde_join(rest: &str, suffix: &Path) -> String {
     if !rest.is_empty() {
         p.push(rest);
     }
-    if suffix.as_os_str().len() > 0 {
+    if !suffix.as_os_str().is_empty() {
         p.push(suffix);
     }
     let s = p.to_string_lossy().replace('\\', "/");
