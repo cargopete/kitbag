@@ -1,0 +1,21 @@
+// My Amp settings
+{
+  "amp.notifications.enabled": true, // keep
+  "amp.mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest", "--headless"],
+      "env": { "API_KEY": "sk-FAKEplaywrightkey0123456789abcdef", "REGION": "eu" },
+      "includeTools": ["browser_*"],
+    },
+    "sourcegraph": {
+      "url": "${SRC_ENDPOINT}/.api/mcp/v1",
+      "headers": { "Authorization": "token ${SRC_ACCESS_TOKEN}" }
+    },
+    "orb-only": {
+      "url": "https://mcp.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${amp:id-token}" }
+    },
+    "linear": { "url": "https://mcp.linear.app/sse", "oauth": { "clientId": "abc" } },
+  },
+}

@@ -15,6 +15,7 @@ use crate::model::Profile;
 use crate::plan_fs::PlanFs;
 use crate::secrets::{Redaction, RenderState};
 
+pub mod amp;
 pub mod antigravity;
 pub mod claude_code;
 pub mod claude_desktop;
@@ -482,6 +483,7 @@ pub fn all() -> &'static [&'static dyn Adapter] {
         &windsurf::Windsurf,
         &zed::Zed,
         &hermes::Hermes,
+        &amp::Amp,
     ]
 }
 

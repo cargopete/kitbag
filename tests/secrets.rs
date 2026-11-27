@@ -32,6 +32,7 @@ const ALL: &[&str] = &[
     "windsurf",
     "zed",
     "hermes",
+    "amp",
 ];
 
 #[test]

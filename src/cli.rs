@@ -77,7 +77,7 @@ enum Cmd {
     /// Capture your current setup into a profile (secrets are redacted)
     Capture {
         /// Targets to read: ids (comma-separated: claude-code (alias: claude), cursor,
-        /// codex, gemini-cli, claude-desktop, antigravity, opencode, copilot, grok-build, windsurf, zed, hermes
+        /// codex, gemini-cli, claude-desktop, antigravity, opencode, copilot, grok-build, windsurf, zed, hermes, amp
         /// (alias: grok)), 'all' or 'detected'
         #[arg(long, value_name = "IDS", default_value = "detected")]
         from: String,
@@ -292,7 +292,7 @@ struct ToggleArgs {
     profile: Option<String>,
     /// Only for these tools: ids, comma-separated (claude-code (alias: claude),
     /// cursor, codex, gemini-cli, claude-desktop, antigravity, opencode,
-    /// copilot, grok-build, windsurf, zed, hermes). Without it, every tool
+    /// copilot, grok-build, windsurf, zed, hermes, amp). Without it, every tool
     #[arg(long, value_name = "IDS", value_delimiter = ',')]
     on: Vec<String>,
 }
@@ -317,7 +317,7 @@ struct Place {
 #[derive(Args, Debug, Clone)]
 struct TargetArgs {
     /// Targets to write: ids (comma-separated: claude-code (alias: claude), cursor,
-    /// codex, gemini-cli, claude-desktop, antigravity, opencode, copilot, grok-build, windsurf, zed, hermes
+    /// codex, gemini-cli, claude-desktop, antigravity, opencode, copilot, grok-build, windsurf, zed, hermes, amp
     /// (alias: grok)), 'all' or 'detected'
     #[arg(long, value_name = "IDS", default_value = "detected")]
     to: String,
@@ -348,7 +348,7 @@ impl TargetArgs {
 #[derive(Args, Debug, Clone)]
 struct StatusArgs {
     /// Targets to compare: ids (comma-separated: claude-code (alias: claude),
-    /// cursor, codex, gemini-cli, claude-desktop, antigravity, opencode, copilot, grok-build, windsurf, zed, hermes
+    /// cursor, codex, gemini-cli, claude-desktop, antigravity, opencode, copilot, grok-build, windsurf, zed, hermes, amp
     /// (alias: grok)), 'all' or 'detected'
     /// [default: detected; without PROFILE, every target applied to]
     #[arg(long, value_name = "IDS")]
@@ -383,7 +383,7 @@ struct SyncArgs {
     /// Pull this target's edits to the managed instructions and rules back into
     /// the profile (redacted, like capture), then apply them to the others;
     /// ID is a target id (claude-code (alias: claude), cursor, codex, gemini-cli,
-    /// claude-desktop, antigravity, opencode, copilot, grok-build (alias: grok), windsurf, zed, hermes)
+    /// claude-desktop, antigravity, opencode, copilot, grok-build (alias: grok), windsurf, zed, hermes, amp)
     #[arg(long, value_name = "ID")]
     from: Option<String>,
     /// With --from: also pull in what is only in that tool ('tool only' in

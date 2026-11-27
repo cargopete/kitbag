@@ -1,0 +1,7 @@
+{
+  "amp.mcpServers": {
+    "project-db": { "command": "node", "args": ["tools/db-mcp.js"], "env": { "DB_URL": "${DB_URL}" } },
+    "playwright": { "command": "npx", "args": ["-y", "@playwright/mcp@latest"] }
+  },
+  "amp.mcpTrustedServers": ["project-db"]
+}
