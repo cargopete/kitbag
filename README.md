@@ -1957,7 +1957,7 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   one, since Hermes loads that before `AGENTS.md`, otherwise to `AGENTS.md`, with a warning when
   an `AGENTS.override.md` would shadow it. `.env`, `auth.json` and `mcp-tokens/` are never read
   or written (capture warns when it finds them), and Hermes's sessions, profiles and
-  skill bundles are not carried, and its memories only with `--include memory` (capture says which of them it found and left). Skills
+  skill bundles are not carried, and its memories only with `--include memory` (capture says which of the others it found and left). Skills
   (docs: hermes-agent.nousresearch.com/docs/user-guide/features/skills, checked 2026-11-27)
   go to `$HERMES_HOME/skills/<name>/` ("the primary directory and source of truth") and, in a
   project, to `.hermes/skills/<name>/`, Hermes's own project folder, never to `.agents/skills/`,

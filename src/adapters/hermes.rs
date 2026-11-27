@@ -254,15 +254,9 @@ impl Adapter for Hermes {
                 );
             }
             let mut stores = present(OTHER_STORES);
-            // Its memory files are carried, but only when asked for.
-            if let Some(i) = stores.iter().position(|s| *s == "memories") {
-                stores.remove(i);
-                if !env.include_memory {
-                    cap.info(
-                        ID,
-                        "Hermes memories not captured: pass --include memory to carry MEMORY.md and USER.md",
-                    );
-                }
+            // Its memory files are carried when asked for (`--include memory`).
+            if env.include_memory {
+                stores.retain(|s| s != "memories");
             }
             if !stores.is_empty() {
                 cap.info(
