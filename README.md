@@ -1171,9 +1171,11 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   `permissions` / `permission`, `steps`, `hidden`, `color`, ...) and its body is the system
   prompt. Keys other tools use (`argument-hint`, `allowed-tools`, a `tools` list, `permissionMode`,
   `hooks`, a `model` alias such as `sonnet`) are left out with a note, never translated. Agents
-  and commands defined inside `opencode.json`, opencode 1's `mode/` agents and plugins are not
-  carried. opencode also reads `.claude/skills`, so with Claude Code targeted too a skill is
-  visible from both folders.
+  and commands defined inside `opencode.json` and opencode 1's `mode/` agents are not carried
+  (plugins are tracked in #12, hooks in #13). That is everything opencode's docs describe for
+  MCP servers, instructions, rules, commands, skills and agents. opencode also reads
+  `.claude/skills` and `~/.claude/skills` (and `.agents/skills`, `~/.agents/skills`), so with
+  Claude Code targeted too a skill is visible from both folders.
 - **Grok Build** also reads Claude Code's files (`CLAUDE.md`, `.claude/rules`, `.claude/skills`,
   `.claude/commands`, `.mcp.json`) and `~/.agents/skills` by default. The plan notes when the
   same instructions would load twice, and that Codex's folded rules in a shared `AGENTS.md` sit
