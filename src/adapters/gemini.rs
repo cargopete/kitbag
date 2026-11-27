@@ -17,7 +17,7 @@ use super::common::{
     add_command, capture_instructions, capture_skills_dir, claim_name, import_server,
     merge_json_servers, merge_json_settings, name_from_rel, pick_settings, read_text_item,
     render_server, safe_settings, server_entries, server_from_json, servers_for,
-    skill_with_required_frontmatter, str_of, write_instructions, write_skill,
+    skill_with_required_frontmatter, str_of, string_list, write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
@@ -148,6 +148,13 @@ impl Adapter for GeminiCli {
                     import_server(&mut cap, ID, name, s, true);
                 }
             }
+            // `mcp.excluded` lists servers Gemini CLI won't connect to.
+            let excluded = string_list(doc.get("mcp").and_then(|m| m.get("excluded")));
+            for n in excluded {
+                if let Some(s) = cap.profile.mcp_servers.get_mut(&n) {
+                    s.disabled = true;
+                }
+            }
             if let Value::Object(doc) = &doc {
                 pick_settings(&mut cap, ID, doc);
                 if let Some(f) = doc.get("context").and_then(|c| c.get("fileName"))
@@ -228,6 +235,13 @@ impl Adapter for GeminiCli {
             }
             servers.push((name.clone(), Value::Object(def)));
         }
+        // Gemini CLI documents no flag on a server entry. It does document
+        // `mcp.excluded` in settings.json, a list of servers it won't connect
+        // to, so at user scope a server the profile disables is listed there
+        // and its entry stays. A project's settings.json is the file shared
+        // with a team, so there the entry is removed as before.
+        let off_names =
+            (env.scope == Scope::User).then(|| super::common::take_skipped_servers(work, ID));
         merge_json_servers(
             work,
             &p.settings,
@@ -239,6 +253,22 @@ impl Adapter for GeminiCli {
         )?;
         let settings = safe_settings(profile, ID, work);
         merge_json_settings(work, &p.settings, &settings, opts, ID)?;
+        if let Some(skipped) = off_names {
+            let enabled: Vec<String> = servers.iter().map(|(n, _)| n.clone()).collect();
+            super::common::sync_off_list(
+                work,
+                opts,
+                ID,
+                (&p.settings, &["mcpServers"]),
+                &super::common::OffList {
+                    path: &p.settings,
+                    key: &["mcp", "excluded"],
+                    label: "mcp.excluded",
+                },
+                &skipped,
+                &enabled,
+            )?;
+        }
 
         write_instructions(work, &p.instructions, profile, opts, true, ID)?;
         if profile.rules.iter().any(|r| !r.globs.is_empty()) {

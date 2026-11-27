@@ -57,9 +57,10 @@ use serde_json::{Map, Value, json};
 
 use super::common::{
     add_command, add_rule, capture_instructions, capture_md_files, capture_skills_dir,
-    import_server, merge_json_servers, note_uncaptured, render_server, rule_from_lead_line,
-    rule_lead_line, server_entries, server_from_json, servers_for, skill_name_mismatch,
-    skill_with_required_frontmatter, write_command, write_instructions, write_rule, write_skill,
+    import_server, merge_json_servers_off, note_uncaptured, render_server, rule_from_lead_line,
+    rule_lead_line, server_entries, server_from_json, servers_for, set_disabled_true,
+    skill_name_mismatch, skill_with_required_frontmatter, write_command, write_instructions,
+    write_rule, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Os, Scope, Support, Work};
 use crate::edit::json::parse_value;
@@ -472,14 +473,14 @@ impl Adapter for Roo {
             }
             servers.push((name.clone(), Value::Object(def)));
         }
-        merge_json_servers(
+        merge_json_servers_off(
             work,
-            &file,
-            &["mcpServers"],
+            (&file, &["mcpServers"]),
             &servers,
             MANAGED_KEYS,
             opts,
             ID,
+            Some((&set_disabled_true, "disabled: true")),
         )?;
         if env.scope == Scope::User && !servers.is_empty() {
             let hosts = hosts_with_roo(env);

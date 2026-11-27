@@ -22,9 +22,9 @@ use serde_json::{Map, Value, json};
 
 use super::common::{
     MdKind, add_agent, capture_instructions, capture_markdown_dir, capture_skills_dir, claim_name,
-    import_server, keep_shared_servers, merge_json_servers, merge_json_settings, name_from_rel,
-    pick_settings, read_text_item, render_server, safe_settings, server_entries, server_from_json,
-    servers_for, write_agent, write_instructions, write_skill,
+    import_server, merge_json_servers, merge_json_settings, name_from_rel, pick_settings,
+    read_text_item, render_server, safe_settings, server_entries, server_from_json, servers_for,
+    write_agent, write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
@@ -48,6 +48,10 @@ struct Paths {
     skills: PathBuf,
     agents: PathBuf,
     settings: PathBuf,
+    /// `.claude/settings.local.json`, where a project's servers are rejected
+    /// (`disabledMcpjsonServers`): yours alone, not shared with the team.
+    /// There is no such file at user scope, where the servers are not in `.mcp.json`.
+    local_settings: Option<PathBuf>,
 }
 
 fn config_dir(env: &Env) -> PathBuf {
@@ -74,6 +78,7 @@ fn paths(env: &Env) -> Paths {
                 skills: d.join("skills"),
                 agents: d.join("agents"),
                 settings: d.join("settings.json"),
+                local_settings: None,
             }
         }
         Scope::Project => {
@@ -92,6 +97,7 @@ fn paths(env: &Env) -> Paths {
                 skills: p.join(".claude").join("skills"),
                 agents: p.join(".claude").join("agents"),
                 settings: p.join(".claude").join("settings.json"),
+                local_settings: Some(p.join(".claude").join("settings.local.json")),
             }
         }
     }
@@ -504,6 +510,17 @@ impl Adapter for ClaudeCode {
                 import(&mut cap, name, def);
             }
         }
+        if let Some(local) = &p.local_settings {
+            // Servers of the project's .mcp.json that its settings reject.
+            for file in [&p.settings, local] {
+                super::common::mark_disabled_from_list(
+                    &mut cap,
+                    file,
+                    &["disabledMcpjsonServers"],
+                    ID,
+                )?;
+            }
+        }
         if env.scope == Scope::Project {
             // "local"-scope servers live in ~/.claude.json, keyed by project path.
             let cj = claude_json(env);
@@ -606,10 +623,30 @@ impl Adapter for ClaudeCode {
             let s = render_server(s, RefStyle::Dollar, env, work);
             servers.push((name.clone(), server_json(&s)));
         }
-        if env.scope == Scope::Project {
-            // GitHub Copilot reads the project .mcp.json too.
-            keep_shared_servers(work, profile, opts, ID, "copilot", "GitHub Copilot", &p.mcp);
-        }
+        // A project's .mcp.json servers have a switch of their own,
+        // `disabledMcpjsonServers`: a server the profile disables here stays
+        // in the file (GitHub Copilot reads it too) and is rejected in your
+        // local settings. The servers in ~/.claude.json have no such global
+        // switch (the `/mcp` toggle is kept per project), so those are removed.
+        // When GitHub Copilot, which has no such switch for a project, is
+        // applied too and the profile disables the server for it as well,
+        // nothing wants the entry any more and it is removed.
+        let off_names = p.local_settings.as_ref().map(|_| {
+            let (listed, removed): (Vec<String>, Vec<String>) =
+                super::common::take_skipped_servers(work, ID)
+                    .into_iter()
+                    .partition(|n| {
+                        !(work.targets.iter().any(|t| t == "copilot")
+                            && profile
+                                .mcp_servers
+                                .get(n)
+                                .is_some_and(|s| !s.applies_to("copilot")))
+                    });
+            for n in removed {
+                work.skipped_servers.push((ID.to_string(), n));
+            }
+            listed
+        });
         merge_json_servers(
             work,
             &p.mcp,
@@ -619,6 +656,22 @@ impl Adapter for ClaudeCode {
             opts,
             ID,
         )?;
+        if let (Some(local), Some(skipped)) = (&p.local_settings, off_names) {
+            let enabled: Vec<String> = servers.iter().map(|(n, _)| n.clone()).collect();
+            super::common::sync_off_list(
+                work,
+                opts,
+                ID,
+                (&p.mcp, &["mcpServers"]),
+                &super::common::OffList {
+                    path: local,
+                    key: &["disabledMcpjsonServers"],
+                    label: "disabledMcpjsonServers",
+                },
+                &skipped,
+                &enabled,
+            )?;
+        }
 
         write_instructions(work, &p.instructions, profile, opts, false, ID)?;
 

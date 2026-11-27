@@ -247,8 +247,9 @@ disabled_on = ["cursor"]
 
 The plan notes each server it skips (`MCP server 'playwright' skipped on cursor: disabled in
 profile`). If kitbag applied a server to a tool earlier and the profile now disables it there,
-apply removes it from that tool, with a backup, so `kitbag undo` puts it back. It only does so
-when kitbag's own records (`applied-servers.json` in the state directory) show that an apply of
+apply turns it off with the tool's own switch where the tool has one (table below), keeping the
+entry, and removes it otherwise. Either way it makes a backup, so `kitbag undo` puts it back.
+It only does so when kitbag's own records (`applied-servers.json` in the state directory) show that an apply of
 the same profile (the same name, from the same directory or git URL) wrote that entry and it
 hasn't been edited since. A git URL is compared as written; only shorthand such as
 `github:owner/repo` is expanded (to `https://github.com/owner/repo.git`), so
@@ -261,10 +262,34 @@ not stored, and the file is created `0600`. A server you added by hand, one anot
 edited stays, and the plan says why. From a git source, removing a server needs the same
 opt-in as adding one (`--allow-git-mcp <names>` or `--trust-source`); without it the plan lists
 it under "MCP servers not removed" and leaves it. A server that becomes enabled for a tool again
-is an addition like any other. `capture --force` into an existing profile keeps the `targets`
+is an addition like any other: the switch is cleared. `capture --force` into an existing profile keeps the `targets`
 and `disabled_on` of the servers it captures again, and keeps the profile's servers it found in
 no tool (disabled everywhere, or for a tool not installed on this machine), with a note naming
 them; `--prune` drops those instead.
+
+The switch each tool has, from its own documentation (the entry stays and is marked, the
+plan lists it under "MCP servers turned off", and `status` reads it as in sync):
+
+| Tool | Where the server is turned off |
+| --- | --- |
+| Codex, Grok Build | `enabled = false` on the `[mcp_servers.<name>]` table |
+| opencode | `disabled: true` on the entry (opencode 2); `enabled: false` in opencode 1's layout |
+| Cline, Roo Code, Antigravity | `disabled: true` on the entry |
+| Zed, Hermes Agent | `enabled: false` on the entry |
+| Claude Code, in a project | the name in `disabledMcpjsonServers` of `.claude/settings.local.json` ("Reject specific servers from a project's `.mcp.json`"); the entry stays in `.mcp.json` |
+| Gemini CLI, user scope | the name in `mcp.excluded` of `~/.gemini/settings.json`; Gemini's docs list no `disabled` key on a server entry |
+| GitHub Copilot CLI, user scope | the name in `disabledMcpServers` of `$COPILOT_HOME/settings.json` ("configured but not started") |
+
+A name kitbag puts in one of those lists is taken out again when the server is enabled, and only
+if kitbag's record says it put it there: a name you listed yourself stays. Capture reads the
+same switches back, so a server off in some tools and on in others comes back with a
+`disabled_on` naming those tools, and one that every tool that has it keeps off with
+`disabled = true`. The other tools have no documented switch kitbag can write, so the entry is
+removed as before: Claude Code at user scope (its `/mcp` toggle is kept per project in
+`~/.claude.json`), Gemini CLI and Copilot at project scope (the settings file there is the one a
+team shares), Cursor, Claude Desktop, Windsurf, Continue and Amp. Gemini CLI also keeps its own
+state in `~/.gemini/mcp-server-enablement.json`, whose format its docs don't give, so kitbag
+doesn't write it.
 
 **Per-tool rules, commands, skills and agents.** The same `targets` / `disabled_on` (and the
 older `only` / `except`, with the same rules and warnings) work on a rule, command, skill or
@@ -316,9 +341,10 @@ an error (`claude` is read as `claude-code`). Without `--on` an item is turned o
 tool, written as a `disabled_on` naming each one (a tool added by a later kitbag is not in it);
 enabling clears the list. Comments and everything else in the file stay as they are, `only` /
 `except` are rewritten as `targets` / `disabled_on`, and the result is checked before the file is
-replaced. Hooks have no per-tool setting and are not handled. Mapping a disabled server to a
-tool's own off switch (`enabled = false` ...) is not done yet: apply still leaves it out of that
-tool.
+replaced. Hooks have no per-tool setting and are not handled. When you run `kitbag apply`
+afterwards, a server you turned off for a tool that has its own switch is kept there and
+switched off (see the table above) instead of removed; enabling it again switches it back on.
+Rules, commands, skills and agents have no documented switch, so their files are removed.
 
 **Env references.** `${NAME}` takes its value from the environment. `${NAME:-fallback}`
 falls back to a non-secret default (it is written to disk wherever the variable is unset, so
@@ -768,7 +794,8 @@ after the plugin directory is gone.
 
 Apply is additive: removing a server from the profile does not remove it from tools you
 already applied to. Use `kitbag undo`, or remove it in the tool. (Disabling a server for a
-tool with `targets` / `disabled_on` does remove it there, if kitbag added it; see
+tool with `targets` / `disabled_on` does remove it there, or turn it off where the tool has its
+own switch, if kitbag added it; see
 "Per-tool MCP servers" and "Per-tool rules, commands, skills and agents".)
 
 ## Keeping instructions in sync

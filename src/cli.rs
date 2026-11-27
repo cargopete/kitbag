@@ -269,7 +269,8 @@ enum Cmd {
 const TOGGLE_HELP: &str = "\
 Only the profile's files change: its 'targets' / 'disabled_on' on the item.
 Nothing is written to a tool until you run 'kitbag apply' (which then skips the
-item on a tool it is off for, and removes what kitbag wrote there earlier).
+item on a tool it is off for, and removes what kitbag wrote there earlier, or
+turns an MCP server off with the tool's own switch where it has one).
 
 The profile must be a directory on this machine; to change one from a git
 source, copy it first. A name used by more than one kind of item needs a
@@ -1222,6 +1223,22 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
             )
         );
         for s in &plan.removed_servers {
+            println!(
+                "  {}  {}",
+                shown(&s.name),
+                paint(DIM, format!("({})", s.targets.join(", ")))
+            );
+        }
+    }
+    if !plan.turned_off_servers.is_empty() {
+        println!(
+            "\n{}",
+            paint(
+                YELLOW,
+                "MCP servers turned off (disabled for these tools in the profile; kitbag added them there before, so they stay in the tool's config, marked off):"
+            )
+        );
+        for s in &plan.turned_off_servers {
             println!(
                 "  {}  {}",
                 shown(&s.name),
@@ -2357,10 +2374,37 @@ fn inventory_rows(
                 .filter(|(_, s)| !s.applies_to(id))
                 .map(|(n, _)| n)
             {
-                if !present
-                    .as_ref()
-                    .is_some_and(|p| p.mcp_servers.contains_key(n))
-                {
+                let Some(tool_entry) = present.as_ref().and_then(|p| p.mcp_servers.get(n)) else {
+                    continue;
+                };
+                // Already off with the tool's own flag or list: nothing to do.
+                if tool_entry.disabled {
+                    disabled_rows.push(StatusRow {
+                        target: id.to_string(),
+                        item: format!("mcp {n}"),
+                        path: None,
+                        state: State::InSync,
+                        detail: Some(
+                            "disabled for this tool in the profile; turned off in the tool"
+                                .to_string(),
+                        ),
+                    });
+                    continue;
+                }
+                let turns_off = plan
+                    .turned_off_servers
+                    .iter()
+                    .any(|s| s.name == *n && s.targets.iter().any(|t| t == id));
+                if turns_off {
+                    disabled_rows.push(StatusRow {
+                        target: id.to_string(),
+                        item: format!("mcp {n}"),
+                        path: None,
+                        state: State::Changed,
+                        detail: Some(
+                            "disabled for this tool in the profile; apply turns it off".to_string(),
+                        ),
+                    });
                     continue;
                 }
                 let removes = plan

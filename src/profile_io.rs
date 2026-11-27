@@ -821,6 +821,11 @@ pub fn keep_targeting(new: &mut Profile, old: &Profile) -> Vec<String> {
         }
         s.targets.clone_from(&o.targets);
         s.disabled_on.clone_from(&o.disabled_on);
+        // A server kitbag turned off in one tool reads back as disabled when
+        // that tool alone is captured; the targeting already says so.
+        if s.disabled && !o.disabled {
+            s.disabled = false;
+        }
         kept.push(name.clone());
     }
     kept

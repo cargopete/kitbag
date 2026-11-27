@@ -127,14 +127,19 @@ fn a_server_only_for_copilot_stays_in_mcp_json() {
 
 #[test]
 fn each_target_alone_still_removes_what_it_added() {
-    // Claude Code only: Copilot never used the file, so the removal goes ahead.
+    // Claude Code only: it has a switch for a project server, so the entry
+    // stays in the file and is rejected in the local settings instead.
     let sb = Sandbox::empty();
     write_profile(&sb, "");
     apply_project(&sb, "claude-code");
     write_profile(&sb, "disabled_on = [\"claude-code\"]\n");
     let out = apply_project(&sb, "claude-code");
-    assert!(!has(&sb, "heavy"), "{out}");
-    assert!(out.contains("removed from"), "{out}");
+    assert!(has(&sb, "heavy"), "{out}");
+    assert!(out.contains("turned off"), "{out}");
+    assert_eq!(
+        sb.json("project/.claude/settings.local.json")["disabledMcpjsonServers"],
+        serde_json::json!(["heavy"])
+    );
 
     // Copilot only, the same.
     let sb = Sandbox::empty();

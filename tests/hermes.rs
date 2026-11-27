@@ -788,7 +788,7 @@ fn apply_to_hermes_then_undo_through_the_cli() {
 }
 
 #[test]
-fn a_server_the_profile_disables_for_hermes_is_removed_only_if_kitbag_added_it() {
+fn a_server_the_profile_disables_for_hermes_is_turned_off_only_if_kitbag_added_it() {
     let sb = Sandbox::empty();
     let write = |extra: &str| {
         fs::create_dir_all(sb.path("prof")).unwrap();
@@ -814,12 +814,27 @@ fn a_server_the_profile_disables_for_hermes_is_removed_only_if_kitbag_added_it()
         .args(["apply", "prof", "--to", "hermes", "--yes"])
         .assert()
         .success();
+    // Hermes has `enabled: false`, so the entry stays, turned off.
     let text = sb.read(CONFIG);
-    assert!(!text.contains("docs:"), "{text}");
+    assert!(text.contains("docs:"), "{text}");
+    let docs = text.split("docs:").nth(1).unwrap();
+    assert!(docs.contains("enabled: false"), "{text}");
     assert!(
         text.starts_with("# top\nmcp_servers:\n  mine:\n    command: mine\n"),
         "{text}"
     );
+    // Enabling it again clears the flag.
+    write("");
+    sb.cli()
+        .args(["apply", "prof", "--to", "hermes", "--yes"])
+        .assert()
+        .success();
+    assert!(!sb.read(CONFIG).contains("enabled"), "{}", sb.read(CONFIG));
+    write("disabled_on = [\"hermes\"]\n");
+    sb.cli()
+        .args(["apply", "prof", "--to", "hermes", "--yes"])
+        .assert()
+        .success();
     // `mine` was the user's own: disabling it leaves it, with a note.
     write("disabled_on = [\"hermes\"]\n");
     let fresh = fs::read_to_string(sb.path("prof/kitbag.toml"))

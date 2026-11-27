@@ -241,6 +241,9 @@ pub struct Work {
     pub skipped_servers: Vec<(String, String)>,
     /// (target, server name) of MCP server entries the plan removes.
     pub removed_servers: Vec<(String, String)>,
+    /// (target, server name) of MCP server entries the plan keeps but turns
+    /// off through the tool's own flag, because the profile disables them there.
+    pub turned_off_servers: Vec<(String, String)>,
     /// (target, server name) of MCP server entries a git-sourced profile
     /// would remove, held back for lack of `--allow-git-mcp`.
     pub withheld_removals: Vec<(String, String)>,
@@ -295,6 +298,8 @@ pub struct ServerWrite {
     pub path: PathBuf,
     pub name: String,
     pub hash: Option<String>,
+    /// The entry stays and the tool's own list switches it off.
+    pub off: bool,
 }
 
 /// One hook entry a plan writes, with the scripts that go with it.

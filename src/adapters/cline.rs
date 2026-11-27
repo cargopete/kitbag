@@ -52,10 +52,10 @@ use serde_json::{Map, Value, json};
 
 use super::common::{
     Resolver, add_command, add_rule, capture_instructions, capture_md_files, capture_skills_dir,
-    dir_holding, import_server, merge_json_servers, note_shadowed_skill, note_uncaptured,
+    dir_holding, import_server, merge_json_servers_off, note_shadowed_skill, note_uncaptured,
     rule_from_lead_line, rule_lead_line, server_entries, server_from_json, servers_for,
-    skill_name_mismatch, skill_with_required_frontmatter, write_command, write_instructions,
-    write_rule, write_skill,
+    set_disabled_true, skill_name_mismatch, skill_with_required_frontmatter, write_command,
+    write_instructions, write_rule, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
@@ -345,14 +345,14 @@ impl Adapter for Cline {
     ) -> Result<()> {
         if let Some(file) = mcp_file(env) {
             let servers = mcp_servers(profile, env, opts, work);
-            merge_json_servers(
+            merge_json_servers_off(
                 work,
-                &file,
-                &["mcpServers"],
+                (&file, &["mcpServers"]),
                 &servers,
                 MANAGED_KEYS,
                 opts,
                 ID,
+                Some((&set_disabled_true, "disabled: true")),
             )?;
         } else if !profile.mcp_servers.is_empty() {
             work.info(
