@@ -339,10 +339,13 @@ fn a_layout_that_cannot_be_edited_is_reported_and_left_alone() {
     let env = sb.env(Scope::User);
     let plan = plan(&profile(), &["continue"], &env);
     assert!(plan.changes.is_empty(), "{:?}", plan.changes);
-    assert!(said(
-        &plan.notes,
-        "nothing written to ~/.continue/config.yaml"
-    ));
+    // tildify uses the OS separator, so Windows shows ~\.continue\config.yaml.
+    let shown = format!(
+        "nothing written to ~{}.continue{}config.yaml",
+        std::path::MAIN_SEPARATOR,
+        std::path::MAIN_SEPARATOR
+    );
+    assert!(said(&plan.notes, &shown), "{:?} (looked for {shown})", plan.notes);
     assert_eq!(sb.read(CONFIG), flow);
 }
 
