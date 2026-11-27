@@ -10,6 +10,10 @@ All notable changes to this project are documented here. The format follows
 
 - The README and the `antigravity` adapter notes no longer say Antigravity's hooks aren't carried (they have been since hooks landed for it), and the workflows note names the two global directories Google's migration guide scans. Checked against Antigravity's current docs (MCP, rules, skills, workflows): MCP servers, instructions, rules and skills at user and project scope are what they document, and its workflows are deprecated in favour of skills with two conflicting global directories, so the `antigravity` target is complete for its design; agents, hooks and plugins are tracked in #14, #13 and #12 (#27).
 
+### Added
+
+- The `zed` target carries skills, at user and project scope, as far as Zed's docs go (zed.dev/docs/ai/skills, checked 2026-11-27). Skills are written to `~/.agents/skills/<name>/` and a project's `.agents/skills/<name>/` with their bundled files, the only folders the docs name (Zed has none of its own, and reads no other tool's folder such as `.claude/skills`, which kitbag leaves alone), and capture reads the same two. A missing `name` or `description` is added, a name Zed would not load (lowercase letters, digits and single hyphens, up to 64) is skipped with a warning, a name that differs from its folder or a description over 1,024 characters is warned about, and the plan says Zed loads a project's skills only in a trusted worktree. A second apply is up to date, apply is additive and undo removes only the files kitbag wrote; `targets` and `disabled_on` work as for the other tools. Applying `zed` and `amp` to a project writes one copy of a skill to `.agents/skills/`, with a warning when the skill declares its own MCP servers, which kitbag leaves out for Amp. Zed's docs describe no rules file and no commands folder, so rules and commands are still skipped for Zed and the plan says so; the Rules Library lives in Zed's own database, which kitbag never reads or writes, and capture says that too. Zed hooks and agents are left for #13 and #14 (#21)
+
 ## [0.1.9] - 2026-11-27
 
 ### Added

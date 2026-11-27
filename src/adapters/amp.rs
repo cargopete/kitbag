@@ -203,7 +203,7 @@ fn command_as_skill(c: &crate::model::Command) -> Skill {
 
 /// `skill` without the MCP servers it declares itself: `mcp.json` and the
 /// `mcpServers` frontmatter key. Says which it dropped.
-fn without_skill_mcp(skill: &Skill) -> (Skill, Vec<&'static str>) {
+pub(super) fn without_skill_mcp(skill: &Skill) -> (Skill, Vec<&'static str>) {
     let mut s = skill.clone();
     let mut dropped = Vec::new();
     s.files.retain(|f| {
