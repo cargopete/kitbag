@@ -84,6 +84,7 @@ impl Sandbox {
                 .collect::<HashMap<_, _>>(),
             locations: HashMap::new(),
             os: Os::Linux,
+            include_hooks: false,
         }
     }
 
@@ -210,6 +211,7 @@ pub fn opts(profile: &Profile) -> ApplyOptions {
         source: None,
         git_removals: None,
         hold: Default::default(),
+        apply_hooks: false,
     }
 }
 

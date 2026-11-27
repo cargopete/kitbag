@@ -13,8 +13,8 @@ use toml_edit::{DocumentMut, Item, Table, value};
 use crate::edit::toml::{json_to_table, json_to_value};
 use crate::frontmatter::{self, glob_list, opt, string};
 use crate::model::{
-    Agent, Command, FORMAT_VERSION, McpServer, Profile, Rule, Skill, SkillFile, is_valid_name,
-    portable_name_issues,
+    Agent, Command, FORMAT_VERSION, Hook, McpServer, Profile, Rule, Skill, SkillFile,
+    is_valid_name, portable_name_issues,
 };
 use crate::secrets::{
     redact_server, refs_in, sensitive_file, strong_secret_kind, text_secret_kind,
@@ -92,6 +92,8 @@ struct Manifest {
     mcp_servers: BTreeMap<String, McpServer>,
     #[serde(default)]
     settings: BTreeMap<String, Map<String, Value>>,
+    #[serde(default)]
+    hooks: Vec<Hook>,
 }
 
 /// Parse and validate a `kitbag.toml` manifest into a profile without file-based parts.
@@ -165,6 +167,7 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
         spelled.insert(id.clone(), key);
         settings.insert(id, table);
     }
+    issues.extend(crate::hooks::validate(&m.hooks, None));
     if !issues.is_empty() {
         return Err(ProfileError::new(
             format!("{} is not a valid kitbag profile", file.display()),
@@ -176,6 +179,7 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
         description: m.description.filter(|d| !d.trim().is_empty()),
         mcp_servers: m.mcp_servers,
         settings,
+        hooks: m.hooks,
         warnings,
         ..Profile::default()
     })
@@ -600,6 +604,13 @@ fn load_with_limit(dir: &Path, limit: u64, name_hint: Option<&str>) -> Result<Pr
             files,
         });
     }
+    // A plugin's `hooks/` is Claude Code's own format, not a profile's.
+    if !plugin {
+        read_skill_dir(&dir.join("hooks"), "", &mut p.hook_files, budget)?;
+        if !p.hooks.is_empty() {
+            issues.extend(crate::hooks::validate(&p.hooks, Some(&p.hook_files)));
+        }
+    }
     issues.extend(portable_name_issues(&p));
     if !issues.is_empty() {
         return Err(ProfileError::new(
@@ -651,6 +662,14 @@ pub fn manifest_toml(p: &Profile) -> String {
         }
         doc["settings"] = Item::Table(settings);
     }
+    if !p.hooks.is_empty() {
+        let mut hooks = toml_edit::ArrayOfTables::new();
+        for h in &p.hooks {
+            let v = serde_json::to_value(h).expect("serializable");
+            hooks.push(json_to_table(v.as_object().expect("object")));
+        }
+        doc["hooks"] = Item::ArrayOfTables(hooks);
+    }
     doc.to_string()
 }
 
@@ -687,6 +706,9 @@ pub fn profile_files(p: &Profile) -> BTreeMap<String, Vec<u8>> {
             out.insert(format!("skills/{}/{}", s.name, f.path), f.content.clone());
         }
     }
+    for f in &p.hook_files {
+        out.insert(format!("hooks/{}", f.path), f.content.clone());
+    }
     out
 }
 
@@ -707,6 +729,17 @@ pub fn keep_targeting(new: &mut Profile, old: &Profile) -> Vec<String> {
         kept.push(name.clone());
     }
     kept
+}
+
+/// Copy over `old`'s hooks and their scripts, for a capture that didn't look
+/// for hooks, so re-capturing doesn't silently drop them. Returns how many.
+pub fn keep_hooks(new: &mut Profile, old: &Profile) -> usize {
+    if !new.hooks.is_empty() || old.hooks.is_empty() {
+        return 0;
+    }
+    new.hooks.clone_from(&old.hooks);
+    new.hook_files.clone_from(&old.hook_files);
+    new.hooks.len()
 }
 
 /// Copy over `old`'s MCP servers that a fresh capture didn't find in any
@@ -843,6 +876,12 @@ pub fn save(p: &Profile, dir: &Path, force: bool) -> Result<Vec<PathBuf>> {
                 .filter(|f| f.executable)
                 .map(|f| format!("skills/{}/{}", s.name, f.path))
         })
+        .chain(
+            p.hook_files
+                .iter()
+                .filter(|f| f.executable)
+                .map(|f| format!("hooks/{}", f.path)),
+        )
         .collect();
     let mut written = Vec::new();
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -944,6 +983,25 @@ pub fn scan_for_secrets(p: &Profile) -> Vec<String> {
             }
         }
     }
+    for (i, h) in p.hooks.iter().enumerate() {
+        let at = format!("hooks[{i}]");
+        check(at.clone(), &h.command, true);
+        for v in h.extra.values() {
+            for s in crate::secrets::json_strings(v) {
+                check(at.clone(), s, true);
+            }
+        }
+    }
+    for f in &p.hook_files {
+        if let Ok(t) = std::str::from_utf8(&f.content)
+            && let Some(k) = crate::secrets::support_file_secret_kind(&f.path, t)
+        {
+            out.push(format!("hooks/{}: looks like a secret ({k})", f.path));
+        }
+        if let Some(why) = sensitive_file(&f.path, &f.content) {
+            out_extra.push(format!("hooks/{}: {why}", f.path));
+        }
+    }
     for s in &p.skills {
         for f in &s.files {
             if let Ok(t) = std::str::from_utf8(&f.content)
@@ -974,6 +1032,17 @@ pub fn required_env(p: &Profile) -> BTreeMap<String, Vec<String>> {
                     .or_default()
                     .push(format!("mcp_servers.{n}.{loc}"));
             }
+        }
+    }
+    for (i, h) in p.hooks.iter().enumerate() {
+        for name in refs_in(&h.command) {
+            // The tool's and the shell's own variables are not ones to set.
+            if name.starts_with("CLAUDE_")
+                || matches!(name.as_str(), "HOME" | "PATH" | "PWD" | "USER")
+            {
+                continue;
+            }
+            out.entry(name).or_default().push(format!("hooks[{i}]"));
         }
     }
     out

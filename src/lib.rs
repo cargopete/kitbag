@@ -14,6 +14,7 @@ pub mod cli;
 pub mod edit;
 pub mod engine;
 pub mod frontmatter;
+pub mod hooks;
 pub mod mcp_tokens;
 pub mod model;
 pub mod plan_fs;

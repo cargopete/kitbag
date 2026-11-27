@@ -99,6 +99,12 @@ enum Cmd {
         /// Show what would be captured without writing anything
         #[arg(long)]
         dry_run: bool,
+        /// Also capture what is left out by default. 'hooks': the hooks in
+        /// Claude Code's settings.json, and the scripts they run (redacted like
+        /// everything else). Hooks run commands by themselves, so applying
+        /// them needs --apply-hooks
+        #[arg(long, value_enum, value_delimiter = ',', value_name = "WHAT")]
+        include: Vec<Include>,
     },
     /// Apply a profile: shows the plan, then asks before writing anything
     Apply {
@@ -242,6 +248,13 @@ enum Cmd {
     },
 }
 
+/// What `capture --include` adds to a capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Include {
+    /// Hooks, and the scripts they run
+    Hooks,
+}
+
 #[derive(Args, Debug, Clone)]
 struct Place {
     /// Global config (user) or a project's config
@@ -355,6 +368,11 @@ struct ApplyArgs {
     /// approval_policy = never ...). Local profiles always apply them, with a warning
     #[arg(long, visible_alias = "trust-source")]
     allow_risky_settings: bool,
+    /// Write the profile's hooks: commands the tool runs by itself on events.
+    /// Without this the plan only lists them, command in full. A git source
+    /// also needs --trust-source
+    #[arg(long)]
+    apply_hooks: bool,
     /// From a git source, MCP servers that would be added or changed are not
     /// applied unless allowed here: give their names (comma-separated,
     /// repeatable), or no value to allow all. --trust-source allows all
@@ -495,6 +513,7 @@ fn context(home_flag: Option<&Path>, place: Option<&Place>) -> Result<Ctx> {
             vars,
             locations,
             os: Os::current(),
+            include_hooks: false,
         },
         state_dir,
     })
@@ -583,15 +602,12 @@ pub fn run(cli: Cli) -> Result<i32> {
             force,
             prune,
             dry_run,
-        } => cmd_capture(
-            &context(home, Some(&place))?,
-            &from,
-            &out,
-            name,
-            force,
-            prune,
-            dry_run,
-        ),
+            include,
+        } => {
+            let mut ctx = context(home, Some(&place))?;
+            ctx.env.include_hooks = include.contains(&Include::Hooks);
+            cmd_capture(&ctx, &from, &out, name, force, prune, dry_run)
+        }
         Cmd::Apply {
             source,
             targets,
@@ -825,6 +841,18 @@ fn cmd_capture(
         }
         None => (Vec::new(), Vec::new()),
     };
+    if let Some(old) = old.as_ref().filter(|_| !env.include_hooks) {
+        let n = profile_io::keep_hooks(&mut r.profile, old);
+        if n > 0 {
+            r.notes.push(adapters::Note {
+                level: adapters::Level::Info,
+                target: PROFILE_NOTE.to_string(),
+                message: format!(
+                    "kept the {n} hook(s) of the existing profile: hooks are only captured with --include hooks"
+                ),
+            });
+        }
+    }
     if !kept.is_empty() {
         r.notes.push(adapters::Note {
             level: adapters::Level::Info,
@@ -859,12 +887,13 @@ fn cmd_capture(
         println!("  {} {}", paint(DIM, "read"), tildify(s, &env.home));
     }
     println!(
-        "\n  {} MCP server(s), {} rule(s), {} command(s), {} skill(s){}{}{}",
+        "\n  {} MCP server(s), {} rule(s), {} command(s), {} skill(s){}{}{}{}",
         p.mcp_servers.len(),
         p.rules.len(),
         p.commands.len(),
         p.skills.len(),
         agent_count(p),
+        hook_count(p),
         if p.instructions.is_some() {
             ", instructions"
         } else {
@@ -1199,6 +1228,11 @@ fn cmd_inspect(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, as_json: boo
     let skills = names(profile.skills.iter().map(|s| &s.name).collect());
     let agents = names(profile.agents.iter().map(|s| &s.name).collect());
     let settings = names(profile.settings.keys().collect());
+    let hooks: Vec<String> = profile
+        .hooks
+        .iter()
+        .map(|h| visible_line(&crate::secrets::mask_line(&crate::hooks::describe(h))).into_owned())
+        .collect();
     let instructions = profile
         .instructions
         .as_ref()
@@ -1319,6 +1353,7 @@ fn cmd_inspect(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, as_json: boo
             "instructions": instructions.map(|(bytes, lines)| json!({"bytes": bytes, "lines": lines})),
             "rules": rules, "commands": commands, "skills": skills, "agents": agents,
             "settings": settings,
+            "hooks": hooks,
             "mcp_servers": server_json,
             "safety": {
                 "commands": servers.iter().filter(|s| s.local).map(|s| json!({"name": s.name, "command": s.endpoint})).collect::<Vec<_>>(),
@@ -1364,6 +1399,12 @@ fn cmd_inspect(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, as_json: boo
     list("commands", &commands);
     list("skills", &skills);
     list("agents", &agents);
+    if !hooks.is_empty() {
+        println!("  {:<15}", format!("hooks ({})", hooks.len()));
+        for h in &hooks {
+            println!("    {h}");
+        }
+    }
     if !settings.is_empty() {
         list("settings", &settings);
     }
@@ -1532,6 +1573,13 @@ fn plan_apply(
     }
     // Don't hand local secrets to servers someone else defined.
     let untrusted = resolved.remote && !a.allow_risky_settings;
+    // Hooks run commands by themselves: from a git source they are withheld
+    // unless it is trusted, and they are listed in the plan either way.
+    let withheld_hooks = if untrusted {
+        policy::drop_hooks(&mut profile)
+    } else {
+        Vec::new()
+    };
     let secrets = a.secrets.unwrap_or(if untrusted {
         SecretsMode::Never
     } else {
@@ -1555,6 +1603,8 @@ fn plan_apply(
         source: Some(resolved.source.clone()),
         git_removals: resolved.remote.then(|| allow.clone()),
         hold: hold.clone(),
+        // Hooks from a git source need --trust-source on top of --apply-hooks.
+        apply_hooks: a.apply_hooks && !untrusted,
     };
     let mut plan = if resolved.remote {
         let unknown: Vec<String> = match &allow {
@@ -1600,6 +1650,17 @@ fn plan_apply(
             target: PROFILE_NOTE.to_string(),
             message: "skill scripts are not marked executable, because the profile comes from a remote repository (pass --trust-source to keep the executable bit)".to_string(),
         });
+    }
+    if plan.targets.iter().any(|t| t == adapters::claude_code::ID) {
+        for h in withheld_hooks {
+            plan.notes.push(adapters::Note {
+                level: adapters::Level::Warn,
+                target: adapters::claude_code::ID.to_string(),
+                message: format!(
+                    "hook not applied, because the profile comes from a remote repository: {h} (needs --trust-source and --apply-hooks)"
+                ),
+            });
+        }
     }
     for (target, d) in dropped {
         if plan.targets.contains(&target) || (target == PROFILE_NOTE && !plan.targets.is_empty()) {
@@ -1718,6 +1779,7 @@ fn present(
     let record = |tx: Option<&str>| -> Result<()> {
         if matches!(mode, Mode::Apply { dry_run: false, .. }) {
             crate::sync::record(&ctx.state_dir, plan, env, &profile.name, tx)?;
+            crate::hooks::record(&ctx.state_dir, plan, env, &profile.name, tx)?;
         }
         Ok(())
     };
@@ -2107,6 +2169,15 @@ fn inventory_rows(
         rows.extend(disabled_rows);
     }
     rows
+}
+
+/// `, N hook(s)` for a profile with hooks, else nothing.
+fn hook_count(p: &Profile) -> String {
+    if p.hooks.is_empty() {
+        String::new()
+    } else {
+        format!(", {} hook(s)", p.hooks.len())
+    }
 }
 
 /// `, N agent(s)` for a profile with agents, else nothing.
@@ -2862,12 +2933,13 @@ fn cmd_doctor(
                     visible_line(&resolved.origin)
                 );
                 println!(
-                    "  {} MCP server(s), {} rule(s), {} command(s), {} skill(s){}{}",
+                    "  {} MCP server(s), {} rule(s), {} command(s), {} skill(s){}{}{}",
                     p.mcp_servers.len(),
                     p.rules.len(),
                     p.commands.len(),
                     p.skills.len(),
                     agent_count(&p),
+                    hook_count(&p),
                     if p.instructions.is_some() {
                         ", instructions"
                     } else {
@@ -2962,6 +3034,34 @@ fn cmd_doctor(
                 }
             }
         }
+    }
+    // Hooks kitbag wrote: still what it wrote? Hooks you added yourself are not looked at.
+    match crate::hooks::standing(&ctx.state_dir, env) {
+        Ok((records, warning)) => {
+            if let Some(w) = warning {
+                println!("\n  {} {}", paint(YELLOW, "warn"), visible_line(&w));
+            }
+            if !records.is_empty() {
+                println!("\n{}", paint(BOLD, "Hooks kitbag applied"));
+                let changed = crate::hooks::drift(&records);
+                if changed.is_empty() {
+                    println!(
+                        "  {} {} hook(s) match what kitbag applied",
+                        paint(GREEN, "✓"),
+                        records.len()
+                    );
+                }
+                for c in changed {
+                    problems += 1;
+                    println!("  {} {}", paint(RED, "changed"), visible_line(&c));
+                }
+            }
+        }
+        Err(e) => println!(
+            "\n  {} could not check the hooks kitbag applied: {}",
+            paint(YELLOW, "warn"),
+            visible(&format!("{e:#}"))
+        ),
     }
     if let Some(opts) = mcp_tokens {
         doctor_mcp_tokens(env, chosen.as_deref(), profile_servers.as_ref(), &opts);

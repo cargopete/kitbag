@@ -124,7 +124,7 @@ pub fn last_applied(state_dir: &Path) -> Result<BTreeMap<Key, Record>> {
     Ok(out)
 }
 
-fn now_ms() -> u128 {
+pub(crate) fn now_ms() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())

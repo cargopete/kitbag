@@ -12,6 +12,8 @@
 //!   as they are in the profile's agent.
 //!   Docs: <https://code.claude.com/docs/en/sub-agents>.
 //! * Settings: `.claude/settings.json` (allow-listed keys only).
+//! * Hooks: the `hooks` key of that file, with `capture --include hooks` and
+//!   `apply --apply-hooks` (see `claude_hooks.rs`).
 
 use std::path::{Path, PathBuf};
 
@@ -92,6 +94,14 @@ fn paths(env: &Env) -> Paths {
                 settings: p.join(".claude").join("settings.json"),
             }
         }
+    }
+}
+
+/// The directory hook scripts are read from: the Claude config directory, or the project.
+fn settings_base(env: &Env) -> PathBuf {
+    match env.scope {
+        Scope::User => config_dir(env),
+        Scope::Project => env.project.clone(),
     }
 }
 
@@ -528,6 +538,9 @@ impl Adapter for ClaudeCode {
             cap.sources.push(p.settings.clone());
             if let Value::Object(doc) = parse_value(Some(&text), &p.settings)? {
                 pick_settings(&mut cap, ID, &doc);
+                if env.include_hooks {
+                    super::claude_hooks::capture(&mut cap, env, &doc, &settings_base(env));
+                }
                 let skipped: Vec<&str> = [
                     "env",
                     "hooks",
@@ -537,8 +550,17 @@ impl Adapter for ClaudeCode {
                     "enabledPlugins",
                 ]
                 .into_iter()
-                .filter(|k| doc.contains_key(*k))
+                .filter(|k| doc.contains_key(*k) && !(*k == "hooks" && env.include_hooks))
                 .collect();
+                if !env.include_hooks && doc.contains_key("hooks") {
+                    cap.info(
+                        ID,
+                        format!(
+                            "{} hook(s) in settings.json were not captured: they run commands by themselves, so capture only reads them with --include hooks",
+                            super::claude_hooks::count(&doc)
+                        ),
+                    );
+                }
                 if !skipped.is_empty() {
                     cap.info(
                         ID,
@@ -623,6 +645,11 @@ impl Adapter for ClaudeCode {
             drop_equivalent_paths(&mut settings, &doc, env);
         }
         merge_json_settings(work, &p.settings, &settings, opts, ID)?;
+        let claude_dir = match env.scope {
+            Scope::User => config_dir(env),
+            Scope::Project => env.project.join(".claude"),
+        };
+        super::claude_hooks::apply(profile, env, opts, work, &p.settings, &claude_dir)?;
         Ok(())
     }
 }
