@@ -1,5 +1,6 @@
 //! Hermes Agent: MCP servers in `~/.hermes/config.yaml` (`mcp_servers`) and
-//! instructions in `SOUL.md` (user) or `.hermes.md` / `AGENTS.md` (project).
+//! instructions in `SOUL.md` (user) or `.hermes.md` / `AGENTS.md` (project),
+//! and skills in `~/.hermes/skills` and a project's `.hermes/skills`.
 
 mod common;
 
@@ -8,7 +9,7 @@ use std::fs;
 
 use common::*;
 use kitbag::adapters::Scope;
-use kitbag::model::{McpServer, Profile, Rule, Transport};
+use kitbag::model::{Command, McpServer, Profile, Rule, Skill, SkillFile, Transport};
 use kitbag::profile_io;
 use kitbag::txn::Store;
 use serde_json::{Value, json};
@@ -217,7 +218,8 @@ fn credentials_are_never_read_captured_or_written() {
         "ghp_FAKEhermestokenvalue0123456789abcdef",
     )
     .unwrap();
-    fs::create_dir_all(home.join("skills")).unwrap();
+    fs::create_dir_all(home.join("memories")).unwrap();
+    fs::create_dir_all(home.join("sessions")).unwrap();
 
     let r = capture(&["hermes"], &sb.env(Scope::User));
     let warned = r
@@ -233,7 +235,7 @@ fn credentials_are_never_read_captured_or_written() {
     assert!(
         r.notes
             .iter()
-            .any(|n| n.message.contains("Hermes skills not captured"))
+            .any(|n| n.message.contains("Hermes memories, sessions not captured"))
     );
     let dir = sb.path("profile");
     profile_io::save(&r.profile, &dir, false).unwrap();
@@ -850,4 +852,465 @@ fn a_server_the_profile_disables_for_hermes_is_turned_off_only_if_kitbag_added_i
         .success()
         .stdout(predicates::str::contains("no record of adding it"));
     assert!(sb.read(CONFIG).contains("mine:"));
+}
+
+// ---------------------------------------------------------------- skills
+
+fn put(sb: &Sandbox, rel: &str, text: &str) {
+    let path = sb.path(rel);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, text).unwrap();
+}
+
+fn skill(name: &str, description: &str) -> Skill {
+    Skill {
+        name: name.into(),
+        files: vec![
+            SkillFile {
+                path: "SKILL.md".into(),
+                content: format!(
+                    "---\nname: {name}\ndescription: {description}\n---\n\nBody of {name}.\n"
+                )
+                .into_bytes(),
+                executable: false,
+            },
+            SkillFile {
+                path: "scripts/run.sh".into(),
+                content: b"echo run\n".to_vec(),
+                executable: true,
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+fn with_skill(name: &str) -> Profile {
+    let mut p = Profile::new("team");
+    p.skills.push(skill(name, &format!("Does {name} things.")));
+    p
+}
+
+fn names(p: &Profile) -> Vec<String> {
+    let mut v: Vec<String> = p.skills.iter().map(|s| s.name.clone()).collect();
+    v.sort();
+    v
+}
+
+fn said(p: &kitbag::engine::Plan, what: &str) -> bool {
+    p.notes
+        .iter()
+        .any(|n| n.target == "hermes" && n.message.contains(what))
+}
+
+fn warned(p: &kitbag::engine::Plan, what: &str) -> bool {
+    p.notes.iter().any(|n| {
+        n.target == "hermes" && n.level == kitbag::adapters::Level::Warn && n.message.contains(what)
+    })
+}
+
+fn md(name: &str) -> String {
+    format!("---\nname: {name}\ndescription: {name} skill.\n---\n\nText of {name}.\n")
+}
+
+#[test]
+fn capture_reads_user_skills_flat_and_in_category_folders_and_leaves_hermes_own() {
+    let sb = Sandbox::empty();
+    let h = "home/.hermes";
+    put(
+        &sb,
+        &format!("{h}/config.yaml"),
+        "skills:\n  external_dirs:\n    - ~/.agents/skills\n",
+    );
+    put(&sb, &format!("{h}/skills/mine/SKILL.md"), &md("mine"));
+    put(&sb, &format!("{h}/skills/mine/scripts/run.sh"), "echo hi\n");
+    put(
+        &sb,
+        &format!("{h}/skills/devops/deploy-k8s/SKILL.md"),
+        &md("deploy-k8s"),
+    );
+    put(
+        &sb,
+        &format!("{h}/skills/devops/deploy-k8s/references/api.md"),
+        "ref\n",
+    );
+    // Seeded by Hermes (v2 and v1 manifest lines) and installed from the hub.
+    put(
+        &sb,
+        &format!("{h}/skills/mlops/axolotl/SKILL.md"),
+        &md("axolotl"),
+    );
+    put(
+        &sb,
+        &format!("{h}/skills/old-bundled/SKILL.md"),
+        &md("old-bundled"),
+    );
+    put(&sb, &format!("{h}/skills/hubby/SKILL.md"), &md("hubby"));
+    put(
+        &sb,
+        &format!("{h}/skills/.bundled_manifest"),
+        "axolotl:0123abcd\nold-bundled\n",
+    );
+    put(
+        &sb,
+        &format!("{h}/skills/.hub/lock.json"),
+        r#"{"version": 1, "installed": {"hubby": {"source": "x", "install_path": "hubby"}}}"#,
+    );
+    put(
+        &sb,
+        &format!("{h}/skills/.hub/quarantine/bad/SKILL.md"),
+        &md("bad"),
+    );
+    put(
+        &sb,
+        &format!("{h}/skills/.archive/old/SKILL.md"),
+        &md("old"),
+    );
+    // Only Hermes's own folder is read: not the shared ones, not another tool's.
+    put(&sb, "home/.agents/skills/shared/SKILL.md", &md("shared"));
+    put(
+        &sb,
+        "home/.claude/skills/claude-only/SKILL.md",
+        &md("claude-only"),
+    );
+    put(&sb, "project/.hermes/skills/proj/SKILL.md", &md("proj"));
+    fs::create_dir_all(sb.path(&format!("{h}/memories"))).unwrap();
+
+    let r = capture(&["hermes"], &sb.env(Scope::User));
+    assert_eq!(names(&r.profile), ["deploy-k8s", "mine"]);
+    let mine = r.profile.skills.iter().find(|s| s.name == "mine").unwrap();
+    assert!(mine.files.iter().any(|f| f.path == "scripts/run.sh"));
+    let k8s = r
+        .profile
+        .skills
+        .iter()
+        .find(|s| s.name == "deploy-k8s")
+        .unwrap();
+    assert!(k8s.files.iter().any(|f| f.path == "references/api.md"));
+    let said = |what: &str| r.notes.iter().any(|n| n.message.contains(what));
+    assert!(
+        said("3 skill(s) that Hermes bundled or installed"),
+        "{:?}",
+        r.notes
+    );
+    assert!(said("axolotl, hubby, old-bundled"));
+    assert!(said("skills.external_dirs"));
+    assert!(said("Hermes memories not captured"));
+    assert!(!said("Hermes skills not captured"));
+
+    let project = capture(&["hermes"], &sb.env(Scope::Project));
+    assert_eq!(names(&project.profile), ["proj"]);
+}
+
+#[test]
+fn capture_warns_about_a_skill_name_in_two_folders() {
+    let sb = Sandbox::empty();
+    put(&sb, "home/.hermes/skills/a/dup/SKILL.md", &md("dup"));
+    put(&sb, "home/.hermes/skills/b/dup/SKILL.md", &md("dup"));
+    let r = capture(&["hermes"], &sb.env(Scope::User));
+    assert_eq!(names(&r.profile), ["dup"]);
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n.message.contains("'dup' is in more than one folder"))
+    );
+}
+
+#[test]
+fn apply_user_writes_skills_flat_to_hermes_skills_and_undo_removes_only_those() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::User);
+    put(&sb, "home/.hermes/skills/theirs/SKILL.md", &md("theirs"));
+    let mut prof = with_skill("deploy-notes");
+    prof.rules.push(Rule {
+        name: "ts".into(),
+        body: "Strict.".into(),
+        ..Default::default()
+    });
+    prof.commands.push(Command {
+        name: "release".into(),
+        body: "Ship.".into(),
+        ..Default::default()
+    });
+    let p = apply(&sb, &prof, &["hermes"], &env);
+
+    let main = sb.read("home/.hermes/skills/deploy-notes/SKILL.md");
+    assert!(
+        main.contains("name: deploy-notes") && main.contains("Body of deploy-notes."),
+        "{main}"
+    );
+    assert_eq!(
+        sb.read("home/.hermes/skills/deploy-notes/scripts/run.sh"),
+        "echo run\n"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(sb.path("home/.hermes/skills/deploy-notes/scripts/run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_ne!(mode & 0o111, 0, "the executable bit is kept");
+    }
+    // Nowhere else; rules and commands, which Hermes's docs don't describe, are skipped.
+    assert!(!sb.path("home/.agents").exists());
+    assert!(!sb.path("home/.claude").exists());
+    assert!(!sb.path("home/.hermes/rules").exists());
+    assert!(!sb.path("home/.hermes/commands").exists());
+    assert!(said(
+        &p,
+        "not supported by Hermes Agent at user scope, skipped: 1 rules, 1 commands"
+    ));
+
+    // A second apply is up to date, and capture reads it back with `theirs`.
+    assert!(plan(&prof, &["hermes"], &env).changes.is_empty());
+    assert_eq!(
+        names(&capture(&["hermes"], &env).profile),
+        ["deploy-notes", "theirs"]
+    );
+
+    Store::new(sb.state()).undo(None, false).unwrap();
+    assert!(!sb.path("home/.hermes/skills/deploy-notes").exists());
+    assert!(
+        sb.path("home/.hermes/skills/theirs/SKILL.md").is_file(),
+        "their skill stays"
+    );
+}
+
+#[test]
+fn apply_updates_a_skill_where_it_is_in_a_category_folder() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::User);
+    put(
+        &sb,
+        "home/.hermes/skills/devops/deploy-notes/SKILL.md",
+        "---\nname: deploy-notes\ndescription: Old.\n---\n\nOld body.\n",
+    );
+    let prof = with_skill("deploy-notes");
+    apply(&sb, &prof, &["hermes"], &env);
+    assert!(
+        sb.read("home/.hermes/skills/devops/deploy-notes/SKILL.md")
+            .contains("Body of deploy-notes.")
+    );
+    assert!(
+        !sb.path("home/.hermes/skills/deploy-notes").exists(),
+        "no second, flat copy for Hermes to call ambiguous"
+    );
+    assert!(plan(&prof, &["hermes"], &env).changes.is_empty());
+}
+
+#[test]
+fn apply_leaves_skills_hermes_bundled_or_installed_alone() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::User);
+    put(
+        &sb,
+        "home/.hermes/skills/mlops/axolotl/SKILL.md",
+        &md("axolotl"),
+    );
+    put(
+        &sb,
+        "home/.hermes/skills/.bundled_manifest",
+        "axolotl:abc123\n",
+    );
+    put(
+        &sb,
+        "home/.hermes/skills/.hub/lock.json",
+        r#"{"version": 1, "installed": {"hubby": {}}}"#,
+    );
+    let mut prof = Profile::new("team");
+    prof.skills.push(skill("axolotl", "Mine."));
+    prof.skills.push(skill("hubby", "Mine."));
+    prof.skills.push(skill("mine", "Mine."));
+    let p = apply(&sb, &prof, &["hermes"], &env);
+    assert!(warned(&p, "skill 'axolotl' skipped"));
+    assert!(warned(&p, "skill 'hubby' skipped"));
+    assert_eq!(
+        sb.read("home/.hermes/skills/mlops/axolotl/SKILL.md"),
+        md("axolotl")
+    );
+    assert!(!sb.path("home/.hermes/skills/axolotl").exists());
+    assert!(!sb.path("home/.hermes/skills/hubby").exists());
+    assert!(sb.path("home/.hermes/skills/mine/SKILL.md").is_file());
+}
+
+#[test]
+fn apply_project_writes_hermes_skills_not_the_shared_folder_and_notes_trust() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::Project);
+    let prof = with_skill("deploy-notes");
+    let p = apply(&sb, &prof, &["hermes"], &env);
+    assert!(
+        sb.path("project/.hermes/skills/deploy-notes/SKILL.md")
+            .is_file()
+    );
+    assert!(!sb.path("project/.agents").exists());
+    assert!(!sb.path("project/.claude").exists());
+    assert!(said(&p, "hermes skills trust"));
+    assert!(plan(&prof, &["hermes"], &env).changes.is_empty());
+    assert_eq!(names(&capture(&["hermes"], &env).profile), ["deploy-notes"]);
+    assert!(
+        kitbag::adapters::get("hermes").unwrap().detect(&env),
+        "a project's .hermes/skills marks it as using Hermes"
+    );
+
+    Store::new(sb.state()).undo(None, false).unwrap();
+    assert!(!sb.path("project/.hermes").exists());
+}
+
+#[test]
+fn project_skill_also_in_the_shared_folder_is_noted() {
+    let sb = Sandbox::empty();
+    put(
+        &sb,
+        "project/.agents/skills/deploy-notes/SKILL.md",
+        &md("deploy-notes"),
+    );
+    let p = plan(
+        &with_skill("deploy-notes"),
+        &["hermes"],
+        &sb.env(Scope::Project),
+    );
+    assert!(said(&p, "'deploy-notes' also exists in"));
+    // The other tool's copy is not touched.
+    assert!(
+        p.changes
+            .iter()
+            .all(|c| !c.path.starts_with(sb.path("project/.agents")))
+    );
+}
+
+#[test]
+fn hermes_home_moves_the_skills_folder() {
+    let sb = Sandbox::empty();
+    let other = sb.path("elsewhere/coder");
+    put(&sb, "elsewhere/coder/skills/cat/mine/SKILL.md", &md("mine"));
+    let mut env = sb.env(Scope::User);
+    env.locations = HashMap::from([("HERMES_HOME".to_string(), other.display().to_string())]);
+    assert_eq!(names(&capture(&["hermes"], &env).profile), ["mine"]);
+    let p = plan(&with_skill("deploy-notes"), &["hermes"], &env);
+    assert!(planned(&p, &other.join("skills/deploy-notes/SKILL.md")).is_some());
+    assert!(p.changes.iter().all(|c| !c.path.starts_with(sb.home())));
+}
+
+#[test]
+fn apply_keeps_a_differing_skill_with_no_overwrite_and_adds_missing_frontmatter() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::User);
+    put(
+        &sb,
+        "home/.hermes/skills/deploy-notes/SKILL.md",
+        "---\nname: deploy-notes\ndescription: Mine.\n---\n\nMy body.\n",
+    );
+    let prof = with_skill("deploy-notes");
+    let mut o = opts(&prof);
+    o.overwrite = false;
+    let p = kitbag::engine::plan(&prof, &targets(&["hermes"]), &env, &o).unwrap();
+    assert!(warned(&p, "kept existing skill 'deploy-notes'"));
+    assert!(planned(&p, &sb.path("home/.hermes/skills/deploy-notes/SKILL.md")).is_none());
+
+    // Hermes needs a name and description; a bare SKILL.md gets them.
+    let mut bare = Profile::new("team");
+    bare.skills.push(Skill {
+        name: "bare".into(),
+        description: Some("A bare one.".into()),
+        files: vec![SkillFile {
+            path: "SKILL.md".into(),
+            content: b"Just text.\n".to_vec(),
+            executable: false,
+        }],
+        ..Default::default()
+    });
+    apply(&sb, &bare, &["hermes"], &env);
+    let text = sb.read("home/.hermes/skills/bare/SKILL.md");
+    assert!(text.starts_with("---\nname: bare\ndescription:"), "{text}");
+}
+
+#[test]
+fn skills_honour_targets_and_disabled_on() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::User);
+    let mut prof = Profile::new("team");
+    let mut only_cursor = skill("only-cursor", "Cursor only.");
+    only_cursor.targeting.targets = Some(vec!["cursor".into()]);
+    let mut not_hermes = skill("not-hermes", "Not for Hermes.");
+    not_hermes.targeting.disabled_on = vec!["hermes".into()];
+    prof.skills
+        .extend([only_cursor, not_hermes, skill("everywhere", "All.")]);
+    let p = plan(&prof, &["hermes"], &env);
+    let has =
+        |n: &str| planned(&p, &sb.path(&format!("home/.hermes/skills/{n}/SKILL.md"))).is_some();
+    assert!(has("everywhere") && !has("only-cursor") && !has("not-hermes"));
+}
+
+#[test]
+fn skills_survive_hermes_to_claude_code_and_back() {
+    let src = Sandbox::empty();
+    let prof = with_skill("deploy-notes");
+    apply(&src, &prof, &["hermes"], &src.env(Scope::User));
+    let captured = capture(&["hermes"], &src.env(Scope::User)).profile;
+    let dir = src.path("profile");
+    profile_io::save(&captured, &dir, false).unwrap();
+    let loaded = profile_io::load(&dir).unwrap();
+    assert_eq!(names(&loaded), ["deploy-notes"]);
+
+    let dst = Sandbox::empty();
+    apply(&dst, &loaded, &["claude-code"], &dst.env(Scope::User));
+    assert!(
+        dst.path("home/.claude/skills/deploy-notes/SKILL.md")
+            .is_file()
+    );
+    let again = Sandbox::empty();
+    apply(&again, &loaded, &["hermes"], &again.env(Scope::User));
+    assert_eq!(
+        capture(&["hermes"], &again.env(Scope::User)).profile.skills,
+        captured.skills
+    );
+}
+
+#[test]
+fn apply_skills_to_hermes_through_the_cli_then_remove_one_when_disabled() {
+    let sb = Sandbox::empty();
+    sb.cli().args(["init", "prof"]).assert().success();
+    put(&sb, "prof/skills/notes/SKILL.md", &md("notes"));
+    sb.cli()
+        .args(["apply", "prof", "--to", "hermes", "--yes"])
+        .assert()
+        .success();
+    assert!(
+        sb.read("home/.hermes/skills/notes/SKILL.md")
+            .contains("Text of notes.")
+    );
+
+    // Disabling it for Hermes removes the folder kitbag wrote.
+    put(
+        &sb,
+        "prof/skills/notes/SKILL.md",
+        "---\nname: notes\ndescription: Takes notes.\ndisabled_on: [hermes]\n---\n\nNotes body.\n",
+    );
+    sb.cli()
+        .args(["apply", "prof", "--to", "hermes", "--yes"])
+        .assert()
+        .success();
+    assert!(!sb.path("home/.hermes/skills/notes").exists());
+    sb.cli().arg("undo").assert().success();
+    assert!(sb.path("home/.hermes/skills/notes/SKILL.md").is_file());
+    sb.cli().arg("undo").assert().success();
+    assert!(!sb.path("home/.hermes/skills/notes").exists());
+}
+
+#[test]
+fn skills_never_reach_hermes_credential_files() {
+    let sb = Sandbox::empty();
+    put(
+        &sb,
+        "home/.hermes/.env",
+        "KEY=sk-or-FAKEhermesenvvalue123456\n",
+    );
+    put(&sb, "home/.hermes/skills/mine/SKILL.md", &md("mine"));
+    let r = capture(&["hermes"], &sb.env(Scope::User));
+    let dir = sb.path("profile");
+    profile_io::save(&r.profile, &dir, false).unwrap();
+    assert!(!all_text_under(&dir).contains("FAKEhermes"));
+    let p = plan(&with_skill("x"), &["hermes"], &sb.env(Scope::User));
+    assert!(p.changes.iter().all(|c| !c.path.ends_with(".env")));
 }
