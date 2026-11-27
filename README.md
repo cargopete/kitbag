@@ -127,20 +127,20 @@ Where things go:
 |---|---|---|
 | Claude Code | `~/.claude.json` (`mcpServers`), `~/.claude/{CLAUDE.md, rules/, commands/, skills/, agents/, settings.json}` (plugins, by reference: `enabledPlugins` and `extraKnownMarketplaces` in `settings.json`; `plugins/installed_plugins.json` is read for versions); honours `CLAUDE_CONFIG_DIR` | `.mcp.json`, `CLAUDE.md` (or `.claude/CLAUDE.md`), `.claude/{rules,commands,skills,agents}/`, `.claude/settings.json` (also `enabledPlugins` and `extraKnownMarketplaces`); capture also reads local-scope servers from `~/.claude.json` |
 | Cursor | `~/.cursor/mcp.json`, `~/.cursor/commands/`, `~/.cursor/skills/`, `~/.cursor/agents/*.md` | `.cursor/mcp.json`, `.cursor/rules/*.mdc`, `AGENTS.md`, `.cursor/commands/`, `.cursor/skills/`, `.cursor/agents/*.md`; capture also reads legacy `.cursorrules` |
-| Codex CLI | `$CODEX_HOME/config.toml` (default `~/.codex`), `$CODEX_HOME/AGENTS.md`, `$CODEX_HOME/prompts/`, `~/.agents/skills/`, `$CODEX_HOME/agents/*.toml` | `.codex/config.toml` (trusted projects only), `AGENTS.md`, `.agents/skills/`, `.codex/agents/*.toml` |
+| Codex CLI | `$CODEX_HOME/config.toml` (default `~/.codex`; plugins, by reference: `[marketplaces.<name>]` and `[plugins."<name>@<marketplace>"]`), `$CODEX_HOME/AGENTS.md`, `$CODEX_HOME/prompts/`, `~/.agents/skills/`, `$CODEX_HOME/agents/*.toml` | `.codex/config.toml` (trusted projects only; also the same plugin tables), `AGENTS.md`, `.agents/skills/`, `.codex/agents/*.toml` |
 | Gemini CLI | `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`, `~/.gemini/commands/*.toml`, `~/.gemini/skills/`, `~/.gemini/agents/*.md` | `.gemini/settings.json`, `GEMINI.md`, `.gemini/commands/`, `.gemini/skills/`, `.gemini/agents/*.md` |
 | Claude Desktop | `claude_desktop_config.json` in `~/Library/Application Support/Claude` (macOS), `%APPDATA%\Claude` (Windows), `~/.config/Claude` (Linux) | n/a |
 | Antigravity | `~/.gemini/config/mcp_config.json`, `~/.gemini/GEMINI.md` (the same file and managed block as Gemini CLI); capture also reads `~/.gemini/AGENTS.md` and `~/.gemini/config/{AGENTS,GEMINI}.md`; `~/.gemini/config/rules/*.md`, `~/.gemini/config/skills/` (also where commands go, as skills), `~/.gemini/config/agents/<name>.md` (plugins, by reference: the `entries` of `~/.gemini/config/plugins.json`) | `.agents/mcp_config.json`, `AGENTS.md` (shared with Codex and Cursor); capture also reads `GEMINI.md` and `.agents/{AGENTS,GEMINI}.md`; `.agents/rules/*.md`, `.agents/skills/` (the same directory as Codex's project skills; commands go there too, as skills), `.agents/agents/<name>.md` (plugins, by reference: the `entries` of `.agents/plugins.json`) |
 | opencode | `~/.config/opencode/opencode.json` or `opencode.jsonc` (`mcp.servers`), `~/.config/opencode/{AGENTS.md, commands/*.md, skills/<name>/, agents/*.md}` (plugins, by reference: the npm packages in the config's `plugins` array); honours `XDG_CONFIG_HOME` | `opencode.json(c)` or `.opencode/opencode.json(c)` (the first that exists, else `opencode.json`), `AGENTS.md` (shared with Codex, Cursor and Antigravity), `.opencode/{commands,skills,agents}/`; capture reads every config file there is |
-| Grok Build | `$GROK_HOME/config.toml` (`[mcp_servers.<name>]`, default `~/.grok`), `$GROK_HOME/{AGENTS.md, rules/*.md, commands/*.md, skills/}` | `.grok/config.toml`, `AGENTS.md` (shared with Codex, Cursor, Antigravity and opencode), `.grok/{rules,commands,skills}/`; Grok reads project files only in folders you have trusted |
+| Grok Build | `$GROK_HOME/config.toml` (`[mcp_servers.<name>]`, default `~/.grok`; plugin folders, by reference: `[plugins] paths`), `$GROK_HOME/{AGENTS.md, rules/*.md, commands/*.md, skills/}` | `.grok/config.toml`, `AGENTS.md` (shared with Codex, Cursor, Antigravity and opencode), `.grok/{rules,commands,skills}/`; Grok reads project files only in folders you have trusted |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` (`mcpServers`), `~/.codeium/windsurf/memories/global_rules.md`, `~/.codeium/windsurf/global_workflows/<name>.md` | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode and Grok Build); capture also reads the legacy `.windsurfrules`; `.windsurf/rules/<name>.md`, `.windsurf/workflows/<name>.md`, `.windsurf/skills/<name>/`; Windsurf's docs describe no project MCP file, so MCP servers are not written at project scope |
-| Zed | `settings.json` in `~/.config/zed` (macOS), `$XDG_CONFIG_HOME/zed` or `~/.config/zed` (Linux), `%APPDATA%\Zed` (Windows) (`context_servers`), and `AGENTS.md` next to it (Zed's personal instructions), `~/.agents/skills/<name>/` (skills) | `.zed/settings.json` (`context_servers`; Zed starts these only in a trusted worktree); instructions go to the first of `.rules`, `.cursorrules`, `.windsurfrules`, `.clinerules`, `.github/copilot-instructions.md`, `AGENT.md`, `AGENTS.md`, `CLAUDE.md` and `GEMINI.md` that exists, since Zed reads only that one, and to `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build and Windsurf) when none does; `.agents/skills/<name>/` (skills; Amp writes its project skills to the same folder) |
+| Zed | `settings.json` in `~/.config/zed` (macOS), `$XDG_CONFIG_HOME/zed` or `~/.config/zed` (Linux), `%APPDATA%\Zed` (Windows) (`context_servers`; extensions, by reference: `auto_install_extensions`), and `AGENTS.md` next to it (Zed's personal instructions), `~/.agents/skills/<name>/` (skills) | `.zed/settings.json` (`context_servers`; Zed starts these only in a trusted worktree); instructions go to the first of `.rules`, `.cursorrules`, `.windsurfrules`, `.clinerules`, `.github/copilot-instructions.md`, `AGENT.md`, `AGENTS.md`, `CLAUDE.md` and `GEMINI.md` that exists, since Zed reads only that one, and to `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build and Windsurf) when none does; `.agents/skills/<name>/` (skills; Amp writes its project skills to the same folder) |
 | Hermes Agent | `$HERMES_HOME/config.yaml` (`mcp_servers`, `agent.personalities` and `display.personality`, default `~/.hermes`), `$HERMES_HOME/SOUL.md` (Hermes's identity file, the only global file it reads for instructions; capture reads only a kitbag-managed block in it), `$HERMES_HOME/skills/<name>/` (skills; capture also looks in category folders such as `skills/devops/<name>/`, and skips the skills Hermes bundled or installed from its hub) | `.hermes.md` or `HERMES.md` when the project has one (Hermes loads it before `AGENTS.md`), otherwise `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf and Grok Build); Hermes documents no project MCP file, so MCP servers are not written at project scope; `.hermes/skills/<name>/` (skills; Hermes loads them once you run `hermes skills trust`, and also reads `.agents/skills/`, which kitbag leaves to the tools that own it) |
 | Amp | `~/.config/amp/settings.json` or `settings.jsonc` (`amp.mcpServers`; `%USERPROFILE%\.config\amp` on Windows), `~/.config/amp/AGENTS.md`, `~/.config/agents/skills/<name>/` | `.amp/settings.json` or `settings.jsonc` (`amp.mcpServers`; Amp asks you to approve these servers, `amp mcp approve`), `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf, Grok Build and Hermes), or `AGENT.md` / `CLAUDE.md` when that is the file Amp reads, `.agents/skills/<name>/` |
 | Cline | `~/.cline/data/settings/cline_mcp_settings.json` (`mcpServers`; `CLINE_MCP_SETTINGS_PATH` names the file, `CLINE_DATA_DIR` replaces `~/.cline/data`, `CLINE_DIR` replaces `~/.cline`), `~/.cline/rules/kitbag.md` (instructions: a managed block in a file of its own; Cline reads every file in that directory), `~/.cline/rules/<name>.md`, `~/.cline/workflows/<name>.md`, `~/.cline/skills/<name>/`; capture also reads `~/Documents/Cline/Rules/`, `~/Cline/Rules/`, `~/Documents/Cline/Workflows/` and `~/.agents/skills/` | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build, Windsurf and Zed), `.cline/rules/<name>.md`, `.cline/workflows/<name>.md`, `.cline/skills/<name>/`; capture also reads the older `.clinerules/` (rules, `workflows/`, `skills/`) and `.agents/skills/`; Cline's docs describe no project MCP file, so MCP servers are not written at project scope |
 | Roo Code | `mcp_settings.json` in `<editor user data>/User/globalStorage/rooveterinaryinc.roo-cline/settings/` (`mcpServers`; the editor is VS Code, else VS Code Insiders, VSCodium or Cursor, whichever has the extension's folder: `~/.config/Code` or `$XDG_CONFIG_HOME/Code` on Linux, `~/Library/Application Support/Code` on macOS, `%APPDATA%\Code` on Windows), `~/.roo/rules/kitbag.md` (instructions: a managed block in a file of its own; Roo reads every file in that directory), `~/.roo/rules/<name>.md`, `~/.roo/commands/<name>.md`, `~/.roo/skills/<name>/`; capture also reads `~/.agents/skills/` | `.roo/mcp.json` (`mcpServers`; wins over the user file for a server of the same name), `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build, Windsurf and Zed), `.roo/rules/<name>.md`, `.roo/commands/<name>.md`, `.roo/skills/<name>/`; capture also reads `.agents/skills/` |
 | Continue | `~/.continue/config.yaml` (`%USERPROFILE%\.continue\config.yaml` on Windows): `mcpServers`, for instructions a `kitbag-instructions` entry of `rules`, and for commands the `prompts` list | `.continue/mcpServers/*.yaml` (a server already defined in one of those files is edited there, new ones go to `kitbag.yaml`; JSON files there are read, not written), `.continue/rules/<name>.md`, and the instructions in `.continue/rules/kitbag-instructions.md`; `AGENTS.md` is not used, since Continue's docs don't mention it |
-| GitHub Copilot | `$COPILOT_HOME/mcp-config.json` (`mcpServers`, default `~/.copilot`), `$COPILOT_HOME/copilot-instructions.md`, `$COPILOT_HOME/instructions/*.instructions.md`, `$COPILOT_HOME/skills/` (commands too, as skills), `$COPILOT_HOME/agents/*.agent.md` | `.mcp.json` (shared with Claude Code, written in Claude Code's shape), `.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` (`applyTo`), `.github/prompts/*.prompt.md`, `.github/skills/`, `.github/agents/*.agent.md`; capture also reads `.github/mcp.json`, legacy chat modes in `.github/chatmodes/` and `.vscode/mcp.json` (`servers`), and `disabledMcpServers` from Copilot's `settings.json` |
+| GitHub Copilot | `$COPILOT_HOME/mcp-config.json` (`mcpServers`, default `~/.copilot`; plugins, by reference: `enabledPlugins` and `extraKnownMarketplaces` in `$COPILOT_HOME/settings.json`), `$COPILOT_HOME/copilot-instructions.md`, `$COPILOT_HOME/instructions/*.instructions.md`, `$COPILOT_HOME/skills/` (commands too, as skills), `$COPILOT_HOME/agents/*.agent.md` | `.mcp.json` (shared with Claude Code, written in Claude Code's shape), `.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` (`applyTo`), `.github/prompts/*.prompt.md`, `.github/skills/`, `.github/agents/*.agent.md`; capture also reads `.github/mcp.json`, legacy chat modes in `.github/chatmodes/` and `.vscode/mcp.json` (`servers`), and `disabledMcpServers` from Copilot's `settings.json`; plugins, by reference: `enabledPlugins` and `extraKnownMarketplaces` in `.github/copilot/settings.json` |
 
 How each tool receives `${VAR}` references:
 
@@ -778,10 +778,13 @@ A Claude Code plugin is someone else's code (it can bundle hooks, MCP servers, c
 and skills), so kitbag never copies one. It carries only what Claude Code itself stores to find
 and enable it: the marketplaces Claude Code knows (`extraKnownMarketplaces`) and the plugins it
 has enabled (`enabledPlugins`), in a per-target section of `kitbag.toml`. `claude-code`,
-[`opencode`](#opencode-plugins-by-reference-pluginsopencode) and
-[`antigravity`](#antigravity-plugin-folders-by-reference-pluginsantigravity) have such a section;
-the other tools' plugin systems are not carried (see [Plugins not carried](#plugins-not-carried-gemini-cli-claude-desktop-and-antigravitys-installs)),
-and kitbag never translates an id from one tool to another. A `[plugins.<other tool>]` section is
+[`copilot` and `codex`](#copilot-cli-and-codex-plugins-by-reference-pluginscopilot-pluginscodex),
+[`opencode`](#opencode-plugins-by-reference-pluginsopencode),
+[`antigravity`](#antigravity-plugin-folders-by-reference-pluginsantigravity) and
+[`zed` and `grok-build`](#zed-extensions-and-grok-build-plugin-folders-by-reference-pluginszed-pluginsgrok-build)
+have such a section; every other tool's plugin system is a documented skip (see
+[Plugins not carried](#plugins-not-carried-and-what-was-re-checked)), and kitbag never
+translates an id from one tool to another. A `[plugins.<other tool>]` section is
 ignored with a warning.
 
 ```toml
@@ -935,7 +938,132 @@ disabled the first time Antigravity loads it. Docs checked 2026-11-27:
 [settings](https://antigravity.google/docs/settings/),
 [changelog](https://antigravity.google/docs/changelog/).
 
-### Plugins not carried: Gemini CLI, Claude Desktop, and Antigravity's installs
+### Copilot CLI and Codex plugins, by reference: `[plugins.copilot]`, `[plugins.codex]`
+
+Both tools list plugins and marketplaces in a settings file, so kitbag carries those lists the way
+it carries Claude Code's, and never a plugin or a marketplace checkout. The ids are each tool's
+own (`<name>@<marketplace>`) and are not translated. Checked against the official docs on
+2026-11-27.
+
+**Copilot CLI** reads `enabledPlugins` (`"<name>@<marketplace>": true`, "declarative plugin
+auto-install") and `extraKnownMarketplaces` (`"<name>": {"source": ..., "autoUpdate": bool}`) from
+`~/.copilot/settings.json` (`$COPILOT_HOME`) and a repository's `.github/copilot/settings.json`
+(committed, so it applies to everyone who works in the repository and is also read by Copilot in
+the cloud); a person can turn an entry off with `false` in `.github/copilot/settings.json`'s
+local twin, `settings.local.json`. A marketplace `source` is `github` (`repo`, `ref`, `path`), `git`
+(`url`, `ref`, `path`) or `directory` (`path`); the `url` and `file` sources of Claude Code are not
+documented there, so a profile with one is refused. `autoUpdate` only counts in user settings (a
+repository's is accepted and ignored). The built-in marketplace is `awesome-copilot`. The user
+file is the CLI's; the repository file is also read by Copilot in the cloud and, for workspace
+plugin recommendations and enablement, by VS Code (which also reads `.claude/settings.json`, where
+`[plugins.claude-code]` writes at project scope). VS Code's own user-level settings are not carried
+(see the end of this section). Managed (enterprise or MDM) entries can't be re-pointed or
+turned off locally, and kitbag never writes the managed files.
+
+```toml
+[plugins.copilot.marketplaces.acme-tools]
+source = { source = "github", repo = "acme/tools", ref = "v1.2.0" }
+autoUpdate = true
+
+[plugins.copilot.enabled."formatter@acme-tools"]
+```
+
+**Codex** reads `[marketplaces.<name>]` (`source_type` = `git` or `local`, `source` (a Git
+repository location, or the absolute path of a local marketplace root), optional `ref` and, for git,
+`sparse_paths`) and `[plugins."<name>@<marketplace>"]` with `enabled` from `config.toml` in
+`$CODEX_HOME` (`~/.codex`), and from `.codex/config.toml` in a project that is marked as trusted.
+The built-in marketplace is `openai-curated`. The profile holds Codex's own keys:
+
+```toml
+[plugins.codex.marketplaces.acme]
+source = { source_type = "git", source = "https://github.com/acme/plugins.git", ref = "v1.2.0" }
+
+[plugins.codex.marketplaces.mine]
+source = { source_type = "local", source = "~/team/marketplace" }   # ~/ is expanded on apply
+
+[plugins.codex.enabled."fmt@acme"]
+```
+
+**Capture** keeps the marketplaces and the plugins that are on (`enabled = true`). Counted and left
+out, with a note: plugins set to `false`, `[plugins.*]` tables without `enabled`, the per-plugin
+`mcp_servers` settings (approval modes and tool lists), `[plugins._default]` (Codex), plugins
+whose marketplace isn't declared (named in the note: only the plugin is carried), a marketplace
+with a source kind kitbag doesn't carry, with credentials in its URL, or (Copilot) with `headers`.
+A local marketplace or `directory` path under your home directory is written as `~/...`.
+Nothing under `~/.copilot/installed-plugins/` or `~/.codex/plugins/` is read.
+
+**Apply** adds the profile's marketplaces and plugins to the settings file, in the same file as the
+MCP servers, and nothing else: a marketplace already there with the same source is left alone, a
+different one is replaced (Codex: key by key, so the keys Codex keeps itself stay), a plugin
+switched off is switched on, and `--no-overwrite` keeps all of those and says so. The plan lists
+every marketplace (with its source) and plugin it adds, and says that kitbag doesn't install
+anything: Copilot CLI installs the `enabledPlugins` entries itself, and Codex fetches a configured
+marketplace and installs or refreshes its configured plugins itself (`codex plugin marketplace
+upgrade` does it now; exactly when Codex does it on its own is UNVERIFIED, the docs say "during
+marketplace refresh"). A second apply is "Up to date", and `kitbag undo` restores the file; apply
+is additive, so removing a plugin from the profile doesn't remove it from the file. **From a git
+source** the plugins and marketplaces are withheld unless you pass `--trust-source` (a plugin can
+bundle hooks, MCP servers and skills): the plan lists each one and `inspect` lists them under what
+runs commands.
+
+Docs: Copilot CLI,
+[configuration directory](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference)
+(user and repository settings, `enabledPlugins`, `extraKnownMarketplaces`),
+[enterprise managed settings](https://docs.github.com/en/copilot/reference/enterprise-managed-settings-reference)
+(the marketplace `source` kinds),
+[plugins](https://docs.github.com/en/copilot/concepts/customizations/plugins); Codex,
+[config reference](https://learn.chatgpt.com/docs/config-file/config-reference) (`marketplaces.<name>.*`,
+`plugins.<plugin>.enabled`),
+[packaging plugins](https://developers.openai.com/plugins/build/plugins) (enabling a plugin for a
+repo, `codex plugin marketplace add`).
+
+### Zed extensions and Grok Build plugin folders, by reference: `[plugins.zed]`, `[plugins.grok-build]`
+
+**Zed** installs the extensions listed in `auto_install_extensions` of its user `settings.json`
+(`{"html": true, "docker-compose": false}`: `true` installs, `false` means never) from its gallery,
+by itself. The profile lists the extension ids; no extension files are copied, and Zed's
+`installed/` and `work/` folders are never read.
+
+```toml
+[plugins.zed.enabled."html"]
+[plugins.zed.enabled."toml"]
+```
+
+Capture carries the ids set to `true` and counts the ones set to `false`. Apply adds missing ids as
+`true` (an id set to `false` is switched to `true`, not with `--no-overwrite`), keeps the comments of
+the JSONC file, and is additive. It writes at user scope only: Zed's docs describe the setting
+only for the user's `settings.json`, not a project's `.zed/settings.json` (UNVERIFIED), so project
+scope says so and writes nothing. An extension can bundle language servers and MCP servers, so
+from a git source it is withheld unless you pass `--trust-source`.
+Docs (2026-11-27): [installing extensions](https://zed.dev/docs/extensions/installing-extensions),
+[all settings](https://zed.dev/docs/reference/all-settings) (`auto_install_extensions`).
+
+**Grok Build** loads plugins from `./.grok/plugins/`, `~/.grok/plugins/`, marketplace installs, the
+`--plugin-dir` flag, and "extra paths under `[plugins] paths` in `~/.grok/config.toml`". That list
+of folders is the by-reference layout, and kitbag carries it like Antigravity's, with the folder's
+path as the id (`~/...` for the home directory, which kitbag expands when it applies, because the docs
+don't say Grok Build expands `~`):
+
+```toml
+[plugins.grok-build.enabled."~/team/plugins/formatter"]
+```
+
+Capture reads `paths` in the user `config.toml`; a relative path is not carried (the docs don't say
+what it is relative to, UNVERIFIED), and the names in `[plugins] enabled` / `disabled` are counted
+and left out, since they name plugins that have to be installed first. Apply appends the missing
+folders to `[plugins] paths` of the user config (a folder that is already listed, however it is
+written, is left alone), warns when the folder doesn't exist on this machine, and never copies or
+installs a plugin. Project scope writes nothing: `.grok/config.toml` may hold `[plugins]`, but
+the docs don't say what a relative path in it means, and an absolute one is specific to one
+machine. Marketplace sources (`[[marketplace.sources]]` in `config.toml` and
+`~/.grok/plugins/known_marketplaces.json`) are named in the docs without a layout for their
+entries (UNVERIFIED), so they are not written, and a profile with `[plugins.grok-build.marketplaces]`
+is refused. Grok Build also reads Claude Code's marketplaces and plugins by itself, which
+`[plugins.claude-code]` already carries. Plugins from a git source need `--trust-source`.
+Docs (2026-11-27): [skills, plugins and marketplaces](https://docs.x.ai/build/features/skills-plugins-marketplaces),
+[settings reference](https://docs.x.ai/build/settings/reference).
+
+### Plugins not carried, and what was re-checked
 
 Checked against each tool's official docs on 2026-11-27; none of these documents a way to list
 a plugin by reference that kitbag could write without copying plugin code or running an install.
@@ -982,15 +1110,53 @@ a plugin by reference that kitbag could write without copying plugin code or run
   or local paths), and the docs don't say where that records an install or that a settings
   file lists them. ([SDK plugins](https://docs.cline.bot/sdk/plugins.md))
 
-**Documented, not carried yet (so #12 stays open)**: Codex lists plugins in `config.toml`
-(`[plugins."<name>@<marketplace>"]` with `enabled`, and `[marketplaces.<name>]` with `source`,
-`source_type` and `ref`; [config reference](https://learn.chatgpt.com/docs/config-file/config-reference)),
-and Copilot CLI reads `enabledPlugins` and `extraKnownMarketplaces` from `~/.copilot/settings.json` and
-the repository's `.github/copilot/settings.json`
-([CLI config directory](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference)).
-Both are by-reference mechanisms like Claude Code's, but kitbag has no `[plugins.codex]` or
-`[plugins.copilot]` section yet. Cursor, Zed, Hermes Agent and the remaining targets were not re-read for this
-section.
+- **Cursor**: plugins are installed in the **Customize** page of the app (project or user scope,
+  stored where the docs don't say), team marketplaces are set in the dashboard (Plugins & MCPs)
+  by an admin, and the one folder named, `~/.cursor/plugins/local`, holds the plugin code itself
+  (a symlink there loads only if it points to a directory inside that folder). The docs name no
+  settings key or file that lists a plugin or marketplace by reference.
+  ([plugins](https://cursor.com/docs/plugins), [reference](https://cursor.com/docs/reference/plugins))
+- **Hermes Agent**: `hermes plugins install owner/repo` clones into `~/.hermes/plugins/<name>/`
+  and records the source and revision in a `.install-metadata.json` inside the install, so the
+  folder is the install. `plugins.enabled` in `config.yaml` is a list of plugin *names* that are
+  only enabled once installed ("plugins install disabled by default, enabling is an explicit
+  step"), and a `hermes-pack.yaml` is read only by `hermes plugins pack install`, a command that
+  clones the repositories and asks for consent plugin by plugin. A name list without the install,
+  or a file only a network install reads, is not a by-reference layout, so none is written.
+  ([plugins](https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins))
+- **Windsurf**: the plugins its docs describe are the Windsurf plugin for JetBrains IDEs (an
+  editor integration, in maintenance mode) and Cascade's MCP "plugins", which are the servers in
+  `mcp_config.json` that kitbag already carries as MCP servers. Its editor extensions come from
+  the Open VSX marketplace (a Marketplace URL setting in the app), and no page lists them by
+  reference for an AI tool.
+  ([plugins](https://docs.devin.ai/windsurf/plugins/getting-started), [MCP](https://docs.windsurf.com/plugins/cascade/mcp))
+- **Roo Code**: no plugin system. Its Marketplace installs MCP servers (`mcp_settings.json`,
+  `.roo/mcp.json`) and modes (`custom_modes.yaml`, `.roomodes`) into files, with no key that lists
+  marketplace items by reference.
+  ([marketplace](https://roocodeinc.github.io/Roo-Code/features/marketplace))
+- **Continue**: no plugin system; the hub's blocks (models, rules, MCP servers, prompts) are
+  configuration items that `config.yaml` references with `uses`, not code a tool installs. ([blocks](https://docs.continue.dev/hub/blocks/intro))
+
+Every other target with a plugin or extension system is carried above or is one of these skips,
+except the one gap below. What each carried tool still
+leaves to the tool itself: Claude Code, Copilot CLI and Codex fetch the plugins; opencode installs
+its packages; Zed downloads its extensions; Antigravity and Grok Build load the folders and keep
+their enabled state.
+
+**Documented, not carried yet (so #12 stays open)**: VS Code's user-level plugin settings for the
+Copilot agent. Its docs (checked 2026-11-27,
+[agent plugins](https://code.visualstudio.com/docs/agent-customization/agent-plugins),
+[reference](https://code.visualstudio.com/docs/agents/reference/agent-plugin-reference)) name two
+Experimental settings in VS Code's own user `settings.json`: `chat.plugins.marketplaces` (a list of
+marketplace repositories as `owner/repo#ref`, an HTTPS or SCP-style git remote, or a `file:///`
+URI) and `chat.pluginLocations` (a map of plugin folders to `true` / `false`). Both are by
+reference, but they need a decision kitbag hasn't made: which editor's settings file to write
+(VS Code, Insiders, VSCodium; kitbag's `copilot` target has no VS Code location today), and a
+profile shape for plugin folders and for marketplaces without a name. Not written; nothing in the
+`.github/copilot/settings.json` carry above depends on them. Also not writable from the docs,
+and therefore not a gap in kitbag: Grok Build's marketplace sources and project-level
+`[plugins] paths` (no entry shape or path meaning is documented), and Zed's project-level
+`auto_install_extensions` (UNVERIFIED).
 
 ### Plugins: `rules/` at the root, no `kitbag.toml`
 
