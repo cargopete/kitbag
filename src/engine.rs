@@ -95,6 +95,25 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
             } else {
                 st.0.push(a.id().to_string());
             }
+            // Each tool documents its own OAuth keys, so two tools' entries
+            // for one server can differ only in which of them they name:
+            // that is one server, with what both say.
+            if let Some(prev) = merged.mcp_servers.get_mut(&n) {
+                let (a, b) = (prev.oauth.take(), s.oauth.take());
+                if prev.clone() == s {
+                    prev.oauth = match (a, b) {
+                        (Some(mut a), Some(b)) => {
+                            a.fill_from(&b);
+                            Some(a)
+                        }
+                        (a, b) => a.or(b),
+                    };
+                    s.oauth = prev.oauth.clone();
+                } else {
+                    prev.oauth = a;
+                    s.oauth = b;
+                }
+            }
             match merged.mcp_servers.get(&n) {
                 None => {
                     out.redactions.extend(c.redactions.iter().filter(|r| r.server.as_ref() == Some(&n)).cloned());
@@ -332,6 +351,9 @@ pub struct Plan {
     /// MCP servers a profile from a git source would remove from a tool, held
     /// back like additions until `--allow-git-mcp` names them.
     pub withheld_removals: Vec<ServerReview>,
+    /// Servers that still need a sign-in on a target, with the tool's own
+    /// command (see [`crate::oauth::checklist`]). Nothing is signed in by kitbag.
+    pub signins: Vec<crate::oauth::SignIn>,
     /// MCP server entries the plan writes or removes, with the real config
     /// file (recorded after a write, see [`crate::sync::record`]).
     pub server_writes: Vec<ServerWrite>,
@@ -521,6 +543,10 @@ pub fn plan(
             ..w.clone()
         })
         .collect();
+    let signins: Vec<crate::oauth::SignIn> = applied
+        .iter()
+        .flat_map(|t| crate::oauth::checklist(profile, t))
+        .collect();
     let servers = review_servers(profile, &work.changed_servers);
     let removed_servers = review_servers(profile, &work.removed_servers);
     let turned_off_servers = review_servers(profile, &work.turned_off_servers);
@@ -661,6 +687,7 @@ pub fn plan(
         removed_servers,
         turned_off_servers,
         withheld_removals,
+        signins,
         server_writes,
         hook_writes,
         hook_skipped: work.hook_skipped,

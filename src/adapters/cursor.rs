@@ -160,6 +160,7 @@ fn import(cap: &mut Captured, name: &str, def: &Map<String, Value>) {
         );
     }
     let mut s = server_from_json(def);
+    s.oauth = crate::oauth::read(ID, def);
     if def.get("type").and_then(Value::as_str) == Some("sse") {
         s.transport = Some(Transport::Sse);
     }
@@ -392,6 +393,7 @@ impl Adapter for Cursor {
                     ),
                 );
             }
+            let original = s;
             let s = render_server(s, RefStyle::EnvColon, env, work);
             let mut def = Map::new();
             if s.transport() == Transport::Stdio {
@@ -407,6 +409,7 @@ impl Adapter for Cursor {
                     def.insert("headers".into(), json!(s.headers));
                 }
             }
+            super::common::add_oauth(work, ID, name, (original, &s), &mut def);
             servers.push((name.clone(), Value::Object(def)));
         }
         merge_json_servers(

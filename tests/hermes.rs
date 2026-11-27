@@ -729,7 +729,10 @@ fn hermes_to_claude_code_and_back() {
     let back = capture(&["claude-code"], &dst.env(Scope::User)).profile;
     for (name, s) in &loaded.mcp_servers {
         if !s.disabled {
-            assert_eq!(&back.mcp_servers[name], s, "server {name}");
+            // `auth: oauth` is a marker Claude Code has no key for.
+            let mut s = s.clone();
+            s.oauth = None;
+            assert_eq!(&back.mcp_servers[name], &s, "server {name}");
         }
     }
     assert_eq!(back.instructions, loaded.instructions);

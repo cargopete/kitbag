@@ -291,6 +291,7 @@ fn import(cap: &mut Captured, file: &Path, name: &str, def: &Map<String, Value>)
         Some("remote") => {
             s.url = str_of(def.get("url"));
             s.headers = string_map(def.get("headers"));
+            s.oauth = crate::oauth::read(ID, def);
         }
         other => {
             let found = other.map_or("no type".to_string(), |t| format!("type '{t}'"));
@@ -527,6 +528,7 @@ impl Adapter for OpenCode {
                 reserved.push(name.as_str());
                 continue;
             }
+            let original = s;
             let s = render_server(s, RefStyle::EnvBrace, env, work);
             let mut def = Map::new();
             match s.transport() {
@@ -548,6 +550,7 @@ impl Adapter for OpenCode {
                     if !s.headers.is_empty() {
                         def.insert("headers".into(), json!(s.headers));
                     }
+                    super::common::add_oauth(work, ID, name, (original, &s), &mut def);
                 }
                 Transport::Sse => {
                     sse.push(name.as_str());

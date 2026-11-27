@@ -273,6 +273,8 @@ fn import(
     if def.contains_key("tools") && tools != ["*"] {
         left.push("tools");
     }
+    // Copilot's MCP docs (re-read 2026-11-27) don't name these `oauth*` keys,
+    // so they stay Copilot-specific and are not carried (#18).
     left.extend(
         [
             "oauthClientId",

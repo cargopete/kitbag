@@ -235,6 +235,7 @@ impl Adapter for GeminiCli {
                     doc.get("mcpServers"),
                 ) {
                     let mut s = server_from_json(def);
+                    s.oauth = crate::oauth::read(ID, def);
                     if let Some(http) = str_of(def.get("httpUrl")) {
                         s.url = Some(http);
                     } else if s.url.is_some() {
@@ -302,6 +303,7 @@ impl Adapter for GeminiCli {
         let p = paths(env);
         let mut servers = Vec::new();
         for (name, s) in servers_for(profile, ID, work, false) {
+            let original = s;
             let s = render_server(s, RefStyle::DollarPlain, env, work);
             let mut def = Map::new();
             match s.transport() {
@@ -329,6 +331,7 @@ impl Adapter for GeminiCli {
                     }
                 }
             }
+            super::common::add_oauth(work, ID, name, (original, &s), &mut def);
             servers.push((name.clone(), Value::Object(def)));
         }
         // Gemini CLI documents no flag on a server entry. It does document

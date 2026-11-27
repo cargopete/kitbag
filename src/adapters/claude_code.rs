@@ -312,6 +312,7 @@ fn import(cap: &mut Captured, name: &str, def: &Map<String, Value>) {
         );
     }
     let mut s = server_from_json(def);
+    s.oauth = crate::oauth::read(ID, def);
     if ty == Some("sse") {
         s.transport = Some(Transport::Sse);
     }
@@ -721,8 +722,12 @@ impl Adapter for ClaudeCode {
                     ),
                 );
             }
-            let s = render_server(s, RefStyle::Dollar, env, work);
-            servers.push((name.clone(), server_json(&s)));
+            let rendered = render_server(s, RefStyle::Dollar, env, work);
+            let mut def = server_json(&rendered);
+            if let Value::Object(m) = &mut def {
+                super::common::add_oauth(work, ID, name, (s, &rendered), m);
+            }
+            servers.push((name.clone(), def));
         }
         // A project's .mcp.json servers have a switch of their own,
         // `disabledMcpjsonServers`: a server the profile disables here stays
