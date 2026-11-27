@@ -34,8 +34,14 @@
 //!   system prompt. Only frontmatter keys opencode documents are written;
 //!   keys from other tools (`tools` lists, `permissionMode`, `hooks` ...) are
 //!   left out with a note rather than translated. `mode/` and `modes/` (opencode
-//!   1 primary agents), agents and commands defined inside `opencode.json`
-//!   and plugins are not captured.
+//!   1 primary agents) and agents and commands defined inside `opencode.json`
+//!   are not captured.
+//! * Plugins, by reference: the npm packages in the `plugins` array of the
+//!   config (`plugin` in opencode 1), which opencode installs itself (see
+//!   `plugins.rs`). Local paths, `-name` entries and plugin options are left
+//!   out, and the `plugins/` folders, which are the plugin code, are never
+//!   copied. Apply appends to the array the file already has, in the config
+//!   file the MCP servers go to.
 //!
 //! Docs: <https://opencode.ai/docs/config/>, <https://opencode.ai/docs/mcp-servers/>,
 //! <https://opencode.ai/docs/rules/>, <https://opencode.ai/docs/commands/>,
@@ -335,6 +341,7 @@ impl Adapter for OpenCode {
             };
             cap.sources.push(file.clone());
             let doc = parse_value(Some(&text), file)?;
+            crate::plugins::capture_opencode(&mut cap, &doc, &tildify(file, &env.home));
             match doc.get("mcp") {
                 None | Some(Value::Null) => {}
                 Some(Value::Object(mcp)) => {
@@ -406,18 +413,12 @@ impl Adapter for OpenCode {
         for name in ["mode", "modes", "plugin", "plugins"] {
             let dir = p.base.join(name);
             if dir.is_dir() {
-                let what = if name.starts_with("mode") {
-                    "opencode 1 primary agents"
+                let why = if name.starts_with("mode") {
+                    "opencode 1 primary agents) not captured; kitbag doesn't carry them"
                 } else {
-                    "plugins"
+                    "plugin code) not copied; only npm packages listed in the config are carried, by reference"
                 };
-                cap.info(
-                    ID,
-                    format!(
-                        "{} ({what}) not captured; kitbag doesn't carry them",
-                        tildify(&dir, &env.home)
-                    ),
-                );
+                cap.info(ID, format!("{} ({why}", tildify(&dir, &env.home)));
             }
         }
         Ok(cap)
@@ -536,6 +537,8 @@ impl Adapter for OpenCode {
             ID,
             Some((&set_off, flag)),
         )?;
+
+        crate::plugins::apply_opencode(profile, opts, work, &file, layout == Layout::Legacy)?;
 
         let had_instructions = work.fs.read(&p.instructions)?.is_some();
         write_instructions(work, &p.instructions, profile, opts, true, ID)?;
