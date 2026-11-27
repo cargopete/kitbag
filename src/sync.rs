@@ -44,12 +44,37 @@ pub fn item_text(bytes: Option<&[u8]>, block: Option<&str>) -> Option<String> {
     let text = decode_text(bytes?.to_vec()).ok()?;
     match block {
         None => Some(text),
+        Some(id) if id.starts_with(YAML_ENTRY_PREFIX) => yaml_entry_text(&text, id),
         Some(id) => block::split(&text)
             .blocks
             .into_iter()
             .find(|(b, _)| b == id)
             .map(|(_, inner)| inner),
     }
+}
+
+/// Start of the block id of an item that is not a marked block but one text
+/// field of an entry in a YAML list (Continue keeps its instructions in an
+/// entry of `rules` in `config.yaml`). See [`yaml_entry_block`].
+pub const YAML_ENTRY_PREFIX: &str = "yaml-entry:";
+
+/// Block id of the `field` of the entry of list `section` whose `name` is `name`.
+pub fn yaml_entry_block(section: &str, name: &str, field: &str) -> String {
+    format!("{YAML_ENTRY_PREFIX}{section}:{name}:{field}")
+}
+
+/// The text field a [`yaml_entry_block`] id names, in the YAML `text`.
+fn yaml_entry_text(text: &str, id: &str) -> Option<String> {
+    let mut parts = id.strip_prefix(YAML_ENTRY_PREFIX)?.splitn(3, ':');
+    let (section, name, field) = (parts.next()?, parts.next()?, parts.next()?);
+    let doc = crate::edit::yaml::parse_map(Some(text), Path::new("")).ok()?;
+    doc.get(section)?
+        .as_array()?
+        .iter()
+        .find(|v| v.get("name").and_then(|n| n.as_str()) == Some(name))?
+        .get(field)?
+        .as_str()
+        .map(str::to_string)
 }
 
 pub fn hash(text: &str) -> String {
@@ -843,6 +868,27 @@ pub fn pull_back(
                     add_rule(&mut cap, r, &i.target);
                 }
                 next.rules = std::mem::take(&mut cap.profile.rules);
+            }
+            Some(b) if b.starts_with(YAML_ENTRY_PREFIX) && i.item == "instructions" => {
+                // An entry of a YAML list: the plain-text entries next to it
+                // are the "outside" text apply leaves out of it.
+                let section = b[YAML_ENTRY_PREFIX.len()..].split(':').next().unwrap_or("");
+                let outside = read_opt(&i.path)?
+                    .and_then(|b| decode_text(b).ok())
+                    .and_then(|t| crate::edit::yaml::parse_map(Some(&t), &i.path).ok())
+                    .and_then(|m| m.get(section).and_then(|v| v.as_array().cloned()))
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                let text = match profile.instructions.as_deref() {
+                    Some(old) => block::with_omitted_paragraphs(text, old, &outside),
+                    None => text.to_string(),
+                };
+                cap.profile.instructions = None;
+                add_instructions(&mut cap, &i.target, &text, &i.path);
+                next.instructions = cap.profile.instructions.take();
             }
             Some(_) => {}
             None => {

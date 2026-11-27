@@ -9,9 +9,11 @@ use common::*;
 use kitbag::adapters::{Scope, SecretsMode};
 use kitbag::engine;
 use kitbag::model::{McpServer, Profile, Rule, Transport};
+use predicates::prelude::*;
 use serde_json::{Value, json};
 
 const CONFIG: &str = "home/.continue/config.yaml";
+const MANIFEST: &str = "kitbag = 1\nname = \"team\"\n";
 const KITBAG_YAML: &str = "project/.continue/mcpServers/kitbag.yaml";
 
 /// A sandbox holding the Continue fixtures (and nothing else).
@@ -120,10 +122,11 @@ fn capture_user_config() {
     ));
     assert!(said(&r.notes, "requestOptions not captured: timeout"));
     assert!(said(&r.notes, "`uses:`"));
-    assert!(said(
-        &r.notes,
-        "models, prompts in config.yaml not captured"
-    ));
+    assert!(said(&r.notes, "models in config.yaml not captured"));
+    // A prompt written out in config.yaml is a command.
+    assert_eq!(p.commands.len(), 1);
+    assert_eq!(p.commands[0].name, "hello");
+    assert_eq!(p.commands[0].body, "Say hello");
 }
 
 #[test]
@@ -644,4 +647,307 @@ fn continue_is_listed_and_detected() {
     assert_eq!(c["support"]["mcp"], "native");
     assert_eq!(c["support"]["instructions"], "native");
     assert_eq!(c["support"]["rules"], "-", "user scope has no rule files");
+}
+
+const PROMPT_CONFIG: &str = "name: Local Config
+version: 1.0.0
+schema: v1
+# my prompts
+prompts:
+  - name: Unit test   # slash command
+    description: Unit test a function
+    invokable: true
+    prompt: |
+      Write unit tests.
+
+      Cover edge cases.
+  - uses: supabase/create-functions
+  - name: hello
+    prompt: Say hello
+";
+
+fn command(name: &str, description: Option<&str>, body: &str) -> kitbag::model::Command {
+    kitbag::model::Command {
+        name: name.into(),
+        description: description.map(str::to_string),
+        body: body.into(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn capture_reads_prompts_from_config_yaml() {
+    let sb = Sandbox::empty();
+    fs::create_dir_all(sb.path("home/.continue")).unwrap();
+    fs::write(sb.path(CONFIG), PROMPT_CONFIG).unwrap();
+    let r = capture(&["continue"], &sb.env(Scope::User));
+    let names: Vec<&str> = r.profile.commands.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["hello", "unit-test"]);
+    let c = &r.profile.commands[1];
+    assert_eq!(c.description.as_deref(), Some("Unit test a function"));
+    assert_eq!(c.body, "Write unit tests.\n\nCover edge cases.");
+    assert!(said(
+        &r.notes,
+        "prompt 'Unit test' is captured as 'unit-test'"
+    ));
+    assert!(said(
+        &r.notes,
+        "1 prompt(s) in config.yaml that use a Hub block"
+    ));
+    // Project scope: Continue's docs name no prompts folder.
+    let sb = sandbox();
+    let r = capture(&["continue"], &sb.env(Scope::Project));
+    assert!(r.profile.commands.is_empty());
+    assert!(said(&r.notes, "name no prompts folder"));
+}
+
+#[test]
+fn commands_are_written_as_prompts_and_undone() {
+    let sb = Sandbox::empty();
+    fs::create_dir_all(sb.path("home/.continue")).unwrap();
+    fs::write(sb.path(CONFIG), PROMPT_CONFIG).unwrap();
+    let env = sb.env(Scope::User);
+    let mut p = Profile::new("team");
+    p.commands.push(command(
+        "review",
+        Some("Review a change"),
+        "Review: $ARGUMENTS\n\nBe kind.",
+    ));
+    // Same name as the existing `Unit test` entry (found under its own name).
+    p.commands.push(command(
+        "unit-test",
+        Some("Unit test a function"),
+        "New body.",
+    ));
+    let plan = apply(&sb, &p, &["continue"], &env);
+    let after = sb.read(CONFIG);
+    let doc = yaml(&after);
+    let prompts = doc["prompts"].as_array().unwrap();
+    assert_eq!(prompts.len(), 4, "{after}");
+    // Replaced in place: its name and the key kitbag doesn't manage stay.
+    assert_eq!(prompts[0]["name"], "Unit test");
+    assert_eq!(prompts[0]["prompt"], "New body.");
+    assert_eq!(prompts[0]["invokable"], true);
+    // A Hub prompt and a prompt of the user's own are left alone.
+    assert_eq!(prompts[1]["uses"], "supabase/create-functions");
+    assert_eq!(prompts[2]["prompt"], "Say hello");
+    assert_eq!(prompts[3]["name"], "review");
+    assert_eq!(prompts[3]["description"], "Review a change");
+    assert_eq!(prompts[3]["prompt"], "Review: $ARGUMENTS\n\nBe kind.");
+    assert!(after.contains("# my prompts\nprompts:\n"), "{after}");
+    assert!(after.contains("  - name: hello\n    prompt: Say hello\n"));
+    assert!(said(&plan.notes, "uses $ARGUMENTS or $N placeholders"));
+    assert!(
+        plan.changed_items
+            .contains(&("continue".into(), "command review".into()))
+    );
+
+    // The profile's commands round-trip through capture.
+    let back = capture(&["continue"], &env).profile;
+    let review = back.commands.iter().find(|c| c.name == "review").unwrap();
+    assert_eq!(review.body, "Review: $ARGUMENTS\n\nBe kind.");
+    assert_eq!(review.description.as_deref(), Some("Review a change"));
+
+    // A second apply is up to date, and undo restores the file.
+    let again = plan_of(&p, &env);
+    assert!(again.changes.is_empty(), "{:?}", again.changes);
+    kitbag::txn::Store::new(sb.state())
+        .undo(None, false)
+        .unwrap();
+    assert_eq!(sb.read(CONFIG), PROMPT_CONFIG);
+}
+
+#[test]
+fn prompts_are_added_to_a_config_without_them_and_respect_no_overwrite() {
+    let sb = sandbox();
+    let env = sb.env(Scope::User);
+    let mut p = Profile::new("team");
+    p.commands.push(command("hello", None, "Say hi"));
+    let mut o = opts(&p);
+    o.overwrite = false;
+    let pl = engine::plan(&p, &targets(&["continue"]), &env, &o).unwrap();
+    assert!(pl.changes.is_empty(), "{:?}", pl.changes);
+    assert!(said(&pl.notes, "kept existing prompt 'hello'"));
+    // Without the existing one: a new `prompts` list on a file with none.
+    let sb = Sandbox::empty();
+    let mut p = Profile::new("team");
+    p.commands
+        .push(command("fix", Some("Fix it"), "Fix the bug."));
+    apply(&sb, &p, &["continue"], &sb.env(Scope::User));
+    let doc = yaml(&sb.read(CONFIG));
+    assert_eq!(
+        doc["prompts"],
+        json!([{"name": "fix", "description": "Fix it", "prompt": "Fix the bug."}])
+    );
+    // Not at project scope: the docs name no folder.
+    let pl = apply(&sb, &p, &["continue"], &sb.env(Scope::Project));
+    assert!(said(&pl.notes, "name no prompts folder"));
+    assert!(!sb.path("project/.continue/prompts").exists());
+}
+
+#[test]
+fn a_command_disabled_for_continue_is_not_written() {
+    let sb = Sandbox::empty();
+    let dir = sb.path("prof");
+    fs::create_dir_all(dir.join("commands")).unwrap();
+    fs::write(dir.join("kitbag.toml"), MANIFEST).unwrap();
+    fs::write(
+        dir.join("commands/fix.md"),
+        "---\ndisabled_on:\n  - continue\n---\nFix it.\n",
+    )
+    .unwrap();
+    fs::write(dir.join("commands/ship.md"), "Ship it.\n").unwrap();
+    fs::create_dir_all(sb.path("home/.continue")).unwrap();
+    fs::write(
+        sb.path(CONFIG),
+        "name: Local Config\nversion: 1.0.0\nschema: v1\nprompts:\n  - name: mine\n    prompt: Mine\n",
+    )
+    .unwrap();
+    sb.cli()
+        .args(["apply", "prof", "--to", "continue", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("no record of adding").not());
+    let doc = yaml(&sb.read(CONFIG));
+    let names: Vec<&str> = doc["prompts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["mine", "ship"]);
+}
+
+#[test]
+fn a_prompt_of_a_disabled_command_stays_in_config_yaml() {
+    let sb = Sandbox::empty();
+    let dir = sb.path("prof");
+    fs::create_dir_all(dir.join("commands")).unwrap();
+    fs::write(dir.join("kitbag.toml"), MANIFEST).unwrap();
+    fs::write(dir.join("commands/fix.md"), "Fix it.\n").unwrap();
+    sb.cli()
+        .args(["apply", "prof", "--to", "continue", "--yes"])
+        .assert()
+        .success();
+    let written = sb.read(CONFIG);
+    assert_eq!(yaml(&written)["prompts"][0]["name"], "fix");
+    fs::write(
+        dir.join("commands/fix.md"),
+        "---\ndisabled_on:\n  - continue\n---\nFix it.\n",
+    )
+    .unwrap();
+    let out = sb
+        .cli()
+        .args(["apply", "prof", "--to", "continue", "--yes"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    // kitbag has no record it could check an entry in `config.yaml` against,
+    // so the prompt it wrote earlier is left, and the plan says the command is skipped.
+    assert!(String::from_utf8_lossy(&out.stdout).contains("command 'fix' skipped on continue"));
+    assert_eq!(sb.read(CONFIG), written);
+}
+
+/// Profile directory `p` with instructions, applied to Continue at user scope.
+fn applied_instructions() -> Sandbox {
+    let sb = Sandbox::empty();
+    fs::create_dir_all(sb.path("home/.continue")).unwrap();
+    fs::write(
+        sb.path(CONFIG),
+        "name: Local Config\nversion: 1.0.0\nschema: v1\nrules:\n  - Plain rule.\n",
+    )
+    .unwrap();
+    fs::create_dir_all(sb.path("p")).unwrap();
+    fs::write(sb.path("p/kitbag.toml"), MANIFEST).unwrap();
+    fs::write(sb.path("p/instructions.md"), "Be brief.\n").unwrap();
+    sb.cli()
+        .args(["apply", "p", "--to", "continue", "--yes"])
+        .assert()
+        .success();
+    sb
+}
+
+fn state_of(sb: &Sandbox, args: &[&str]) -> String {
+    let out = sb
+        .cli()
+        .arg("status")
+        .args(args)
+        .arg("--json")
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
+    v.as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["target"] == "continue" && r["item"] == "instructions")
+        .unwrap_or_else(|| panic!("no continue instructions row in {v}"))["state"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn status_tracks_the_user_scope_instructions_entry() {
+    let sb = applied_instructions();
+    assert_eq!(
+        yaml(&sb.read(CONFIG))["rules"][1]["name"],
+        "kitbag-instructions"
+    );
+    let to = ["p", "--to", "continue"];
+    assert_eq!(state_of(&sb, &to), "in sync");
+    assert_eq!(state_of(&sb, &[]), "in sync");
+
+    // Edited in Continue's config.
+    let text = sb.read(CONFIG).replace("Be brief.", "Be very brief.");
+    fs::write(sb.path(CONFIG), text).unwrap();
+    assert_eq!(state_of(&sb, &to), "tool edited");
+    assert_eq!(state_of(&sb, &[]), "tool edited");
+    sb.cli()
+        .args(["status", "p", "--to", "continue", "--exit-code"])
+        .assert()
+        .code(1);
+
+    // The profile changes too.
+    fs::write(sb.path("p/instructions.md"), "Be terse.\n").unwrap();
+    assert_eq!(state_of(&sb, &to), "both changed");
+
+    // A plain `apply` without --overwrite leaves the edited entry alone.
+    sb.cli()
+        .args(["apply", "p", "--to", "continue", "--yes", "--no-overwrite"])
+        .assert()
+        .success();
+    assert!(sb.read(CONFIG).contains("Be very brief."));
+}
+
+#[test]
+fn status_sees_a_profile_change_and_sync_from_continue_pulls_an_edit_back() {
+    let sb = applied_instructions();
+    fs::write(sb.path("p/instructions.md"), "Be terse.\n").unwrap();
+    assert_eq!(state_of(&sb, &["p", "--to", "continue"]), "profile changed");
+    sb.cli()
+        .args(["apply", "p", "--to", "continue", "--yes"])
+        .assert()
+        .success();
+    assert_eq!(state_of(&sb, &["p", "--to", "continue"]), "in sync");
+
+    let text = sb.read(CONFIG).replace("Be terse.", "Be terse. Be kind.");
+    fs::write(sb.path(CONFIG), text).unwrap();
+    sb.cli()
+        .args([
+            "sync", "p", "--from", "continue", "--to", "continue", "--yes",
+        ])
+        .assert()
+        .success();
+    // The plain rule that was already in the file isn't pulled into the
+    // profile, which never had it.
+    let instructions = sb.read("p/instructions.md");
+    assert!(
+        instructions.contains("Be terse. Be kind."),
+        "{instructions}"
+    );
+    assert!(!instructions.contains("Plain rule."), "{instructions}");
+    assert_eq!(state_of(&sb, &["p", "--to", "continue"]), "in sync");
+    let config = sb.read(CONFIG);
+    assert_eq!(config.matches("Plain rule.").count(), 1, "{config}");
 }

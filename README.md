@@ -10,7 +10,7 @@ from the AI coding tools you already use. It stores them as a small, git-friendl
 redacted and applies that profile to any other tool in one step. Claude Code, Cursor,
 OpenAI Codex CLI, Gemini CLI, Claude Desktop, Google Antigravity, opencode (the last two
 for MCP servers and instructions), GitHub Copilot (MCP servers, instructions, rules, prompt files and skills)
-xAI's Grok Build CLI, Windsurf, Zed, Hermes Agent, Amp, Cline, Roo Code and Continue (the last seven for MCP servers and instructions; Hermes also for shell hooks, Continue also for project rules) are supported, at user and
+xAI's Grok Build CLI, Windsurf, Zed, Hermes Agent, Amp, Cline, Roo Code and Continue (the last seven for MCP servers and instructions; Hermes also for shell hooks, Continue also for project rules and, at user scope, commands) are supported, at user and
 project scope.
 
 > [!IMPORTANT]
@@ -105,7 +105,7 @@ preview with `kitbag diff github:cargopete/dotagents --to all`.
 | `amp`            | Amp               | user, project | ✓   | ✓            | -          | -            | -      | -      | -        |
 | `cline`          | Cline             | user, project | user | ✓           | folded     | -            | -      | -      | -        |
 | `roo`            | Roo Code (alias: `roo-code`) | user, project | ✓ | ✓    | folded     | -            | -      | -      | -        |
-| `continue`       | Continue          | user, project | ✓   | ✓            | project    | -            | -      | -      | -        |
+| `continue`       | Continue          | user, project | ✓   | ✓            | project    | user         | -      | -      | -        |
 
 `claude` is accepted as an alias for `claude-code` wherever a target id is given (`--to`,
 `--from`, `targets`, `disabled_on`, and `[settings.claude]`, read as `[settings.claude-code]`;
@@ -139,7 +139,7 @@ Where things go:
 | Amp | `~/.config/amp/settings.json` or `settings.jsonc` (`amp.mcpServers`; `%USERPROFILE%\.config\amp` on Windows), `~/.config/amp/AGENTS.md` | `.amp/settings.json` or `settings.jsonc` (`amp.mcpServers`; Amp asks you to approve these servers, `amp mcp approve`), `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf, Grok Build and Hermes), or `AGENT.md` / `CLAUDE.md` when that is the file Amp reads |
 | Cline | `~/.cline/data/settings/cline_mcp_settings.json` (`mcpServers`; `CLINE_MCP_SETTINGS_PATH` names the file, `CLINE_DATA_DIR` replaces `~/.cline/data`, `CLINE_DIR` replaces `~/.cline`), `~/.cline/rules/kitbag.md` (a managed block in a file of its own; Cline reads every file in that directory) | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build, Windsurf and Zed); Cline's docs describe no project MCP file, so MCP servers are not written at project scope |
 | Roo Code | `mcp_settings.json` in `<editor user data>/User/globalStorage/rooveterinaryinc.roo-cline/settings/` (`mcpServers`; the editor is VS Code, else VS Code Insiders, VSCodium or Cursor, whichever has the extension's folder: `~/.config/Code` or `$XDG_CONFIG_HOME/Code` on Linux, `~/Library/Application Support/Code` on macOS, `%APPDATA%\Code` on Windows), `~/.roo/rules/kitbag.md` (a managed block in a file of its own; Roo reads every file in that directory) | `.roo/mcp.json` (`mcpServers`; wins over the user file for a server of the same name), `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build, Windsurf and Zed) |
-| Continue | `~/.continue/config.yaml` (`%USERPROFILE%\.continue\config.yaml` on Windows): `mcpServers` and, for instructions, a `kitbag-instructions` entry of `rules` | `.continue/mcpServers/*.yaml` (a server already defined in one of those files is edited there, new ones go to `kitbag.yaml`; JSON files there are read, not written), `.continue/rules/<name>.md`, and the instructions in `.continue/rules/kitbag-instructions.md`; `AGENTS.md` is not used, since Continue's docs don't mention it |
+| Continue | `~/.continue/config.yaml` (`%USERPROFILE%\.continue\config.yaml` on Windows): `mcpServers`, for instructions a `kitbag-instructions` entry of `rules`, and for commands the `prompts` list | `.continue/mcpServers/*.yaml` (a server already defined in one of those files is edited there, new ones go to `kitbag.yaml`; JSON files there are read, not written), `.continue/rules/<name>.md`, and the instructions in `.continue/rules/kitbag-instructions.md`; `AGENTS.md` is not used, since Continue's docs don't mention it |
 | GitHub Copilot | `$COPILOT_HOME/mcp-config.json` (`mcpServers`, default `~/.copilot`), `$COPILOT_HOME/copilot-instructions.md`, `$COPILOT_HOME/instructions/*.instructions.md`, `$COPILOT_HOME/skills/`, `$COPILOT_HOME/agents/*.agent.md` | `.mcp.json` (shared with Claude Code, written in Claude Code's shape), `.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` (`applyTo`), `.github/prompts/*.prompt.md`, `.github/skills/`, `.github/agents/*.agent.md`; capture also reads `.github/mcp.json`, legacy chat modes in `.github/chatmodes/` and `.vscode/mcp.json` (`servers`), and `disabledMcpServers` from Copilot's `settings.json` |
 
 How each tool receives `${VAR}` references:
@@ -1306,8 +1306,21 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   JSON file is left alone with a note. Rules are `.continue/rules/<name>.md` (`name`,
   `description`, `globs`, `alwaysApply`; `regex` isn't carried), and the instructions a managed
   block in `.continue/rules/kitbag-instructions.md`. Continue's docs describe no rules folder in
-  `~/.continue`, so rules are written at project scope only. Models, prompts, context providers,
-  docs and the other things under `.continue/` are not carried.
+  `~/.continue`, so rules are written at project scope only. Commands are Continue's prompts, at
+  user scope only: capture reads the entries of `prompts` in `config.yaml` that are written out
+  there (`name`, `description`, `prompt`; a name with spaces becomes a kitbag name, as for
+  servers) as commands, and apply writes each command as such an entry, the form Continue's
+  reference shows, replacing an entry of the same name (keys of yours on it, such as
+  `invokable`, stay) and leaving the others, including Hub prompts (`uses:`), alone. Continue's
+  docs describe no prompts folder and no argument placeholder, so a project's `.continue/prompts`
+  is not read or written (capture says so), `$ARGUMENTS` is written as it is (with a note), and
+  the argument hint and other command frontmatter have no place and are dropped. A prompt kitbag
+  wrote stays in `config.yaml` if the profile later disables the command for Continue (remove it
+  by hand); undo restores the file. `kitbag status` tracks the `kitbag-instructions` entry like
+  any managed instructions block: `tool edited`, `profile changed` and `both changed` are
+  reported, and `sync --from continue` pulls an edit to it back into the profile. Models,
+  context providers, docs, Hub blocks, YAML rule files and the other things under `.continue/`
+  are not carried; Continue's docs mention no skills, so they are not carried either.
 - **GitHub Copilot** and Claude Code both read a project's `.mcp.json`. kitbag writes it in
   Claude Code's shape for both (no `cwd`, no `tools`; a `cwd` is dropped with a warning), so
   applying both writes each server once, and a server the profile keeps off one of them stays
