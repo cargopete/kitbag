@@ -1483,7 +1483,7 @@ mod tests {
             p.warnings
         );
         assert!(p.warnings[0].contains(
-            "valid targets: claude-code, cursor, codex, gemini-cli, claude-desktop, antigravity, opencode"
+            "valid targets: claude-code, cursor, codex, gemini-cli, claude-desktop, antigravity, opencode, copilot, grok-build"
         ));
         assert!(
             p.warnings[1].starts_with("mcp_servers.b: unknown target 'vscode' in 'disabled_on'")

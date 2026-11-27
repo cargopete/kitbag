@@ -736,6 +736,40 @@ fn project_scope_adopts_a_cursor_rule() {
 }
 
 #[test]
+fn project_scope_adopts_a_grok_build_rule() {
+    let sb = Sandbox::empty();
+    fs::create_dir_all(sb.path("p/rules")).unwrap();
+    fs::write(sb.path("p/kitbag.toml"), MANIFEST).unwrap();
+    fs::write(sb.path("p/instructions.md"), "Be brief.\n").unwrap();
+    fs::write(
+        sb.path("p/rules/ts.md"),
+        "---\nglobs: src/**/*.ts\n---\n\nStrict mode.\n",
+    )
+    .unwrap();
+    let proj = ["--project", "project", "--to", "grok-build"];
+    sb.cli()
+        .args(["apply", "p", "--yes"])
+        .args(proj)
+        .assert()
+        .success();
+    fs::write(sb.path("project/.grok/rules/hotfix.md"), "Keep the flag.\n").unwrap();
+    let mut args = vec!["p"];
+    args.extend(proj);
+    let rows = status(&sb, &args);
+    assert_eq!(state_of(&rows, "grok-build", "rule hotfix"), "tool only");
+    // The rule kitbag wrote is the profile's, not a one-off.
+    assert_eq!(state_of(&rows, "grok-build", "rule ts"), "in sync");
+    sb.cli()
+        .args(["sync", "p", "--from", "grok-build", "--adopt", "--yes"])
+        .args(proj)
+        .assert()
+        .success();
+    assert!(sb.read("p/rules/hotfix.md").contains("Keep the flag."));
+    let rows = status(&sb, &args);
+    assert!(rows.iter().all(|r| r.2 == "in sync"), "{rows:?}");
+}
+
+#[test]
 fn pulling_back_a_block_keeps_adopted_text() {
     let sb = applied();
     let codex = sb.read("home/.codex/AGENTS.md");

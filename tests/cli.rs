@@ -262,7 +262,8 @@ fn list_targets_json() {
             "claude-desktop",
             "antigravity",
             "opencode",
-            "copilot"
+            "copilot",
+            "grok-build"
         ]
     );
     assert_eq!(v[2]["support"]["rules"], "folded");
