@@ -200,6 +200,22 @@ pub fn without_paragraphs_in(content: &str, existing: &str) -> String {
         .join("\n\n")
 }
 
+/// Paragraphs of `text` (a file's own text, outside kitbag's blocks) that
+/// the profile's `instructions` don't hold: text added in the tool that never
+/// made it back to the profile. A paragraph counts as held when the profile
+/// has it verbatim or in the redacted form capture made of it.
+pub fn paragraphs_missing_from(text: &str, instructions: &str) -> Vec<String> {
+    let have: Vec<String> = paragraphs(instructions).collect();
+    paragraphs(text)
+        .filter(|p| {
+            !have.contains(p)
+                && !have
+                    .iter()
+                    .any(|h| has_redaction_marker(h) && is_redacted_form_of(h, p))
+        })
+        .collect()
+}
+
 fn paragraphs(text: &str) -> impl Iterator<Item = String> + '_ {
     text.replace("\r\n", "\n")
         .split("\n\n")
@@ -421,6 +437,18 @@ mod tests {
                 ("a:rules".to_string(), "R body".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn finds_paragraphs_missing_from_the_profile() {
+        let profile = "Be brief.\n\nDeploy with [REDACTED:token] now.";
+        let file = "# Mine\r\n\r\nBe brief.\n\nDeploy with abc123 now.\n\n\nUse tabs.\n";
+        assert_eq!(
+            paragraphs_missing_from(file, profile),
+            vec!["# Mine".to_string(), "Use tabs.".to_string()]
+        );
+        assert!(paragraphs_missing_from("Be brief.", profile).is_empty());
+        assert!(paragraphs_missing_from("  \n\n ", "").is_empty());
     }
 
     #[test]

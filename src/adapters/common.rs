@@ -1394,9 +1394,12 @@ pub fn capture_markdown_dir(
             );
             continue;
         }
-        cap.sources.push(path);
+        cap.sources.push(path.clone());
         match kind {
-            MdKind::Rule => add_rule(cap, rule_from_markdown(&name, &text), target),
+            MdKind::Rule => {
+                cap.rule_files.push((name.clone(), path.clone()));
+                add_rule(cap, rule_from_markdown(&name, &text), target)
+            }
             MdKind::Command => add_command(cap, command_from_markdown(&name, &text), target),
         }
     }

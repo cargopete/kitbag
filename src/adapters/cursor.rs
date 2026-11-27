@@ -237,7 +237,7 @@ impl Adapter for Cursor {
                     );
                     continue;
                 }
-                cap.sources.push(path);
+                cap.sources.push(path.clone());
                 // A rule file holding kitbag blocks carries folded rules from another apply.
                 let split = block::split(&frontmatter::parse(&text).body);
                 if !split.blocks.is_empty() {
@@ -252,6 +252,7 @@ impl Adapter for Cursor {
                         continue;
                     }
                 }
+                cap.rule_files.push((name.clone(), path.clone()));
                 add_rule(&mut cap, rule_from_mdc(&name, &text), ID);
             }
         }
