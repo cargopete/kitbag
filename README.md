@@ -10,7 +10,7 @@ from the AI coding tools you already use. It stores them as a small, git-friendl
 redacted and applies that profile to any other tool in one step. Claude Code, Cursor,
 OpenAI Codex CLI, Gemini CLI, Claude Desktop, Google Antigravity, opencode (the last two
 for MCP servers and instructions), GitHub Copilot (MCP servers, instructions, rules, prompt files and skills)
-xAI's Grok Build CLI, Windsurf, Zed, Hermes Agent and Amp (the last four for MCP servers and instructions; Hermes also for shell hooks) are supported, at user and
+xAI's Grok Build CLI, Windsurf, Zed, Hermes Agent, Amp, Cline and Roo Code (the last six for MCP servers and instructions; Hermes also for shell hooks) are supported, at user and
 project scope.
 
 > [!IMPORTANT]
@@ -98,6 +98,8 @@ Starting from scratch? `kitbag init my-profile` writes a commented starter profi
 | `zed`            | Zed               | user, project | ✓   | ✓            | -          | -            | -      | -      | -        |
 | `hermes`         | Hermes Agent      | user, project | user | ✓           | -          | -            | -      | -      | -        |
 | `amp`            | Amp               | user, project | ✓   | ✓            | -          | -            | -      | -      | -        |
+| `cline`          | Cline             | user, project | user | ✓           | folded     | -            | -      | -      | -        |
+| `roo`            | Roo Code (alias: `roo-code`) | user, project | ✓ | ✓    | folded     | -            | -      | -      | -        |
 
 `claude` is accepted as an alias for `claude-code` wherever a target id is given (`--to`,
 `--from`, `targets`, `disabled_on`, and `[settings.claude]`, read as `[settings.claude-code]`;
@@ -129,6 +131,8 @@ Where things go:
 | Zed | `settings.json` in `~/.config/zed` (macOS), `$XDG_CONFIG_HOME/zed` or `~/.config/zed` (Linux), `%APPDATA%\Zed` (Windows) (`context_servers`), and `AGENTS.md` next to it (Zed's personal instructions) | `.zed/settings.json` (`context_servers`; Zed starts these only in a trusted worktree); instructions go to the first of `.rules`, `.cursorrules`, `.windsurfrules`, `.clinerules`, `.github/copilot-instructions.md`, `AGENT.md` and `AGENTS.md` that exists, since Zed reads only that one, and to `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build and Windsurf) when none does |
 | Hermes Agent | `$HERMES_HOME/config.yaml` (`mcp_servers`, default `~/.hermes`), `$HERMES_HOME/SOUL.md` (Hermes's identity file, the only global file it reads for instructions; capture reads only a kitbag-managed block in it) | `.hermes.md` or `HERMES.md` when the project has one (Hermes loads it before `AGENTS.md`), otherwise `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf and Grok Build); Hermes documents no project MCP file, so MCP servers are not written at project scope |
 | Amp | `~/.config/amp/settings.json` or `settings.jsonc` (`amp.mcpServers`; `%USERPROFILE%\.config\amp` on Windows), `~/.config/amp/AGENTS.md` | `.amp/settings.json` or `settings.jsonc` (`amp.mcpServers`; Amp asks you to approve these servers, `amp mcp approve`), `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf, Grok Build and Hermes), or `AGENT.md` / `CLAUDE.md` when that is the file Amp reads |
+| Cline | `~/.cline/data/settings/cline_mcp_settings.json` (`mcpServers`; `CLINE_MCP_SETTINGS_PATH` names the file, `CLINE_DATA_DIR` replaces `~/.cline/data`, `CLINE_DIR` replaces `~/.cline`), `~/.cline/rules/kitbag.md` (a managed block in a file of its own; Cline reads every file in that directory) | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build, Windsurf and Zed); Cline's docs describe no project MCP file, so MCP servers are not written at project scope |
+| Roo Code | `mcp_settings.json` in `<editor user data>/User/globalStorage/rooveterinaryinc.roo-cline/settings/` (`mcpServers`; the editor is VS Code, else VS Code Insiders, VSCodium or Cursor, whichever has the extension's folder: `~/.config/Code` or `$XDG_CONFIG_HOME/Code` on Linux, `~/Library/Application Support/Code` on macOS, `%APPDATA%\Code` on Windows), `~/.roo/rules/kitbag.md` (a managed block in a file of its own; Roo reads every file in that directory) | `.roo/mcp.json` (`mcpServers`; wins over the user file for a server of the same name), `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build, Windsurf and Zed) |
 | GitHub Copilot | `$COPILOT_HOME/mcp-config.json` (`mcpServers`, default `~/.copilot`), `$COPILOT_HOME/copilot-instructions.md`, `$COPILOT_HOME/instructions/*.instructions.md`, `$COPILOT_HOME/skills/`, `$COPILOT_HOME/agents/*.agent.md` | `.mcp.json` (shared with Claude Code, written in Claude Code's shape), `.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` (`applyTo`), `.github/prompts/*.prompt.md`, `.github/skills/`, `.github/agents/*.agent.md`; capture also reads `.github/mcp.json`, legacy chat modes in `.github/chatmodes/` and `.vscode/mcp.json` (`servers`), and `disabledMcpServers` from Copilot's `settings.json` |
 
 How each tool receives `${VAR}` references:
@@ -147,6 +151,8 @@ How each tool receives `${VAR}` references:
 | Zed | resolved value (its docs describe no interpolation); SSE servers are skipped | yes, unless `--secrets never` |
 | Hermes Agent | `${VAR}` (expanded by Hermes in `config.yaml`, from its environment and `~/.hermes/.env`; defaults resolved at apply time); SSE servers get `transport: sse` | no |
 | Amp | `${VAR}` (expanded by Amp in `amp.mcpServers`; defaults resolved at apply time); SSE servers are written as a plain `url`, since Amp has no transport key | no |
+| Cline | resolved value (its docs describe no interpolation); remote servers get `type: streamableHttp` or `sse` | yes, unless `--secrets never` |
+| Roo Code | `${env:VAR}` (expanded by Roo Code; defaults resolved at apply time); remote servers get `type: streamable-http` or `sse` | no |
 | Grok Build | `${VAR}` / `${VAR:-default}` (expanded by Grok Build); an `Authorization: Bearer ${VAR}` header is written as `bearer_token_env_var = "VAR"` and read back the same way; SSE servers get `type = "sse"`, and capture reads a server named in `disabled_mcp_servers` as disabled | no |
 
 ## The profile format
@@ -211,7 +217,7 @@ releases will refuse newer profiles instead of misreading them.
 don't need it. `targets` lists the only tools a server is applied to; `disabled_on` lists the
 tools it is kept out of. Use one or the other, not both, and give `targets` at least one tool.
 Target names are those of `kitbag list-targets` (`claude-code`, `cursor`, `codex`,
-`gemini-cli`, `claude-desktop`, `antigravity`, `opencode`, `copilot`, `grok-build`, `windsurf`, `zed`, `hermes`, `amp`). An unknown name (a typo, or a tool from a newer
+`gemini-cli`, `claude-desktop`, `antigravity`, `opencode`, `copilot`, `grok-build`, `windsurf`, `zed`, `hermes`, `amp`, `cline`, `roo`). An unknown name (a typo, or a tool from a newer
 kitbag) is a warning that lists the valid ones, and the name is ignored: it matches no tool.
 `only` and `except` still load as older names for the same fields (an empty `only` still means
 no restriction, with a warning); set each field under one name, not both. Capture writes the new
@@ -461,12 +467,12 @@ dropped silently):
 | `antigravity` | `~/.gemini/config/hooks.json` / `.agents/hooks.json`, as a hook named `kitbag` | `~/.gemini/config/hooks/kitbag/` | [hooks](https://antigravity.google/docs/hooks) |
 | `copilot` | `$COPILOT_HOME/hooks/kitbag.json` (default `~/.copilot/`) / `.github/hooks/kitbag.json` | `hooks/kitbag/` next to it | [hooks reference](https://docs.github.com/copilot/reference/hooks-reference) |
 | `hermes` | `$HERMES_HOME/config.yaml` `hooks:` (default `~/.hermes/`), user scope only; shell hooks only | `agent-hooks/kitbag/` next to it | [hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks) |
-| `claude-desktop`, `opencode`, `windsurf`, `zed`, `amp` | not carried: warn | none | see below |
+| `claude-desktop`, `opencode`, `windsurf`, `zed`, `amp`, `cline`, `roo` | not carried: warn | none | see below |
 
 Claude Desktop has no hook configuration of its own. opencode runs hooks only as
 JavaScript/TypeScript plugins, which kitbag doesn't write. Windsurf's docs now point to Devin
 Desktop's `.devin/hooks.v1.json` and give no user-level path or event list, so its hooks are
-not verified and not written. Zed and Amp have no hook file kitbag has verified against their docs. Capture reads a Grok Build or Copilot directory's every
+not verified and not written. Zed, Amp and Roo Code have no hook file kitbag has verified against their docs, and Cline's hook files are not verified yet, so none of them is written. Capture reads a Grok Build or Copilot directory's every
 `*.json`, and every hook of an Antigravity file that isn't `enabled: false`; apply writes
 Grok Build's and Copilot's own `kitbag.json` and Antigravity's own `kitbag` hook, so undo
 removes only that. The tools keep their own approval steps: Codex skips a new or changed hook
@@ -1235,6 +1241,41 @@ No further candidates are named here; open an issue for the tool you miss.
   names), and in a project to the file Amp reads: `AGENTS.md`, else `AGENT.md`, else `CLAUDE.md`
   (so no `AGENTS.md` is created that would hide them from Amp), as a managed block shared with
   the other tools using that file.
+- **Cline** keeps MCP servers under `mcpServers` in `cline_mcp_settings.json`, in
+  `~/.cline/data/settings/` (the CLI, the IDE extensions and the SDK share it; `CLINE_MCP_SETTINGS_PATH`,
+  `CLINE_DATA_DIR` and `CLINE_DIR` move it, in that order of precedence). The older location in
+  the editor's `globalStorage/saoudrizwan.claude-dev/settings/` is not read or written. Local servers
+  get `command`, `args` and `env`; remote ones `url`, `headers` and `type`: `streamableHttp`, or `sse`,
+  which Cline's docs also give as the default for a URL with no `type`, so capture reads it that way.
+  A server marked `disabled` is written with `disabled: true` (read back by capture), and Cline's own
+  keys on an entry (`autoApprove`, `timeout` ...) are kept while the entry runs the same command or URL.
+  Cline documents no env-reference syntax, so references are resolved when applied (`--secrets never`
+  keeps `${VAR}` placeholders, which Cline will not expand) and the file is then 0600; `cwd` is
+  dropped with a warning. Nothing else in the data directory is read: it also holds the provider
+  settings, with API keys. Instructions go in a managed block in `~/.cline/rules/kitbag.md`, one of
+  the global rules directories Cline reads, and to `AGENTS.md` in a project (Cline's docs list it);
+  rules are folded into the same block as sections. Rule files you keep yourself
+  (`~/Documents/Cline/Rules/`, `.clinerules/`, `.cline/rules/`, with their `paths` frontmatter) are not
+  read or written, and capture lists them. Workflows, skills, hooks and agents are not carried yet.
+- **Roo Code** (the `RooVeterinaryInc.roo-cline` extension) keeps MCP servers under `mcpServers` in
+  `mcp_settings.json` in the extension's global storage, and in a project's `.roo/mcp.json`, which
+  wins for a server of the same name. Roo's docs don't give the global path; the file name and the
+  `settings` folder come from its source, and the folder is under the editor's user data directory
+  (see the table). Roo can run in other editors, so kitbag takes the first of VS Code, VS Code
+  Insiders, VSCodium and Cursor whose folder for the extension exists, VS Code when none does (the
+  plan warns), and capture says when more than one has it; the `roo-cline.customStoragePath` setting
+  is not read, so a user who set it has to copy the file. Under `--home` the editor directories are
+  looked for under that home. Local servers get `command`, `args`, `env` and `cwd`; remote ones `url`,
+  `headers` and the `type` Roo requires, `streamable-http` or `sse`; a URL with no `type` is skipped
+  by capture, since Roo rejects it. `disabled: true` is written for a disabled server; `alwaysAllow`,
+  `timeout`, `watchPaths` and `disabledTools` on an entry are kept. References are written as
+  `${env:VAR}`, which Roo expands (its docs show it in `args`; its source expands the whole entry),
+  so no secret is written. Instructions go in a managed block in `~/.roo/rules/kitbag.md` (Roo reads
+  every file in that directory) and to `AGENTS.md` in a project (Roo reads it by default); rules are
+  folded into the same block. Roo's own rule files (`.roo/rules/`, `.roo/rules-<mode>/`,
+  `.roorules`), custom modes, commands, skills and hooks are not carried yet; capture lists the
+  rule files it left. A project's servers run what `.roo/mcp.json` says: kitbag writes no
+  `alwaysAllow`, so Roo's own tool approval applies.
 - **GitHub Copilot** and Claude Code both read a project's `.mcp.json`. kitbag writes it in
   Claude Code's shape for both (no `cwd`, no `tools`; a `cwd` is dropped with a warning), so
   applying both writes each server once, and a server the profile keeps off one of them stays

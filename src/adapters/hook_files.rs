@@ -476,6 +476,14 @@ const NO_HOOKS: &[(&str, &str)] = &[
         "amp",
         "kitbag knows of no hook file for Amp (not verified against its docs)",
     ),
+    (
+        "cline",
+        "Cline's hook files are not verified against its docs yet, so kitbag doesn't write them",
+    ),
+    (
+        "roo",
+        "kitbag knows of no hook file for Roo Code (not verified against its docs)",
+    ),
 ];
 
 /// The hook format of the target `id`.

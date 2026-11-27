@@ -267,7 +267,9 @@ fn list_targets_json() {
             "windsurf",
             "zed",
             "hermes",
-            "amp"
+            "amp",
+            "cline",
+            "roo"
         ]
     );
     assert_eq!(v[2]["support"]["rules"], "folded");

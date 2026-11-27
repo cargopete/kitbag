@@ -21,6 +21,8 @@ const ALL: &[&str] = &[
     "zed",
     "hermes",
     "amp",
+    "cline",
+    "roo",
 ];
 
 /// Capture `from` in a fixture sandbox, save + reload the profile, apply it to `to`
