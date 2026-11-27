@@ -10,6 +10,14 @@
 //!   Codex has no file-scoped rules, so rules are folded into AGENTS.md.
 //! * Commands: custom prompts in `$CODEX_HOME/prompts/` (user scope only).
 //! * Skills: `~/.agents/skills/` (user) or `.agents/skills/` (project).
+//! * Custom agents: `$CODEX_HOME/agents/<name>.toml` (user) and
+//!   `.codex/agents/<name>.toml` (project), one TOML file per agent with
+//!   `name`, `description` and `developer_instructions` (the profile agent's
+//!   body), and optionally `model`, `model_reasoning_effort`,
+//!   `model_reasoning_summary`, `model_verbosity`, `features` and `skills`.
+//!   Codex says `sandbox_mode`, `approval_policy`, `model_provider` and
+//!   `mcp_servers` in an agent file don't override the parent's, so they are
+//!   not written. Docs: <https://developers.openai.com/codex/subagents>.
 
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -20,17 +28,18 @@ use serde_json::{Map, Value, json};
 use toml_edit::Item;
 
 use super::common::{
-    MdKind, Resolver, capture_instructions, capture_markdown_dir, capture_skills_dir,
-    import_server, merge_server_def, off_skipped_server, record_server_write, safe_settings,
-    server_entries, servers_for, set_enabled_false, skill_with_required_frontmatter,
-    skipped_servers, str_of, string_list, string_map, write_instructions, write_skill,
+    MdKind, Resolver, add_agent, agent_files, capture_instructions, capture_markdown_dir,
+    capture_skills_dir, import_server, merge_server_def, note_agent_keys, off_skipped_server,
+    record_server_write, safe_settings, server_entries, servers_for, set_enabled_false,
+    skill_with_required_frontmatter, skipped_servers, str_of, string_list, string_map, write_agent,
+    write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::keep_line_endings;
 use crate::edit::toml::{
     item_to_json, json_to_table, json_to_value, parse, set_keep_decor, table_mut,
 };
-use crate::model::{McpServer, Profile, Transport};
+use crate::model::{Agent, McpServer, Profile, Transport};
 use crate::policy;
 use crate::profile_io::command_to_markdown;
 use crate::secrets::{reference, sole_ref};
@@ -70,6 +79,7 @@ struct Paths {
     instructions: PathBuf,
     prompts: Option<PathBuf>,
     skills: PathBuf,
+    agents: PathBuf,
 }
 
 fn codex_home(env: &Env) -> PathBuf {
@@ -86,6 +96,7 @@ fn paths(env: &Env) -> Paths {
                 instructions: d.join("AGENTS.md"),
                 prompts: Some(d.join("prompts")),
                 skills: env.home.join(".agents").join("skills"),
+                agents: d.join("agents"),
             }
         }
         Scope::Project => Paths {
@@ -93,6 +104,7 @@ fn paths(env: &Env) -> Paths {
             instructions: env.project.join("AGENTS.md"),
             prompts: None,
             skills: env.project.join(".agents").join("skills"),
+            agents: env.project.join(".codex").join("agents"),
         },
     }
 }
@@ -235,6 +247,131 @@ fn import(cap: &mut Captured, name: &str, def: &Map<String, Value>) {
     import_server(cap, ID, name, s, false);
 }
 
+/// Keys of a Codex agent file kitbag carries besides `name`, `description`
+/// and `developer_instructions`: the model settings (strings) and the
+/// `features` and `skills` tables, as Codex's docs list them.
+const AGENT_KEYS: &[&str] = &[
+    "model",
+    "model_reasoning_effort",
+    "model_reasoning_summary",
+    "model_verbosity",
+    "features",
+    "skills",
+];
+
+/// A Codex agent file as a profile agent. Codex takes the agent's name from
+/// the `name` key, not the file name, so a `name` that differs from the file
+/// name is kept in the agent's extra keys, and `developer_instructions`
+/// becomes the body.
+fn agent_from_toml(name: &str, text: &str, path: &std::path::Path) -> Result<Agent> {
+    let doc = parse(Some(text), path)?;
+    let mut a = Agent {
+        name: name.to_string(),
+        ..Default::default()
+    };
+    for (k, item) in doc.iter() {
+        let v = item_to_json(item);
+        match (k, v) {
+            ("description", Value::String(s)) => a.description = Some(s),
+            ("developer_instructions", Value::String(s)) => a.body = s.trim().to_string(),
+            ("name", Value::String(s)) if s == name => {}
+            (_, Value::Null) => {}
+            (k, v) => {
+                a.extra.insert(k.to_string(), v);
+            }
+        }
+    }
+    Ok(a)
+}
+
+fn capture_agents(cap: &mut Captured, dir: &std::path::Path) -> Result<()> {
+    for f in agent_files(cap, dir, ".toml", None, ID, "a custom agent")? {
+        match agent_from_toml(&f.name, &f.text, &f.path) {
+            Ok(a) => {
+                if add_agent(cap, a, ID) {
+                    cap.sources.push(f.path);
+                }
+            }
+            Err(e) => cap.warn(ID, format!("skipped {}: {e:#}", f.path.display())),
+        }
+    }
+    Ok(())
+}
+
+/// A profile agent as a Codex agent file, and the keys left out: those
+/// Codex's docs don't list for an agent file, or with a value of another type.
+pub fn codex_agent(a: &Agent) -> (String, Vec<String>) {
+    let mut doc = toml_edit::DocumentMut::new();
+    let t = doc.as_table_mut();
+    let name = a
+        .extra
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(&a.name);
+    t.insert("name", toml_edit::value(name));
+    t.insert(
+        "description",
+        toml_edit::value(a.description.as_deref().unwrap_or_default()),
+    );
+    let mut dropped = Vec::new();
+    let mut tables = Vec::new();
+    for (k, v) in &a.extra {
+        if k == "name" {
+            continue;
+        }
+        let ok = AGENT_KEYS.contains(&k.as_str())
+            && match k.as_str() {
+                "features" | "skills" => v.is_object(),
+                _ => v.is_string(),
+            };
+        match (ok, v) {
+            (true, Value::Object(m)) => tables.push((k.clone(), m)),
+            (true, v) => {
+                if let Some(val) = json_to_value(v) {
+                    t.insert(k, Item::Value(val));
+                }
+            }
+            (false, _) => dropped.push(k.clone()),
+        }
+    }
+    t.insert(
+        "developer_instructions",
+        toml_edit::value(format!("{}\n", a.body.trim())),
+    );
+    for (k, m) in tables {
+        t.insert(&k, Item::Table(json_to_table(m)));
+    }
+    (doc.to_string(), dropped)
+}
+
+fn apply_agent(
+    work: &mut Work,
+    dir: &std::path::Path,
+    a: &Agent,
+    opts: &ApplyOptions,
+) -> Result<()> {
+    let missing = match (&a.description, a.body.trim().is_empty()) {
+        (None, true) => Some("a description and instructions"),
+        (None, false) => Some("a description"),
+        (Some(_), true) => Some("instructions (the agent's body)"),
+        _ => None,
+    };
+    if let Some(what) = missing {
+        work.warn(
+            ID,
+            format!(
+                "agent '{}' skipped: Codex requires {what}, and kitbag does not make them up",
+                a.name
+            ),
+        );
+        return Ok(());
+    }
+    let (text, dropped) = codex_agent(a);
+    note_agent_keys(work, ID, "Codex", a, &dropped);
+    let path = dir.join(format!("{}.toml", a.name));
+    write_agent(work, &path, text.as_bytes(), opts, ID, &a.name)
+}
+
 impl Adapter for Codex {
     fn id(&self) -> &'static str {
         ID
@@ -262,7 +399,7 @@ impl Adapter for Codex {
                 },
             ),
             (Feature::Skills, Support::Native),
-            (Feature::Agents, Support::None),
+            (Feature::Agents, Support::Native),
             (Feature::Settings, Support::Native),
         ]
     }
@@ -278,6 +415,7 @@ impl Adapter for Codex {
             out.push(("commands", pr));
         }
         out.push(("skills", p.skills));
+        out.push(("agents", p.agents));
         out.push(("settings", p.config));
         out
     }
@@ -323,6 +461,7 @@ impl Adapter for Codex {
             // Older Codex releases read skills from $CODEX_HOME/skills.
             capture_skills_dir(&mut cap, &codex_home(env).join("skills"), ID)?;
         }
+        capture_agents(&mut cap, &p.agents)?;
         super::hook_files::capture_for(&mut cap, env, &super::hook_files::CODEX)?;
         Ok(cap)
     }
@@ -503,6 +642,15 @@ impl Adapter for Codex {
         for s in &profile.skills {
             let s = skill_with_required_frontmatter(s);
             write_skill(work, &p.skills.join(&s.name), &s, opts, ID)?;
+        }
+        for a in &profile.agents {
+            apply_agent(work, &p.agents, a, opts)?;
+        }
+        if env.scope == Scope::Project && !profile.agents.is_empty() {
+            work.info(
+                ID,
+                "Codex's docs don't say whether .codex/agents/ is read only in a trusted project, as .codex/config.toml is",
+            );
         }
         super::hook_files::apply_for(profile, env, opts, work, &super::hook_files::CODEX)?;
         Ok(())

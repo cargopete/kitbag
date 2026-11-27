@@ -1715,6 +1715,155 @@ pub fn add_agent(cap: &mut Captured, mut a: Agent, target: &str) -> bool {
     true
 }
 
+/// One agent file found by [`agent_files`]: the profile name, the path, and
+/// the file's text.
+pub struct AgentFile {
+    pub name: String,
+    pub path: PathBuf,
+    pub text: String,
+}
+
+/// The agent files directly in `dir`: `<name><ext>`, and with `nested`
+/// (`Some("agent.md")`) also `<name>/<nested>`. Folders are not searched
+/// further, since the tools that use this document only those places. A
+/// README is skipped with a note, and so is a file name the profile can't
+/// hold. Two files for one name are an error.
+pub fn agent_files(
+    cap: &mut Captured,
+    dir: &Path,
+    ext: &str,
+    nested: Option<&str>,
+    target: &str,
+    what: &str,
+) -> Result<Vec<AgentFile>> {
+    let mut out = Vec::new();
+    if cap.escapes(dir, target) {
+        return Ok(out);
+    }
+    let mut seen = BTreeMap::new();
+    for rel in walk_files(dir, 500)? {
+        let name = match rel.split_once('/') {
+            None => match rel.strip_suffix(ext) {
+                Some(stem) if !stem.is_empty() => stem.to_string(),
+                _ => continue,
+            },
+            Some((folder, rest)) if nested == Some(rest) => folder.to_string(),
+            Some(_) => continue,
+        };
+        let path = join_rel(dir, &rel);
+        if name.eq_ignore_ascii_case("readme") {
+            cap.warn(
+                target,
+                format!("skipped {}: a README, not {what}", path.display()),
+            );
+            continue;
+        }
+        claim_name(&mut seen, dir, &rel, &name)?;
+        if !is_valid_name(&name) {
+            cap.warn(
+                target,
+                format!("skipped {}: unsupported file name", path.display()),
+            );
+            continue;
+        }
+        if let Some(text) = read_text_item(cap, &path, target) {
+            out.push(AgentFile { name, path, text });
+        }
+    }
+    Ok(out)
+}
+
+/// Capture the markdown agent files of `dir` (see [`agent_files`]).
+pub fn capture_agent_dir(
+    cap: &mut Captured,
+    dir: &Path,
+    nested: Option<&str>,
+    target: &str,
+    what: &str,
+) -> Result<()> {
+    for f in agent_files(cap, dir, ".md", nested, target, what)? {
+        if add_agent(
+            cap,
+            crate::profile_io::agent_from_markdown(&f.name, &f.text),
+            target,
+        ) {
+            cap.sources.push(f.path);
+        }
+    }
+    Ok(())
+}
+
+/// How an agent file names its agent.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AgentName {
+    /// The file needs a `name`: the agent's own, else the profile name.
+    Required,
+    /// `name` is optional (the file name stands in): written only when the
+    /// agent carries one.
+    Optional,
+}
+
+/// An agent as a markdown file with only the frontmatter keys `keys` that
+/// `accept` takes, and the keys left out. `name` is handled by `name`; it is
+/// not subject to `keys`. Nothing is translated: values are written as they
+/// are or the key is left out.
+pub fn documented_agent(
+    a: &Agent,
+    name: AgentName,
+    keys: &[&str],
+    accept: impl Fn(&str, &Value) -> bool,
+) -> (String, Vec<String>) {
+    let mut entries: Vec<(&str, Value)> = Vec::new();
+    match (a.extra.get("name"), name) {
+        (Some(n), _) => entries.push(("name", n.clone())),
+        (None, AgentName::Required) => entries.push(("name", json!(a.name))),
+        (None, AgentName::Optional) => {}
+    }
+    entries.push(("description", frontmatter::opt(&a.description)));
+    let mut dropped = Vec::new();
+    for (k, v) in &a.extra {
+        if k == "name" {
+            continue;
+        }
+        if keys.contains(&k.as_str()) && accept(k, v) {
+            entries.push((k.as_str(), v.clone()));
+        } else {
+            dropped.push(k.clone());
+        }
+    }
+    (frontmatter::render(&entries, &a.body), dropped)
+}
+
+/// Say which keys an agent file leaves out, and that `model` and `tools`
+/// are written as they are.
+pub fn note_agent_keys(work: &mut Work, target: &str, tool: &str, a: &Agent, dropped: &[String]) {
+    if !dropped.is_empty() {
+        work.warn(
+            target,
+            format!(
+                "agent '{}': {} left out of the agent file; {tool}'s documented agent format has no counterpart that kitbag could carry over (tool lists, permissions and models are not translated between tools)",
+                a.name,
+                dropped.join(", ")
+            ),
+        );
+    }
+    let carried: Vec<&str> = ["model", "tools"]
+        .into_iter()
+        .filter(|k| a.extra.contains_key(*k) && !dropped.iter().any(|d| d == k))
+        .collect();
+    if !carried.is_empty() {
+        work.info(
+            target,
+            format!(
+                "agent '{}': {} written as it is; kitbag does not translate model ids or tool names, so check {} against {tool}'s",
+                a.name,
+                carried.join(" and "),
+                if carried.len() == 1 { "it" } else { "them" }
+            ),
+        );
+    }
+}
+
 /// Remember which file a flattened name came from; two different files that
 /// flatten to the same name (`team-build.md`, `team/build.md`) are an error
 /// rather than one silently replacing the other.
