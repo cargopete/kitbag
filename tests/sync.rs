@@ -662,6 +662,12 @@ fn adopt_skips_secrets_and_rules_of_other_profiles() {
         format!("Use {token} for staging.\n"),
     )
     .unwrap();
+    let claude = sb.read("home/.claude/CLAUDE.md");
+    fs::write(
+        sb.path("home/.claude/CLAUDE.md"),
+        format!("Staging token: {token}\n\n{claude}"),
+    )
+    .unwrap();
     let rows = status(&sb, &["p", "--to", "claude-code"]);
     assert!(!rows.iter().any(|r| r.1 == "rule theirs"), "{rows:?}");
     assert_eq!(state_of(&rows, "claude-code", "rule keys"), "tool only");
@@ -678,7 +684,12 @@ fn adopt_skips_secrets_and_rules_of_other_profiles() {
         ])
         .assert()
         .success()
-        .stdout(contains("looks like it holds a secret"));
+        .stdout(
+            contains("looks like it holds a secret")
+                .and(contains("1 paragraph(s) of"))
+                .and(contains(&token).not()),
+        );
+    assert_eq!(sb.read("p/instructions.md"), "Be brief.\n");
     assert!(!sb.path("p/rules/keys.md").exists());
     assert!(!sb.path("p/rules/theirs.md").exists());
     assert!(sb.read("home/.claude/rules/keys.md").contains(&token));
@@ -722,4 +733,167 @@ fn project_scope_adopts_a_cursor_rule() {
         state_of(&status(&sb, &args), "cursor", "rule hotfix"),
         "in sync"
     );
+}
+
+#[test]
+fn pulling_back_a_block_keeps_adopted_text() {
+    let sb = applied();
+    let codex = sb.read("home/.codex/AGENTS.md");
+    fs::write(
+        sb.path("home/.codex/AGENTS.md"),
+        format!("My codex note.\n\n{codex}"),
+    )
+    .unwrap();
+    let to = ["--to", "codex,gemini-cli"];
+    sb.cli()
+        .args(["sync", "p", "--from", "codex", "--adopt", "--yes"])
+        .args(to)
+        .assert()
+        .success();
+    assert!(sb.read("home/.gemini/GEMINI.md").contains("My codex note."));
+    // The note isn't repeated in Codex's block, so pulling an edit of that
+    // block back must not drop it from the profile.
+    edit(&sb, "home/.codex/AGENTS.md", "Be brief.", "Be very brief.");
+    sb.cli()
+        .args(["sync", "p", "--from", "codex", "--yes"])
+        .args(to)
+        .assert()
+        .success();
+    assert_eq!(
+        sb.read("p/instructions.md"),
+        "Be very brief.\n\nMy codex note.\n"
+    );
+    let gemini = sb.read("home/.gemini/GEMINI.md");
+    assert!(
+        gemini.contains("Be very brief.") && gemini.contains("My codex note."),
+        "{gemini}"
+    );
+    let rows = status(&sb, &["p", "--to", "codex,gemini-cli"]);
+    assert!(rows.iter().all(|r| r.2 == "in sync"), "{rows:?}");
+}
+
+#[test]
+fn adopt_says_what_rewriting_a_rule_file_drops() {
+    let sb = applied();
+    fs::write(
+        sb.path("home/.claude/rules/hotfix.md"),
+        "---\npaths: src/**\nfoo: bar\n---\n\nKeep the flag.\n",
+    )
+    .unwrap();
+    sb.cli()
+        .args([
+            "sync",
+            "p",
+            "--to",
+            "claude-code",
+            "--from",
+            "claude-code",
+            "--adopt",
+            "--yes",
+        ])
+        .assert()
+        .success()
+        .stdout(contains(
+            "rewritten in kitbag's format, which drops: 'foo' from the frontmatter (",
+        ));
+    assert!(sb.read("p/rules/hotfix.md").contains("Keep the flag."));
+    sb.cli().arg("undo").assert().success();
+    assert!(sb.read("home/.claude/rules/hotfix.md").contains("foo: bar"));
+}
+
+#[test]
+fn adopt_takes_a_renamed_top_level_rule_but_not_a_nested_one() {
+    let sb = Sandbox::empty();
+    fs::create_dir_all(sb.path("p")).unwrap();
+    fs::write(sb.path("p/kitbag.toml"), MANIFEST).unwrap();
+    fs::write(sb.path("p/instructions.md"), "Be brief.\n").unwrap();
+    let proj = ["--project", "project", "--to", "cursor"];
+    sb.cli()
+        .args(["apply", "p", "--yes"])
+        .args(proj)
+        .assert()
+        .success();
+    fs::create_dir_all(sb.path("project/.cursor/rules/team")).unwrap();
+    fs::write(
+        sb.path("project/.cursor/rules/My Rule.mdc"),
+        "---\nalwaysApply: true\n---\n\nMine.\n",
+    )
+    .unwrap();
+    fs::write(
+        sb.path("project/.cursor/rules/team/x.mdc"),
+        "---\nalwaysApply: true\n---\n\nTeam.\n",
+    )
+    .unwrap();
+    sb.cli()
+        .args(["sync", "p", "--from", "cursor", "--adopt", "--yes"])
+        .args(proj)
+        .assert()
+        .success()
+        .stdout(contains("team-x").and(contains("in a sub-directory")));
+    assert!(sb.read("p/rules/My-Rule.md").contains("Mine."));
+    assert!(!sb.path("p/rules/team-x.md").exists());
+}
+
+#[test]
+fn strict_counts_removed_and_folded_rules_are_not_tool_only() {
+    let sb = applied();
+    // Codex folds rules into AGENTS.md: they are never listed as tool only.
+    let rows = status(&sb, &["p", "--to", "codex"]);
+    assert!(!rows.iter().any(|r| r.2 == "tool only"), "{rows:?}");
+    fs::create_dir_all(sb.path("home/.claude/commands")).unwrap();
+    fs::write(sb.path("home/.claude/commands/mine.md"), "Do it.\n").unwrap();
+    let to = ["p", "--to", "claude-code"];
+    assert_eq!(
+        state_of(&status(&sb, &to), "claude-code", "command mine"),
+        "removed"
+    );
+    sb.cli()
+        .args(["status", "--exit-code"])
+        .args(to)
+        .assert()
+        .success();
+    sb.cli()
+        .args(["status", "--exit-code", "--strict"])
+        .args(to)
+        .assert()
+        .code(1);
+}
+
+#[test]
+fn text_between_two_profiles_blocks_is_tool_only() {
+    let sb = applied();
+    fs::create_dir_all(sb.path("q")).unwrap();
+    fs::write(sb.path("q/kitbag.toml"), "kitbag = 1\nname = \"other\"\n").unwrap();
+    fs::write(sb.path("q/instructions.md"), "Theirs.\n").unwrap();
+    sb.cli()
+        .args(["apply", "q", "--to", "claude-code", "--yes"])
+        .assert()
+        .success();
+    let text = sb.read("home/.claude/CLAUDE.md");
+    let at = text.find("<!-- kitbag:begin other").unwrap();
+    fs::write(
+        sb.path("home/.claude/CLAUDE.md"),
+        format!("{}Between.\n\n{}", &text[..at], &text[at..]),
+    )
+    .unwrap();
+    let rows = status(&sb, &["p", "--to", "claude-code"]);
+    assert_eq!(
+        state_of(&rows, "claude-code", "unmanaged text"),
+        "tool only"
+    );
+    // The other profile's block is not text of this tool.
+    sb.cli()
+        .args([
+            "sync",
+            "p",
+            "--to",
+            "claude-code",
+            "--from",
+            "claude-code",
+            "--adopt",
+            "--yes",
+        ])
+        .assert()
+        .success();
+    assert_eq!(sb.read("p/instructions.md"), "Be brief.\n\nBetween.\n");
 }

@@ -91,7 +91,6 @@ pub const LOCATION_VARS: &[&str] = &[
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
     "COPILOT_HOME",
-    "GROK_HOME",
     "XDG_CONFIG_HOME",
     "APPDATA",
 ];

@@ -580,13 +580,19 @@ it, and sync exits with status 1. Then either:
 - `kitbag sync <profile> --overwrite` replaces the edit with the profile's version (backed up).
 
 `kitbag sync <profile> --from claude-code --adopt` also pulls in that tool's `tool only`
-items, so the other tools get them: each rule file becomes `rules/<name>.md` (redacted like
-`capture`; a rule that still looks like it holds a secret is left out with a warning), and
-the text is added to the end of `instructions.md`. The text stays where it is in the tool's
-file: apply doesn't repeat in a block a paragraph the file already has. A rule in a
-sub-directory (`rules/team/x.md`) or one that an earlier apply of this profile wrote (the rule
-was taken out of the profile since) is not adopted, with a note. Without `--adopt`, `--from`
-names them and leaves them.
+items, so the other tools get them:
+
+- Each rule file becomes `rules/<name>.md`, and the tool's file is rewritten in kitbag's
+  format (backed up). The plan warns when that drops something, such as a frontmatter key
+  kitbag doesn't carry.
+- The text is added to the end of `instructions.md`. It stays where it is in the tool's file:
+  apply doesn't repeat in a block a paragraph the file already has, and pulling that block
+  back later with `--from` keeps the paragraph in the profile.
+- A rule or paragraph that looks like it holds a secret is left out with a warning, so no
+  tool gets a redacted copy. So is a rule in a sub-directory (`rules/team/x.md`), and one that
+  an earlier apply of this profile wrote and that was taken out of the profile since.
+
+Without `--adopt`, `--from` names them and leaves them.
 
 From a git source, `sync` works like `apply` with all the remote restrictions, and `--from`
 is refused, since kitbag can't write back into a repository it cloned.

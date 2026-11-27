@@ -657,8 +657,17 @@ pub fn pull_back(
         };
         match i.block.as_deref() {
             Some(b) if b == block_id => {
+                // Apply leaves out of the block what the file already has
+                // outside it; keep those paragraphs in the profile.
+                let outside = item_text(read_opt(&i.path)?.as_deref(), None)
+                    .map(|t| block::split(&t).outside)
+                    .unwrap_or_default();
+                let text = match profile.instructions.as_deref() {
+                    Some(old) => block::with_omitted_paragraphs(text, old, &outside),
+                    None => text.to_string(),
+                };
                 cap.profile.instructions = None;
-                add_instructions(&mut cap, &i.target, text, &i.path);
+                add_instructions(&mut cap, &i.target, &text, &i.path);
                 next.instructions = cap.profile.instructions.take();
             }
             Some(b) if b == rules_block => {
@@ -733,8 +742,30 @@ pub fn pull_back(
                 next.rules.push(rule.clone());
             }
             ToolOnlyKind::Text { paragraphs } => {
+                // As for rules: other tools would get the redacted copy.
+                let (clean, secret): (Vec<&String>, Vec<&String>) = paragraphs
+                    .iter()
+                    .partition(|p| crate::secrets::redact_text(p).1.is_empty());
+                if !secret.is_empty() {
+                    cap.warn(
+                        &t.target,
+                        format!(
+                            "{} paragraph(s) of {} look like they hold a secret, so they were not adopted; move them into the profile by hand",
+                            secret.len(),
+                            t.path.display()
+                        ),
+                    );
+                }
+                if clean.is_empty() {
+                    continue;
+                }
+                let text = clean
+                    .iter()
+                    .map(|p| p.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
                 cap.profile.instructions = next.instructions.take();
-                add_instructions(&mut cap, &t.target, &paragraphs.join("\n\n"), &t.path);
+                add_instructions(&mut cap, &t.target, &text, &t.path);
                 next.instructions = cap.profile.instructions.take();
             }
         }

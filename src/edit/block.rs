@@ -216,6 +216,39 @@ pub fn paragraphs_missing_from(text: &str, instructions: &str) -> Vec<String> {
         .collect()
 }
 
+/// The profile instructions pulled back from an edited block (`inner`), with
+/// the paragraphs of the old instructions (`old`) that apply left out of that
+/// block because the file already has them outside it (`outside`) put back,
+/// in their old order. Without this, pulling the block back would drop them
+/// from the profile.
+pub fn with_omitted_paragraphs(inner: &str, old: &str, outside: &str) -> String {
+    let have: Vec<String> = paragraphs(outside).collect();
+    let omitted = |p: &String| {
+        have.contains(p)
+            || (has_redaction_marker(p) && have.iter().any(|h| is_redacted_form_of(p, h)))
+    };
+    let old: Vec<String> = paragraphs(old).collect();
+    if !old.iter().any(omitted) {
+        return inner.to_string();
+    }
+    let mut out: Vec<String> = paragraphs(inner).collect();
+    let mut pos = 0;
+    for p in &old {
+        if omitted(p) {
+            if !out.contains(p) {
+                out.insert(pos, p.clone());
+                pos += 1;
+            }
+        } else if let Some(j) = out.iter().skip(pos).position(|x| x == p) {
+            pos += j + 1;
+        } else if pos < out.len() {
+            // Edited (or removed) in the block: assume it was edited in place.
+            pos += 1;
+        }
+    }
+    out.join("\n\n")
+}
+
 fn paragraphs(text: &str) -> impl Iterator<Item = String> + '_ {
     text.replace("\r\n", "\n")
         .split("\n\n")
@@ -449,6 +482,25 @@ mod tests {
         );
         assert!(paragraphs_missing_from("Be brief.", profile).is_empty());
         assert!(paragraphs_missing_from("  \n\n ", "").is_empty());
+    }
+
+    #[test]
+    fn puts_back_paragraphs_apply_left_out_of_the_block() {
+        let old = "Be brief.\n\nMy note.\n\nUse tabs.";
+        let outside = "# Mine\n\nMy note.";
+        assert_eq!(
+            with_omitted_paragraphs("Be very brief.\n\nUse tabs.", old, outside),
+            "Be very brief.\n\nMy note.\n\nUse tabs."
+        );
+        assert_eq!(
+            with_omitted_paragraphs("New first.\n\nBe brief.\n\nUse tabs.", old, outside),
+            "New first.\n\nBe brief.\n\nMy note.\n\nUse tabs."
+        );
+        // Nothing left out: the block text as it is.
+        assert_eq!(
+            with_omitted_paragraphs("Be  brief.\n\n\nX", "Be brief.", "Other."),
+            "Be  brief.\n\n\nX"
+        );
     }
 
     #[test]

@@ -291,7 +291,8 @@ struct SyncArgs {
     from: Option<String>,
     /// With --from: also pull in what is only in that tool ('tool only' in
     /// 'kitbag status'): rule files the profile doesn't have, and text outside
-    /// kitbag's block in its instructions file (which stays where it is)
+    /// kitbag's block in its instructions file (added to the end of the
+    /// profile's instructions; the tool's file keeps it where it is)
     #[arg(long, requires = "from")]
     adopt: bool,
     /// Replace instructions edited in the tool with the profile's (backed up)
@@ -1442,7 +1443,7 @@ fn tool_only_notes(found: &[crate::sync::ToolOnly], env: &Env) -> Vec<adapters::
             level: adapters::Level::Info,
             target: target.to_string(),
             message: format!(
-                "only in the tool, not in the profile: {}. 'kitbag status' lists them; 'kitbag sync PROFILE --from {target} --adopt' pulls it into the profile",
+                "only in the tool, not in the profile: {}. 'kitbag status' lists them; 'kitbag sync PROFILE --from {target} --adopt' pulls them into the profile",
                 items.join(", ")
             ),
         })
@@ -1845,12 +1846,19 @@ fn cmd_sync(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, s: &SyncArgs) -
                 });
         // A rule in a sub-directory (`team/x.md`) would be written back flat
         // (`team-x.md`), leaving the tool with two files of the same name.
+        let rules_dir: Option<PathBuf> = source_target
+            .locations(env)
+            .into_iter()
+            .find(|(k, _)| *k == "rules")
+            .map(|(_, d)| d);
         let (tool_only, nested): (Vec<crate::sync::ToolOnly>, Vec<_>) =
             tool_only.into_iter().partition(|t| match &t.what {
-                crate::sync::ToolOnlyKind::Rule { rule, .. } => t
-                    .path
-                    .file_name()
-                    .is_some_and(|f| f.to_string_lossy().starts_with(&format!("{}.", rule.name))),
+                crate::sync::ToolOnlyKind::Rule { .. } => {
+                    match (t.path.parent(), rules_dir.as_deref()) {
+                        (Some(parent), Some(dir)) => crate::sync::same_file(parent, dir),
+                        _ => true,
+                    }
+                }
                 crate::sync::ToolOnlyKind::Text { .. } => true,
             });
         if s.adopt {
@@ -1935,16 +1943,79 @@ fn cmd_sync(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, s: &SyncArgs) -
         }
     }
     plan.notes.extend(pulled_notes);
+    let last = crate::sync::last_applied(&ctx.state_dir)?;
     for i in &plan.held_back {
-        plan.notes.push(adapters::Note {
-            level: adapters::Level::Warn,
-            target: i.target.clone(),
-            message: format!(
+        let never_applied = !last
+            .get(&(i.target.clone(), i.path.clone(), i.block.clone()))
+            .is_some_and(|r| r.matches(env));
+        let message = if never_applied && i.current.is_some() {
+            format!(
+                "{} in {} was not synced: the tool already has its own, different copy there, which kitbag never wrote. Compare the two; pull the tool's copy into the profile with --from {}, or replace it with --overwrite (backed up; 'kitbag undo' restores it)",
+                held_label(&i.item),
+                tildify(&i.path, &env.home),
+                i.target
+            )
+        } else {
+            format!(
                 "{} in {} was not synced: it was edited in the tool since the last apply. Pull the edit into the profile with --from {}, or replace it with --overwrite (backed up; 'kitbag undo' restores it)",
                 held_label(&i.item),
                 tildify(&i.path, &env.home),
                 i.target
-            ),
+            )
+        };
+        plan.notes.push(adapters::Note {
+            level: adapters::Level::Warn,
+            target: i.target.clone(),
+            message,
+        });
+    }
+    // An adopted rule file is written back in kitbag's format; say what that
+    // drops (frontmatter keys kitbag doesn't carry, for one).
+    for i in plan
+        .items
+        .iter()
+        .filter(|i| i.block.is_none() && adopted.iter().any(|p| crate::sync::same_file(p, &i.path)))
+    {
+        let (Some(cur), Some(new)) = (i.current.as_deref(), i.planned.as_deref()) else {
+            continue;
+        };
+        if crate::sync::hash(cur) == crate::sync::hash(new) {
+            continue;
+        }
+        let (cur, new) = (
+            crate::frontmatter::parse(cur),
+            crate::frontmatter::parse(new),
+        );
+        let mut lost: Vec<String> = cur
+            .data
+            .keys()
+            .filter(|k| !new.data.contains_key(*k))
+            .map(|k| format!("'{k}' from the frontmatter"))
+            .collect();
+        if cur.body.trim() != new.body.trim() {
+            lost.push("its text as written (kitbag's copy differs)".to_string());
+        }
+        plan.notes.push(adapters::Note {
+            level: if lost.is_empty() {
+                adapters::Level::Info
+            } else {
+                adapters::Level::Warn
+            },
+            target: i.target.clone(),
+            message: if lost.is_empty() {
+                format!(
+                    "{} in {} is rewritten in kitbag's format (backed up; 'kitbag undo' restores it)",
+                    i.item,
+                    tildify(&i.path, &env.home)
+                )
+            } else {
+                format!(
+                    "{} in {} is rewritten in kitbag's format, which drops: {} (backed up; 'kitbag undo' restores it)",
+                    i.item,
+                    tildify(&i.path, &env.home),
+                    visible_line(&lost.join(", "))
+                )
+            },
         });
     }
     let held = !plan.held_back.is_empty();
@@ -2292,28 +2363,38 @@ fn cmd_doctor(
                     )?;
                     tool_only_items(ctx, &profile, &plan, &targets)
                 });
-                if let Ok(found) = found {
-                    for f in &found {
-                        println!(
-                            "  {} {} {} {}",
-                            paint(YELLOW, "tool only"),
-                            f.target,
-                            visible_line(&f.item()),
-                            paint(DIM, tildify(&f.path, &env.home))
-                        );
-                    }
-                    if let Some(f) = found.first() {
-                        println!(
-                            "      {}",
-                            paint(
-                                DIM,
-                                format!(
-                                    "not in the profile, so the other tools don't get it; 'kitbag sync PROFILE --from {} --adopt' pulls it in",
-                                    f.target
+                match found {
+                    Ok(found) => {
+                        let mut targets: Vec<&str> = Vec::new();
+                        for f in &found {
+                            println!(
+                                "  {} {} {} {}",
+                                paint(YELLOW, "tool only"),
+                                f.target,
+                                visible_line(&f.item()),
+                                paint(DIM, tildify(&f.path, &env.home))
+                            );
+                            if !targets.contains(&f.target.as_str()) {
+                                targets.push(&f.target);
+                            }
+                        }
+                        for t in targets {
+                            println!(
+                                "      {}",
+                                paint(
+                                    DIM,
+                                    format!(
+                                        "not in the profile, so the other tools don't get {t}'s; 'kitbag sync PROFILE --from {t} --adopt' pulls them in"
+                                    )
                                 )
-                            )
-                        );
+                            );
+                        }
                     }
+                    Err(e) => println!(
+                        "  {} could not check for rules and text only in a tool: {}",
+                        paint(YELLOW, "warn"),
+                        visible(&format!("{e:#}"))
+                    ),
                 }
             }
         }
