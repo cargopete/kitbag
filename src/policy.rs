@@ -319,8 +319,24 @@ fn agent_server_key(key: &str) -> bool {
     k == "mcpservers"
 }
 
+/// A Claude Code subagent `permissionMode` that lets it act without asking
+/// (`acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`).
+fn agent_permissive_mode(a: &crate::model::Agent) -> Option<&str> {
+    let (k, v) = a
+        .extra
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("permissionMode"))?;
+    let v = v.as_str()?;
+    matches!(
+        v.to_ascii_lowercase().as_str(),
+        "acceptedits" | "auto" | "dontask" | "bypasspermissions"
+    )
+    .then_some(k.as_str())
+}
+
 /// What makes a custom agent run commands: hooks, pre-approved tools, MCP
-/// servers it starts itself, or a shell snippet in its body.
+/// servers it starts itself, a permission mode that never asks, or a shell
+/// snippet in its body.
 fn agent_risks(a: &crate::model::Agent) -> Vec<String> {
     let mut out: Vec<String> = a
         .extra
@@ -328,6 +344,7 @@ fn agent_risks(a: &crate::model::Agent) -> Vec<String> {
         .filter(|k| executable_key(k) || agent_server_key(k))
         .cloned()
         .collect();
+    out.extend(agent_permissive_mode(a).map(str::to_string));
     if let Some(syntax) = shell_snippet(&a.body) {
         out.push(format!("a shell snippet ({syntax})"));
     }
@@ -458,6 +475,16 @@ pub fn risky_content(profile: &crate::model::Profile) -> Vec<String> {
         if a.extra.keys().any(|k| agent_server_key(k)) {
             out.push(format!(
                 "{what} starts MCP servers of its own (mcp-servers)"
+            ));
+        }
+        if let Some(mode) = a
+            .extra
+            .get("permissionMode")
+            .filter(|_| agent_permissive_mode(a).is_some())
+        {
+            out.push(format!(
+                "{what} sets permissionMode {} (acts without asking)",
+                mode.as_str().unwrap_or_default()
             ));
         }
         if let Some(syntax) = shell_snippet(&a.body) {

@@ -298,11 +298,15 @@ fn reports_what_is_not_carried_and_drops_custom_output_styles() {
     assert!(
         warned(
             &r,
-            "not carried by kitbag (no portable form yet): 2 subagents (agents/), 1 output style (output-styles/), 2 plugins (plugins/installed_plugins.json)"
+            "not carried by kitbag (no portable form yet): 1 output style (output-styles/), 2 plugins (plugins/installed_plugins.json)"
         ),
         "{:?}",
         r.notes
     );
+    // Subagents are carried now, not listed as left behind.
+    let names: Vec<&str> = r.profile.agents.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, ["nested-tester", "reviewer"]);
+    assert!(!warned(&r, "subagent"));
     assert!(warned(&r, "dropped setting outputStyle = \"Jenny\""));
     assert!(warned(&r, "hooks"));
     assert_eq!(
