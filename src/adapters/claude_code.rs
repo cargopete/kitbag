@@ -361,6 +361,28 @@ fn note_unknown_output_style(cap: &mut Captured) {
     cap.info(ID, message);
 }
 
+/// `/output-style` and the `/config` menu save the choice to the project's
+/// `.claude/settings.local.json`. Claude Code's settings page calls that file
+/// "You, in this one project only", kept out of git, and places it by the
+/// repository root, so kitbag neither reads the choice from it nor writes one
+/// to it. Say so when a project has one, so a capture that finds no
+/// `outputStyle` is not a surprise (checked 2026-11-27).
+fn note_local_output_style(cap: &mut Captured, local: &Path) {
+    let Some(text) = read_text_opt(local).ok().flatten() else {
+        return;
+    };
+    let Ok(Value::Object(doc)) = serde_json::from_str::<Value>(&text) else {
+        return;
+    };
+    let Some(Value::String(style)) = doc.get("outputStyle") else {
+        return;
+    };
+    let message = format!(
+        "outputStyle = \"{style}\" in settings.local.json (where /output-style saves a choice) was not captured: Claude Code documents that file as personal to you and this one project and kept out of git, so kitbag leaves it alone; set outputStyle in settings.json to carry it"
+    );
+    cap.info(ID, message);
+}
+
 /// Capture `<dir>/*.md` as output styles. The file stem is the profile name;
 /// Claude Code's own name for the style is its `name` key when there is one,
 /// which is kept with the other frontmatter. Only the folder itself is read:
@@ -673,6 +695,9 @@ impl Adapter for ClaudeCode {
                 }
             }
             note_unknown_output_style(&mut cap);
+        }
+        if let Some(local) = &p.local_settings {
+            note_local_output_style(&mut cap, local);
         }
         Ok(cap)
     }

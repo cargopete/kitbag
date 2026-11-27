@@ -433,3 +433,74 @@ fn disable_and_enable_take_a_style_by_its_prefix() {
     apply(&sb, &[]);
     assert!(sb.path("home/.claude/output-styles/terse.md").exists());
 }
+
+#[test]
+fn the_local_settings_choice_is_noted_and_never_read() {
+    // `/output-style` saves to .claude/settings.local.json, which Claude Code
+    // documents as personal to one project and kept out of git: capture says
+    // it left the choice there and takes the shared file's value instead.
+    let sb = Sandbox::empty();
+    fs::create_dir_all(sb.path("project/.claude")).unwrap();
+    fs::write(
+        sb.path("project/.claude/settings.json"),
+        r#"{"outputStyle": "Explanatory"}"#,
+    )
+    .unwrap();
+    fs::write(
+        sb.path("project/.claude/settings.local.json"),
+        r#"{"outputStyle": "Concise", "permissions": {"allow": ["Bash(ls)"]}}"#,
+    )
+    .unwrap();
+    let out = capture(&sb, true);
+    assert!(
+        out.contains("outputStyle = \"Concise\" in settings.local.json"),
+        "{out}"
+    );
+    let manifest = sb.read("captured/kitbag.toml");
+    assert!(
+        manifest.contains("outputStyle = \"Explanatory\""),
+        "{manifest}"
+    );
+    assert!(!manifest.contains("Concise"), "{manifest}");
+    assert!(!manifest.contains("Bash(ls)"), "{manifest}");
+}
+
+#[test]
+fn no_note_when_the_local_file_sets_no_style() {
+    let sb = Sandbox::empty();
+    fs::create_dir_all(sb.path("project/.claude")).unwrap();
+    fs::write(
+        sb.path("project/.claude/settings.local.json"),
+        r#"{"permissions": {"allow": ["Bash(ls)"]}}"#,
+    )
+    .unwrap();
+    assert!(!capture(&sb, true).contains("settings.local.json (where"));
+}
+
+#[test]
+fn apply_leaves_the_local_settings_file_as_it_is() {
+    let sb = Sandbox::empty();
+    style_profile(
+        &sb,
+        "kitbag = 1\nname = \"p\"\n\n[settings.claude-code]\noutputStyle = \"Concise\"\n",
+        &[("terse", TERSE)],
+    );
+    fs::create_dir_all(sb.path("project/.claude")).unwrap();
+    let local = r#"{"outputStyle": "Learning"}"#;
+    fs::write(sb.path("project/.claude/settings.local.json"), local).unwrap();
+    apply(&sb, &["--project", "project"]);
+    assert_eq!(sb.read("project/.claude/settings.local.json"), local);
+    assert_eq!(
+        sb.json("project/.claude/settings.json")["outputStyle"],
+        json!("Concise")
+    );
+    // Nothing is created when there was no local file.
+    let sb2 = Sandbox::empty();
+    style_profile(
+        &sb2,
+        "kitbag = 1\nname = \"p\"\n\n[settings.claude-code]\noutputStyle = \"Concise\"\n",
+        &[],
+    );
+    apply(&sb2, &["--project", "project"]);
+    assert!(!sb2.path("project/.claude/settings.local.json").exists());
+}
