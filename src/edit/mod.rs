@@ -3,6 +3,7 @@
 pub mod block;
 pub mod json;
 pub mod toml;
+pub mod yaml;
 
 /// Does `text` use Windows line endings? True when most of its line breaks
 /// are `\r\n`.
