@@ -263,7 +263,8 @@ fn list_targets_json() {
             "antigravity",
             "opencode",
             "copilot",
-            "grok-build"
+            "grok-build",
+            "windsurf"
         ]
     );
     assert_eq!(v[2]["support"]["rules"], "folded");

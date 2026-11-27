@@ -17,6 +17,7 @@ const ALL: &[&str] = &[
     "opencode",
     "copilot",
     "grok-build",
+    "windsurf",
 ];
 
 /// Capture `from` in a fixture sandbox, save + reload the profile, apply it to `to`

@@ -10,7 +10,8 @@ from the AI coding tools you already use. It stores them as a small, git-friendl
 redacted and applies that profile to any other tool in one step. Claude Code, Cursor,
 OpenAI Codex CLI, Gemini CLI, Claude Desktop, Google Antigravity, opencode (the last two
 for MCP servers and instructions), GitHub Copilot (MCP servers, instructions, rules, prompt files and skills)
-and xAI's Grok Build CLI are supported, at user and project scope.
+xAI's Grok Build CLI and Windsurf (MCP servers and instructions) are supported, at user and
+project scope.
 
 > [!IMPORTANT]
 > **Status: early release (v0.1).** kitbag works today and is tested against real setups,
@@ -93,6 +94,7 @@ Starting from scratch? `kitbag init my-profile` writes a commented starter profi
 | `opencode`       | opencode          | user, project | ✓   | ✓            | -          | -            | -      | -      | -        |
 | `copilot`        | GitHub Copilot (CLI, VS Code) | user, project | ✓ | ✓    | ✓          | project      | ✓      | ✓      | -        |
 | `grok-build`     | Grok Build        | user, project | ✓   | ✓            | ✓*         | ✓            | ✓      | -      | -        |
+| `windsurf`       | Windsurf          | user, project | user | ✓           | -          | -            | -      | -      | -        |
 
 `claude` is accepted as an alias for `claude-code` wherever a target id is given (`--to`,
 `--from`, `targets`, `disabled_on`, and `[settings.claude]`, read as `[settings.claude-code]`;
@@ -120,6 +122,7 @@ Where things go:
 | Antigravity | `~/.gemini/config/mcp_config.json`, `~/.gemini/GEMINI.md` (the same file and managed block as Gemini CLI); capture also reads `~/.gemini/AGENTS.md` and `~/.gemini/config/{AGENTS,GEMINI}.md`; `~/.gemini/config/rules/*.md`, `~/.gemini/config/skills/` | `.agents/mcp_config.json`, `AGENTS.md` (shared with Codex and Cursor); capture also reads `GEMINI.md` and `.agents/{AGENTS,GEMINI}.md`; `.agents/rules/*.md`, `.agents/skills/` (the same directory as Codex's project skills) |
 | opencode | `~/.config/opencode/opencode.json` or `opencode.jsonc` (`mcp.servers`), `~/.config/opencode/AGENTS.md`; honours `XDG_CONFIG_HOME` | `opencode.json(c)` or `.opencode/opencode.json(c)` (the first that exists, else `opencode.json`), `AGENTS.md` (shared with Codex, Cursor and Antigravity); capture reads every config file there is |
 | Grok Build | `$GROK_HOME/config.toml` (`[mcp_servers.<name>]`, default `~/.grok`), `$GROK_HOME/{AGENTS.md, rules/*.md, commands/*.md, skills/}` | `.grok/config.toml`, `AGENTS.md` (shared with Codex, Cursor, Antigravity and opencode), `.grok/{rules,commands,skills}/`; Grok reads project files only in folders you have trusted |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` (`mcpServers`), `~/.codeium/windsurf/memories/global_rules.md` | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode and Grok Build); capture also reads the legacy `.windsurfrules`; Windsurf's docs describe no project MCP file, so MCP servers are not written at project scope |
 | GitHub Copilot | `$COPILOT_HOME/mcp-config.json` (`mcpServers`, default `~/.copilot`), `$COPILOT_HOME/copilot-instructions.md`, `$COPILOT_HOME/instructions/*.instructions.md`, `$COPILOT_HOME/skills/`, `$COPILOT_HOME/agents/*.agent.md` | `.mcp.json` (shared with Claude Code, written in Claude Code's shape), `.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` (`applyTo`), `.github/prompts/*.prompt.md`, `.github/skills/`, `.github/agents/*.agent.md`; capture also reads `.github/mcp.json`, legacy chat modes in `.github/chatmodes/` and `.vscode/mcp.json` (`servers`), and `disabledMcpServers` from Copilot's `settings.json` |
 
 How each tool receives `${VAR}` references:
@@ -134,6 +137,7 @@ How each tool receives `${VAR}` references:
 | Antigravity | resolved value (its docs describe no interpolation); remote servers get `serverUrl`, SSE servers are skipped | yes, unless `--secrets never` |
 | opencode | `{env:VAR}` (expanded by opencode; defaults resolved at apply time); SSE servers are skipped | no |
 | GitHub Copilot | `${VAR}` / `${VAR:-default}` (expanded by Copilot); capture also reads `${env:VAR}` from `.vscode/mcp.json` | no |
+| Windsurf | `${env:VAR}` (expanded by Windsurf, in `command`, `args`, `env`, `serverUrl`, `url` and `headers`); remote servers get `serverUrl`, SSE servers are skipped | no |
 | Grok Build | `${VAR}` / `${VAR:-default}` (expanded by Grok Build); an `Authorization: Bearer ${VAR}` header is written as `bearer_token_env_var = "VAR"` and read back the same way; SSE servers get `type = "sse"`, and capture reads a server named in `disabled_mcp_servers` as disabled | no |
 
 ## The profile format
@@ -198,7 +202,7 @@ releases will refuse newer profiles instead of misreading them.
 don't need it. `targets` lists the only tools a server is applied to; `disabled_on` lists the
 tools it is kept out of. Use one or the other, not both, and give `targets` at least one tool.
 Target names are those of `kitbag list-targets` (`claude-code`, `cursor`, `codex`,
-`gemini-cli`, `claude-desktop`, `antigravity`, `opencode`, `copilot`, `grok-build`). An unknown name (a typo, or a tool from a newer
+`gemini-cli`, `claude-desktop`, `antigravity`, `opencode`, `copilot`, `grok-build`, `windsurf`). An unknown name (a typo, or a tool from a newer
 kitbag) is a warning that lists the valid ones, and the name is ignored: it matches no tool.
 `only` and `except` still load as older names for the same fields (an empty `only` still means
 no restriction, with a warning); set each field under one name, not both. Capture writes the new
@@ -967,7 +971,7 @@ pub trait Adapter: Sync {
 5. **Test** it: add realistic configs under `tests/fixtures/{home,project}`, add capture and apply
    cases in `tests/adapters.rs`, and include it in the round-trip and idempotency tests.
 
-Good next candidates: Windsurf, Zed.
+Good next candidates: Zed.
 
 ## Format notes and known limitations
 
@@ -1019,6 +1023,16 @@ Good next candidates: Windsurf, Zed.
   arguments from `$0`, so kitbag warns about commands that use `$1`-style placeholders. Grok
   Build agent definitions (`.grok/agents/`), personas, plugins, hooks and settings are not
   carried yet.
+- **Windsurf** (now also shipped as Devin Desktop) keeps MCP servers in
+  `~/.codeium/windsurf/mcp_config.json` and global rules in
+  `~/.codeium/windsurf/memories/global_rules.md`; kitbag writes those, and nothing at project
+  scope except `AGENTS.md`, since Windsurf's docs describe no project MCP file. Devin Desktop's
+  own files (`~/.config/devin/mcp_config.json`, `.devin/`) are not written. A server marked
+  `disabled` in the profile is not written (the docs list no such key), though capture reads
+  `disabled: true`, and Windsurf-only keys on an entry are kept. SSE servers are skipped, since
+  the docs don't say how the file marks one. Windsurf's docs have limited `global_rules.md` to
+  6,000 characters, and kitbag warns when the instructions are longer. Rules
+  (`.windsurf/rules/`), workflows, skills and agents are not carried yet.
 - **GitHub Copilot** and Claude Code both read a project's `.mcp.json`. kitbag writes it in
   Claude Code's shape for both (no `cwd`, no `tools`; a `cwd` is dropped with a warning), so
   applying both writes each server once, and a server the profile keeps off one of them stays
