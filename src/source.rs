@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use regex::Regex;
 use tempfile::TempDir;
 
@@ -66,26 +66,102 @@ fn cleartext(url: &str) -> bool {
     u.starts_with("http://") || u.starts_with("git://")
 }
 
+/// Where the path of a git source starts: after `scheme://host`, after
+/// `host:` of an scp-style `user@host:path`, or after `github:`. Any `@`
+/// before it is userinfo (`https://user:token@host`, `git@host`), never a ref.
+fn path_start(s: &str) -> usize {
+    if let Some(i) = s.find("://") {
+        let rest = i + 3;
+        return s[rest..].find('/').map_or(s.len(), |j| rest + j);
+    }
+    s.find(':').map_or(0, |i| i + 1)
+}
+
+/// Split a trailing `@<ref>` off a source. Only an `@` in the path counts,
+/// and not one that starts a path segment (`/@scope/pkg`). A `//sub/dir`
+/// after the ref stays with the source, since a ref can't hold `//`.
+fn split_at_ref(s: &str) -> (String, Option<String>) {
+    let start = path_start(s);
+    let at = s[start..]
+        .match_indices('@')
+        .map(|(i, _)| start + i)
+        .find(|&i| i > start && !s[..i].ends_with('/'));
+    let Some(at) = at else {
+        return (s.to_string(), None);
+    };
+    let after = &s[at + 1..];
+    let (r, sub) = match after.find("//") {
+        Some(j) => (&after[..j], &after[j..]),
+        None => (after, ""),
+    };
+    let rest = format!("{}{sub}", &s[..at]);
+    (rest, Some(r.to_string()).filter(|r| !r.is_empty()))
+}
+
+/// Refuse a ref git would read as an option or a refspec, or never accept
+/// as a branch, tag or commit name.
+fn check_ref(r: &str) -> Result<()> {
+    let bad = r.starts_with('-')
+        || r.contains("..")
+        || r.contains("@{")
+        || r.chars()
+            .any(|c| c.is_whitespace() || c.is_control() || ":~^?*[\\".contains(c));
+    if bad {
+        bail!(
+            "'{}' is not a branch, tag or commit SHA git can fetch",
+            strip_url_credentials(r)
+        );
+    }
+    Ok(())
+}
+
 /// Recognise git sources:
 ///
-/// * `github:owner/repo[/sub/dir][#ref]` (also `gh:`, `gitlab:`, `bitbucket:`)
-/// * `https://github.com/owner/repo[.git][#ref]`
+/// * `github:owner/repo[/sub/dir][@ref|#ref]` (also `gh:`, `gitlab:`, `bitbucket:`)
+/// * `https://github.com/owner/repo[.git][@ref|#ref]`
 /// * `https://github.com/owner/repo/tree/<ref>/<sub/dir>`
-/// * `git@host:owner/repo.git[#ref]`, `ssh://...`, `git+https://...`, `file://...`
+/// * `git@host:owner/repo.git[@ref|#ref]`, `ssh://...`, `git+https://...`, `file://...`
 ///
 /// Append `//sub/dir` to a URL to select a profile inside the repository.
-pub fn parse_git_source(src: &str) -> Option<GitSource> {
+/// A ref is a branch, a tag or a commit SHA; `@ref` and `#ref` mean the same,
+/// and giving both is an error. `Ok(None)`: not a git source.
+pub fn parse_git_source(src: &str) -> Result<Option<GitSource>> {
     let mut s = src.trim().to_string();
-    let mut reference = None;
+    let mut hash_ref = None;
     if let Some(i) = s.rfind('#')
         && i > 0
     {
         let r = s[i + 1..].to_string();
         s.truncate(i);
         if !r.is_empty() {
-            reference = Some(r);
+            hash_ref = Some(r);
         }
     }
+    let (s, at_ref) = split_at_ref(&s);
+    let Some(mut git) = parse_url(s) else {
+        return Ok(None);
+    };
+    let given = match (at_ref, hash_ref) {
+        (Some(a), Some(h)) => bail!(
+            "'{}' names two refs, @{} and #{}; give one",
+            strip_url_credentials(src.trim()),
+            strip_url_credentials(&a),
+            strip_url_credentials(&h)
+        ),
+        (a, h) => a.or(h),
+    };
+    // A ref given with @ or # wins over the one in a /tree/<ref>/ URL.
+    if given.is_some() {
+        git.reference = given;
+    }
+    if let Some(r) = &git.reference {
+        check_ref(r)?;
+    }
+    Ok(Some(git))
+}
+
+/// [`parse_git_source`] once the ref is split off.
+fn parse_url(mut s: String) -> Option<GitSource> {
     if let Some(c) = SHORTHAND.captures(&s) {
         let host = match &c[1] {
             "gitlab" => "gitlab.com",
@@ -98,7 +174,7 @@ pub fn parse_git_source(src: &str) -> Option<GitSource> {
             .filter(|x| !x.is_empty());
         return Some(GitSource {
             url: format!("https://{host}/{}/{}.git", &c[2], &c[3]),
-            reference,
+            reference: None,
             subdir: sub,
         });
     }
@@ -110,7 +186,7 @@ pub fn parse_git_source(src: &str) -> Option<GitSource> {
     if let Some(c) = TREE.captures(&s) {
         return Some(GitSource {
             url: format!("{}.git", &c[1]),
-            reference: reference.or_else(|| Some(c[2].to_string())),
+            reference: Some(c[2].to_string()),
             subdir: subdir.or_else(|| {
                 c.get(3)
                     .map(|m| m.as_str().trim_end_matches('/').to_string())
@@ -129,7 +205,7 @@ pub fn parse_git_source(src: &str) -> Option<GitSource> {
     }
     Some(GitSource {
         url: s.strip_prefix("git+").unwrap_or(&s).to_string(),
-        reference,
+        reference: None,
         subdir,
     })
 }
@@ -145,11 +221,28 @@ pub struct Resolved {
     /// directory, or the git URL without credentials (and the sub-directory,
     /// if any), without the ref or commit.
     pub source: String,
+    /// The full SHA of the commit a git source was checked out at; `None`
+    /// for a local directory.
+    pub commit: Option<String>,
     /// The name a plugin (a directory without a `kitbag.toml`) gets when its
     /// manifest names none: the directory's name, or for a git source the
     /// sub-directory's or repository's, never the temporary clone's.
     pub name_hint: String,
     _tmp: Option<TempDir>,
+}
+
+/// How [`resolve`] may fetch a git source.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FetchOptions {
+    /// Accept cleartext `http://` and `git://` sources.
+    pub allow_insecure: bool,
+    /// Refuse a git source that names no branch, tag or commit.
+    pub require_pin: bool,
+}
+
+/// The short form of a commit SHA shown next to a source.
+pub fn short_commit(sha: &str) -> &str {
+    &sha[..sha.len().min(7)]
 }
 
 /// The last part of a git URL's path, without `.git`: `repo` for
@@ -168,10 +261,12 @@ fn safe_subdir(sub: &str) -> Result<PathBuf> {
     Ok(p.to_path_buf())
 }
 
-/// Turn a command-line argument into a local profile directory, cloning git
-/// sources. Cleartext `http://` and `git://` sources are refused unless
-/// `allow_insecure`.
-pub fn resolve(src: &str, subdir: Option<&str>, allow_insecure: bool) -> Result<Resolved> {
+/// Turn a command-line argument into a local profile directory, fetching git
+/// sources at the branch, tag or commit they name (the default branch when
+/// they name none). Cleartext `http://` and `git://` sources are refused
+/// unless `opts.allow_insecure`, and unpinned git sources when
+/// `opts.require_pin`.
+pub fn resolve(src: &str, subdir: Option<&str>, opts: FetchOptions) -> Result<Resolved> {
     let local = Path::new(src);
     if local.exists() {
         let dir = if local.is_dir() {
@@ -195,13 +290,14 @@ pub fn resolve(src: &str, subdir: Option<&str>, allow_insecure: bool) -> Result<
         return Ok(Resolved {
             origin: dir.display().to_string(),
             source: source.display().to_string(),
+            commit: None,
             name_hint,
             dir,
             remote: false,
             _tmp: None,
         });
     }
-    let Some(git) = parse_git_source(src) else {
+    let Some(git) = parse_git_source(src)? else {
         bail!(
             "'{}' is neither a local directory nor a git URL (try ./path, github:owner/repo or https://.../repo.git)",
             strip_url_credentials(src)
@@ -209,29 +305,32 @@ pub fn resolve(src: &str, subdir: Option<&str>, allow_insecure: bool) -> Result<
     };
     // Credentials in the URL go to git, and nowhere else.
     let shown = strip_url_credentials(&git.url);
-    if cleartext(&git.url) && !allow_insecure {
+    if cleartext(&git.url) && !opts.allow_insecure {
         bail!(
             "refusing to fetch {shown} without encryption: anyone on the network could replace the profile. Use an https:// or SSH URL, or pass --allow-insecure-source if you trust the network"
         );
     }
-    let tmp = tempfile::Builder::new().prefix("kitbag-").tempdir()?;
-    let out = match clone_command(&git, tmp.path(), allow_insecure).output() {
-        Ok(o) => o,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            bail!("git is required to apply a profile from a URL, but it was not found on PATH")
-        }
-        Err(e) => return Err(e).context("running git"),
-    };
-    if !out.status.success() {
+    if opts.require_pin && git.reference.is_none() {
         bail!(
+            "{shown} is not pinned (--require-pin): add @<sha|tag|branch> (or #<ref>) to the source, such as {}@v1.0",
+            strip_url_credentials(src.trim())
+        );
+    }
+    let tmp = tempfile::Builder::new().prefix("kitbag-").tempdir()?;
+    let commit = fetch(&git, tmp.path(), opts.allow_insecure).map_err(|e| {
+        // Running git at all failed (not installed): not the source's fault.
+        if e.downcast_ref::<std::io::Error>().is_some() {
+            return e;
+        }
+        anyhow::anyhow!(
             "could not clone {shown}{}: {}",
             git.reference
                 .as_ref()
                 .map(|r| format!(" (ref {r})"))
                 .unwrap_or_default(),
-            strip_url_credentials(String::from_utf8_lossy(&out.stderr).trim())
-        );
-    }
+            strip_url_credentials(&format!("{e:#}"))
+        )
+    })?;
     let sub = subdir.map(str::to_string).or(git.subdir.clone());
     let dir = match &sub {
         Some(s) => {
@@ -261,15 +360,6 @@ pub fn resolve(src: &str, subdir: Option<&str>, allow_insecure: bool) -> Result<
             .unwrap_or_default(),
         None => repo_name(&shown),
     };
-    let commit = Command::new("git")
-        .arg("-C")
-        .arg(tmp.path())
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
     let mut source = shown.clone();
     if let Some(s) = &sub {
         source.push_str(&format!("//{s}"));
@@ -281,23 +371,22 @@ pub fn resolve(src: &str, subdir: Option<&str>, allow_insecure: bool) -> Result<
     if let Some(s) = &sub {
         origin.push_str(&format!("//{s}"));
     }
-    if !commit.is_empty() {
-        origin.push_str(&format!(" @ {commit}"));
-    }
+    origin.push_str(&format!(" @ {}", short_commit(&commit)));
     Ok(Resolved {
         dir,
         origin,
         source,
+        commit: Some(commit),
         name_hint,
         remote: true,
         _tmp: Some(tmp),
     })
 }
 
-/// The `git clone` for `git` into `dest`. Unless `allow_insecure`, git may
-/// not fetch over `http` or `git` even when an https server redirects there
-/// or a `url.<base>.insteadOf` rewrite points there.
-fn clone_command(git: &GitSource, dest: &Path, allow_insecure: bool) -> Command {
+/// A `git` command that never prompts and, unless `allow_insecure`, may not
+/// fetch over `http` or `git` even when an https server redirects there or a
+/// `url.<base>.insteadOf` rewrite points there.
+fn git_command(allow_insecure: bool) -> Command {
     let mut cmd = Command::new("git");
     if !allow_insecure {
         cmd.args([
@@ -311,13 +400,88 @@ fn clone_command(git: &GitSource, dest: &Path, allow_insecure: bool) -> Command 
         // (GIT_CONFIG_COUNT, GIT_CONFIG_PARAMETERS) does not: `-c` wins.
         cmd.env_remove("GIT_ALLOW_PROTOCOL");
     }
-    cmd.args(["clone", "--depth", "1", "--quiet", "--no-tags"]);
-    if let Some(r) = &git.reference {
-        cmd.args(["--branch", r]);
-    }
-    cmd.arg("--").arg(&git.url).arg(dest);
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     cmd
+}
+
+/// The shallow `git fetch` of `git`'s ref (its default branch when it names
+/// none) into the repository at `dest`. A commit SHA works too, where the
+/// server lets clients fetch one (GitHub, GitLab and local repositories do).
+fn fetch_command(git: &GitSource, dest: &Path, allow_insecure: bool) -> Command {
+    let mut cmd = git_command(allow_insecure);
+    cmd.arg("-C").arg(dest);
+    cmd.args(["fetch", "--depth", "1", "--quiet", "--no-tags", "--"]);
+    cmd.arg(&git.url)
+        .arg(git.reference.as_deref().unwrap_or("HEAD"));
+    cmd
+}
+
+/// Could `r` be an abbreviated (or, for a server that won't serve one by
+/// SHA, a full) commit SHA?
+fn looks_like_sha(r: &str) -> bool {
+    (4..=64).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Run `cmd`; its stdout, or an error with its stderr.
+fn run(mut cmd: Command) -> Result<String> {
+    let out = match cmd.output() {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(anyhow::Error::new(e).context(
+                "git is required to apply a profile from a URL, but it was not found on PATH",
+            ));
+        }
+        Err(e) => return Err(anyhow::Error::new(e).context("running git")),
+    };
+    if !out.status.success() {
+        bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Fetch `git` into the empty directory `dest`, check it out, and return the
+/// full SHA of the commit checked out.
+fn fetch(git: &GitSource, dest: &Path, allow_insecure: bool) -> Result<String> {
+    let in_dest = |args: &[&str]| {
+        let mut c = git_command(allow_insecure);
+        c.arg("-C").arg(dest).args(args);
+        c
+    };
+    run(in_dest(&["init", "--quiet"]))?;
+    let wanted = match run(fetch_command(git, dest, allow_insecure)) {
+        Ok(_) => "FETCH_HEAD".to_string(),
+        // `git fetch` takes a full SHA only: for a short one, fetch the
+        // branches and tags and look it up among their history.
+        Err(e) => match git.reference.as_deref().filter(|r| looks_like_sha(r)) {
+            Some(r) => {
+                let mut all = in_dest(&["fetch", "--quiet", "--no-tags", "--"]);
+                all.arg(&git.url).args([
+                    "+refs/heads/*:refs/remotes/kitbag/*",
+                    "+refs/tags/*:refs/tags/*",
+                ]);
+                run(all).map_err(|_| e)?;
+                r.to_string()
+            }
+            None => return Err(e),
+        },
+    };
+    let commit = run(in_dest(&[
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "--end-of-options",
+        &format!("{wanted}^{{commit}}"),
+    ]))
+    .map_err(|_| anyhow::anyhow!("no commit {wanted} in the repository"))?;
+    run(in_dest(&[
+        "-c",
+        "advice.detachedHead=false",
+        "checkout",
+        "--quiet",
+        "--detach",
+        &commit,
+    ]))?;
+    Ok(commit)
 }
 
 #[cfg(test)]
@@ -325,8 +489,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clones_refuse_cleartext_transports_unless_allowed() {
-        let src = parse_git_source("https://example.com/o/r.git").unwrap();
+    fn fetches_refuse_cleartext_transports_unless_allowed() {
+        let src = parse_git_source("https://example.com/o/r.git")
+            .unwrap()
+            .unwrap();
         let args = |c: &Command| -> Vec<String> {
             c.get_args()
                 .map(|a| a.to_string_lossy().into_owned())
@@ -336,23 +502,42 @@ mod tests {
             c.get_envs()
                 .any(|(k, v)| k == "GIT_ALLOW_PROTOCOL" && v.is_none())
         };
-        let strict = clone_command(&src, Path::new("dest"), false);
+        let no_prompt = |c: &Command| {
+            c.get_envs()
+                .any(|(k, v)| k == "GIT_TERMINAL_PROMPT" && v == Some("0".as_ref()))
+        };
+        let strict = fetch_command(&src, Path::new("dest"), false);
         let a = args(&strict);
         assert_eq!(
-            a[..5],
+            a[..7],
             [
                 "-c",
                 "protocol.http.allow=never",
                 "-c",
                 "protocol.git.allow=never",
-                "clone"
+                "-C",
+                "dest",
+                "fetch"
             ]
         );
         assert!(removes_allow_list(&strict));
-        let loose = clone_command(&src, Path::new("dest"), true);
+        assert!(no_prompt(&strict));
+        let loose = fetch_command(&src, Path::new("dest"), true);
         assert!(!args(&loose).iter().any(|a| a.starts_with("protocol.")));
         assert!(!removes_allow_list(&loose));
-        assert!(args(&loose).ends_with(&["--".into(), src.url.clone(), "dest".into()]));
+        assert!(no_prompt(&loose));
+        // Unpinned: the default branch.
+        assert!(args(&loose).ends_with(&["--".into(), src.url.clone(), "HEAD".into()]));
+        let pinned = parse_git_source("https://example.com/o/r.git@0123abcd")
+            .unwrap()
+            .unwrap();
+        assert!(
+            args(&fetch_command(&pinned, Path::new("dest"), false)).ends_with(&[
+                "--".into(),
+                pinned.url.clone(),
+                "0123abcd".into()
+            ])
+        );
     }
 
     fn g(url: &str, r: Option<&str>, s: Option<&str>) -> Option<GitSource> {
@@ -363,14 +548,18 @@ mod tests {
         })
     }
 
+    fn parse(src: &str) -> Option<GitSource> {
+        parse_git_source(src).unwrap()
+    }
+
     #[test]
     fn parses_sources() {
         assert_eq!(
-            parse_git_source("github:me/dots"),
+            parse("github:me/dots"),
             g("https://github.com/me/dots.git", None, None)
         );
         assert_eq!(
-            parse_git_source("gh:me/dots/agents/work#main"),
+            parse("gh:me/dots/agents/work#main"),
             g(
                 "https://github.com/me/dots.git",
                 Some("main"),
@@ -378,7 +567,7 @@ mod tests {
             )
         );
         assert_eq!(
-            parse_git_source("https://github.com/me/dots/tree/v1/profile"),
+            parse("https://github.com/me/dots/tree/v1/profile"),
             g(
                 "https://github.com/me/dots.git",
                 Some("v1"),
@@ -386,11 +575,11 @@ mod tests {
             )
         );
         assert_eq!(
-            parse_git_source("https://github.com/me/dots"),
+            parse("https://github.com/me/dots"),
             g("https://github.com/me/dots", None, None)
         );
         assert_eq!(
-            parse_git_source("https://git.example.com/me/dots.git//sub#dev"),
+            parse("https://git.example.com/me/dots.git//sub#dev"),
             g(
                 "https://git.example.com/me/dots.git",
                 Some("dev"),
@@ -398,15 +587,120 @@ mod tests {
             )
         );
         assert_eq!(
-            parse_git_source("git@github.com:me/dots.git"),
+            parse("git@github.com:me/dots.git"),
             g("git@github.com:me/dots.git", None, None)
         );
         assert_eq!(
-            parse_git_source("git+https://h/x.git"),
+            parse("git+https://h/x.git"),
             g("https://h/x.git", None, None)
         );
-        assert_eq!(parse_git_source("./my-profile"), None);
-        assert_eq!(parse_git_source("https://example.com/page"), None);
+        assert_eq!(parse("./my-profile"), None);
+        assert_eq!(parse("https://example.com/page"), None);
+    }
+
+    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn parses_at_refs() {
+        let gh = "https://github.com/me/dots.git";
+        assert_eq!(
+            parse(&format!("github:me/dots@{SHA}")),
+            g(gh, Some(SHA), None)
+        );
+        assert_eq!(parse("github:me/dots@v1.2.0"), g(gh, Some("v1.2.0"), None));
+        assert_eq!(parse("github:me/dots#main"), g(gh, Some("main"), None));
+        assert_eq!(
+            parse("github:me/dots/sub#main"),
+            g(gh, Some("main"), Some("sub"))
+        );
+        assert_eq!(
+            parse("gh:me/dots/agents/work@feature/x"),
+            g(gh, Some("feature/x"), Some("agents/work"))
+        );
+        assert_eq!(parse("github:me/dots@"), g(gh, None, None));
+        assert_eq!(
+            parse("https://git.example.com/me/dots.git//sub@abc1234"),
+            g(
+                "https://git.example.com/me/dots.git",
+                Some("abc1234"),
+                Some("sub")
+            )
+        );
+        assert_eq!(
+            parse("https://git.example.com/me/dots.git@v2//sub"),
+            g(
+                "https://git.example.com/me/dots.git",
+                Some("v2"),
+                Some("sub")
+            )
+        );
+        assert_eq!(
+            parse("git@github.com:me/dots.git@v1"),
+            g("git@github.com:me/dots.git", Some("v1"), None)
+        );
+        assert_eq!(
+            parse("ssh://git@h/me/dots.git@v1"),
+            g("ssh://git@h/me/dots.git", Some("v1"), None)
+        );
+        assert_eq!(
+            parse("https://github.com/me/dots/tree/main/p@v3"),
+            g(gh, Some("v3"), Some("p")),
+            "an explicit ref wins over the /tree/ one"
+        );
+    }
+
+    #[test]
+    fn userinfo_is_not_a_ref() {
+        assert_eq!(
+            parse("https://user:token@host/o/r.git"),
+            g("https://user:token@host/o/r.git", None, None)
+        );
+        assert_eq!(
+            parse("https://token@host/o/r.git#v1"),
+            g("https://token@host/o/r.git", Some("v1"), None)
+        );
+        assert_eq!(
+            parse("https://bob:p@ss@host/o/r.git@v1"),
+            g("https://bob:p@ss@host/o/r.git", Some("v1"), None)
+        );
+        assert_eq!(
+            parse("git@github.com:me/dots.git"),
+            g("git@github.com:me/dots.git", None, None)
+        );
+        assert_eq!(
+            parse("ssh://git@h/x.git"),
+            g("ssh://git@h/x.git", None, None)
+        );
+        // An @ starting a path segment is part of the path.
+        assert_eq!(
+            parse("https://h/@scope/x.git"),
+            g("https://h/@scope/x.git", None, None)
+        );
+    }
+
+    #[test]
+    fn two_refs_or_bad_refs_are_errors() {
+        let e = parse_git_source("github:me/dots@v1#main").unwrap_err();
+        assert!(e.to_string().contains("two refs"), "{e}");
+        let e = parse_git_source("https://bob:pw@h/o/r.git@v1#main").unwrap_err();
+        assert!(!e.to_string().contains("pw"), "{e}");
+        for bad in [
+            "github:me/dots@--upload-pack=x",
+            "github:me/dots#a:b",
+            "github:me/dots@a..b",
+        ] {
+            assert!(parse_git_source(bad).is_err(), "{bad}");
+        }
+        // Not a git source at all: no ref errors.
+        assert_eq!(parse_git_source("./x@a#b").unwrap(), None);
+    }
+
+    #[test]
+    fn short_commits() {
+        assert_eq!(short_commit(SHA), "0123456");
+        assert_eq!(short_commit("abc"), "abc");
+        assert!(looks_like_sha("abc1234") && looks_like_sha(SHA));
+        assert!(!looks_like_sha("main") && !looks_like_sha("abc"));
     }
 
     #[test]

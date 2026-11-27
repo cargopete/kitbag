@@ -71,6 +71,9 @@ kitbag apply ~/dotagents --to codex
 
 # On a new machine: apply straight from git
 kitbag apply github:you/dotagents --to all
+
+# Someone else's bag: see what's in it, and what it would run and write, first
+kitbag inspect github:someone/agents@v1.0 --to all
 ```
 
 Starting from scratch? `kitbag init my-profile` writes a commented starter profile, and
@@ -467,8 +470,13 @@ after the plugin directory is gone.
 
 ## Safe apply
 
-- **Plan first.** `kitbag diff` and `kitbag apply --dry-run` show a unified diff. `kitbag apply`
-  shows a summary and asks before writing. Non-interactive sessions need `--yes`.
+- **Plan first.** `kitbag inspect` lists what a profile or plugin holds (instructions, rules,
+  commands, skills, agents, MCP servers) with a safety summary: the commands its MCP servers
+  run, the URLs they connect to, the env vars it references, the files it would install as
+  executable, risky settings and anything that looks like a secret, all masked like a diff.
+  With `--to` it also lists, per tool, the files `apply` would create or modify. It never
+  writes or starts anything. `kitbag diff` and `kitbag apply --dry-run` show a unified diff.
+  `kitbag apply` shows a summary and asks before writing. Non-interactive sessions need `--yes`.
   `kitbag diff --exit-code` fails when a machine has drifted from the profile, which is useful in CI.
 - **Merge, don't clobber.** JSON and TOML edits go through format-preserving editors: comments,
   key order and indentation of everything else stay as they were. A server kitbag updates keeps
@@ -755,6 +763,7 @@ wrapping of their own.
 | `kitbag capture [--from IDS] [-o DIR] [--dry-run] [--force] [--prune]` | Read the current setup into a profile (secrets redacted). Writes only into a new or empty directory. `--force` replaces an existing profile's files and leaves anything else in the directory alone; the profile's MCP servers found in no tool are kept unless `--prune`. With several tools, one whose config can't be read is reported and the rest are captured |
 | `kitbag diff <SOURCE> [--to IDS] [--exit-code]` | Show exactly what `apply` would change; never writes |
 | `kitbag apply <SOURCE> [--to IDS] [--yes] [--dry-run]` | Plan, confirm, write with backups |
+| `kitbag inspect <SOURCE> [--to IDS] [--json]` | What a profile or plugin holds, what in it runs commands, reads env vars, installs executables or connects to the network, and (for the tools in `--to`, default `detected`) which files `apply` would write; never writes or starts anything |
 | `kitbag status [SOURCE] [--to IDS] [--exit-code [--strict]] [--json]` | Which managed instructions and rules differ from the profile, or changed since the last apply; never writes |
 | `kitbag sync <SOURCE> [--to IDS] [--from ID [--adopt] \| --overwrite]` | Apply without overwriting instructions edited in a tool; pull an edit back with `--from`, and what is only in that tool with `--adopt` |
 | `kitbag undo [ID] [--force]` | Revert the latest (or a specific) apply; with an ID, also an interrupted one |
@@ -770,8 +779,10 @@ Common options:
   or `detected` (the default).
 - `--scope user|project` and `--project DIR` choose between global and per-project config.
 - `--secrets resolve|never`, `--no-overwrite`, `--allow-git-mcp [NAMES]` and
-  `--allow-risky-settings` (`--trust-source`) apply to `apply` and `diff`.
+  `--allow-risky-settings` (`--trust-source`) apply to `apply`, `diff` and `inspect`.
 - `--path SUBDIR` selects a profile inside a repository.
+- `--require-pin` (`apply`, `diff`, `inspect`, `status`, `sync`, `doctor`) refuses a git
+  source that names no branch, tag or commit.
 - `--home DIR` (or `KITBAG_HOME`) treats `DIR` as the home directory for sandboxes and tests.
   It also ignores `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME` and `APPDATA`, and
   keeps backups and history in `DIR/.local/state/kitbag` (not `XDG_STATE_HOME` or
@@ -779,16 +790,32 @@ Common options:
 
 **Sources** are a local profile or plugin directory (see [Plugins](#plugins-rules-at-the-root-no-kitbagtoml)) or a git URL to one:
 
-- `github:owner/repo`, `gh:owner/repo/sub/dir#ref`, `gitlab:` and `bitbucket:` shorthands;
+- `github:owner/repo`, `gh:owner/repo/sub/dir#ref`, `github:owner/repo@ref`, `gitlab:` and
+  `bitbucket:` shorthands;
 - `https://github.com/owner/repo/tree/<ref>/<dir>`;
 - any `https://…/repo.git`, `git@host:owner/repo.git`, `ssh://` or `file://` URL, with
-  `//sub/dir` to pick a sub-directory and `#ref` for a branch or tag.
+  `//sub/dir` to pick a sub-directory and `@ref` or `#ref` at the end to pin it.
 
-A ref must be a branch or tag name, since it is passed to `git clone --branch`; a source
-can't be pinned to a commit SHA. To pin a profile, tag the commit in your repository.
+A ref is a branch, a tag or a commit SHA, full or abbreviated: `github:you/dotagents@v1.2`,
+`github:you/dotagents/work@3f9c2e1`, `https://git.example.com/a.git//sub#main`. `@ref` and
+`#ref` mean the same; giving both is an error. The `@` of credentials or an SSH user
+(`https://user:token@host/…`, `git@host:…`) is never read as a ref. Without a ref, kitbag
+takes the repository's default branch. `--require-pin` refuses such an unpinned git source
+(a branch or tag still counts as a pin).
 
-kitbag clones with your own `git` (shallow, no prompts) into a temporary directory that is
-removed afterwards. Cleartext `http://` and `git://` sources are refused, because anyone on the
+Whatever the ref, kitbag fetches it, checks out the commit it points to and shows that
+commit's full SHA in the plan, in `inspect` and in `status`. A successful apply records the
+SHA with its transaction. When this machine already applied the same source (the URL and
+sub-directory, whatever the ref) at another commit, `apply`, `diff` and `sync` warn that it
+moved and print both SHAs before asking to go on, and `status` shows a `source commit` row as
+`profile changed`, which `--exit-code` counts as drift. Without a source, `status` names the
+commit of each git source it compares against. An apply that finds every file already matching still records the new SHA, in a transaction
+with no files, when the source moved; if the SHA is the same, nothing is recorded. Applies
+made before kitbag recorded SHAs have none, so there is nothing to compare with until the next one.
+
+kitbag fetches with your own `git` (shallow, no prompts) into a temporary directory that is
+removed afterwards; an abbreviated SHA, which `git fetch` can't ask for, fetches the
+branches and tags in full to find it. Cleartext `http://` and `git://` sources are refused, because anyone on the
 network could swap the profile, and so is an `https://` server that redirects to one; pass
 `--allow-insecure-source` to accept them. Credentials in a URL (`https://user:token@host/…`)
 are passed to `git` only: plans, errors, `history` and the transaction log show the URL

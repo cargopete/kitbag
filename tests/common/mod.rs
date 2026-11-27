@@ -184,6 +184,19 @@ pub fn git(dir: &Path, args: &[&str]) {
     assert!(ok, "git {args:?}");
 }
 
+/// Run git in `dir` like [`git`] and return its trimmed output.
+pub fn git_out(dir: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", null_device())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
 pub fn targets(ids: &[&str]) -> Vec<&'static dyn Adapter> {
     ids.iter().map(|id| adapters::get(id).unwrap()).collect()
 }

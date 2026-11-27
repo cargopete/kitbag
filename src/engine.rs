@@ -12,7 +12,7 @@ use crate::model::Profile;
 use crate::plan_fs::{FileChange, PlanFs};
 use crate::policy;
 use crate::secrets::{Redaction, env_var_name, reference};
-use crate::txn::{Store, Transaction, WriteOptions};
+use crate::txn::{GitCommit, Store, Transaction, WriteOptions};
 
 /// The merged result of capturing one or more targets.
 #[derive(Debug, Default)]
@@ -587,13 +587,23 @@ pub fn plan_untrusted(
 
 /// Write a plan to disk as an undoable transaction. Returns `None` when there is nothing to do.
 pub fn commit(plan: &Plan, description: &str, state_dir: &Path) -> Result<Option<Transaction>> {
+    commit_from(plan, description, state_dir, None)
+}
+
+/// [`commit`], recording the git source and commit the plan came from.
+pub fn commit_from(
+    plan: &Plan,
+    description: &str,
+    state_dir: &Path,
+    git: Option<GitCommit>,
+) -> Result<Option<Transaction>> {
     if plan.changes.is_empty() {
         return Ok(None);
     }
     let store = Store::new(state_dir);
     let private = plan.private.clone();
     store
-        .commit(
+        .commit_from(
             &plan.changes,
             description,
             &plan.targets,
@@ -602,6 +612,7 @@ pub fn commit(plan: &Plan, description: &str, state_dir: &Path) -> Result<Option
                 executable: plan.executable.clone(),
                 confine_to: plan.confine_to.clone(),
             },
+            git,
         )
         .map(Some)
 }
