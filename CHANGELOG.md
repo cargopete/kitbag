@@ -8,6 +8,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The `zed` target's project instructions also consider `CLAUDE.md` and `GEMINI.md`, after `AGENTS.md`, the order Zed's docs give today (zed.dev/docs/ai/instructions, checked 2026-11-27). A project that has only one of those files now gets the block there, where Zed reads it, instead of in a new `AGENTS.md` Zed would ignore; `AGENTS.md` still wins when it exists and is still created when none of the files do, and capture reads the same file and names the ones Zed ignores. (#21)
 - The README and the `antigravity` adapter notes no longer say Antigravity's hooks aren't carried (they have been since hooks landed for it), and the workflows note names the two global directories Google's migration guide scans. Checked against Antigravity's current docs (MCP, rules, skills, workflows): MCP servers, instructions, rules and skills at user and project scope are what they document, and its workflows are deprecated in favour of skills with two conflicting global directories, so the `antigravity` target is complete for its design; agents, hooks and plugins are tracked in #14, #13 and #12 (#27).
 
 ### Added
