@@ -65,6 +65,7 @@ use crate::frontmatter;
 use crate::model::{Agent, Command, McpServer, Profile, Transport, is_valid_name};
 use crate::plan_fs::{join_rel, walk_files};
 use crate::profile_io::agent_from_markdown;
+use crate::schema::SchemaSpec;
 use crate::secrets::{RefStyle, normalize_brace_refs};
 use crate::ui::tildify;
 
@@ -197,6 +198,36 @@ fn paths(env: &Env) -> Paths {
     }
 }
 
+/// The two layouts of the `mcp` section, from opencode's migration guide
+/// (<https://opencode.ai/docs/migrate-v1/>, read 2026-11-27): V2 "groups
+/// servers under `mcp.servers`, replaces `enabled` with the inverse
+/// `disabled`", and "normalizes supported V1 and native V2 fields in memory
+/// without rewriting the source file". Both are read and written: a server
+/// is the same in a profile either way, and apply writes the layout the file
+/// already uses.
+const SCHEMAS: &[SchemaSpec] = &[
+    SchemaSpec {
+        id: "v1",
+        summary: "mcp.<name> with `enabled` (opencode 1; opencode 2 still reads it)",
+        read: true,
+        write: true,
+    },
+    SchemaSpec {
+        id: "v2",
+        summary: "mcp.servers.<name> with `disabled` (opencode 2)",
+        read: true,
+        write: true,
+    },
+];
+
+/// Is `file`, a path in the project, really inside it (not a symbolic link out)?
+fn stays_in(file: &Path, project: &Path) -> bool {
+    match (file.canonicalize(), project.canonicalize()) {
+        (Ok(f), Ok(p)) => f.starts_with(p),
+        _ => false,
+    }
+}
+
 /// Where servers live in a config file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Layout {
@@ -320,6 +351,33 @@ impl Adapter for OpenCode {
             ("skills", p.skills().target().to_path_buf()),
             ("agents", p.agents().target().to_path_buf()),
         ]
+    }
+
+    fn schemas(&self) -> &'static [SchemaSpec] {
+        SCHEMAS
+    }
+
+    /// The layout the config file apply would write to uses, when it has
+    /// servers to tell by: an empty or server-less file says nothing (apply
+    /// writes `mcp.servers` there, but the tool has not chosen it).
+    fn detect_schema(&self, env: &Env) -> Option<String> {
+        let p = paths(env);
+        let file = p.configs.iter().find(|c| c.exists())?;
+        if env.scope == Scope::Project && !stays_in(file, &env.project) {
+            return None;
+        }
+        let text = crate::plan_fs::read_text_opt(file).ok()??;
+        let doc = parse_value(Some(&text), file).ok()?;
+        let Value::Object(mcp) = doc.get("mcp")? else {
+            return None;
+        };
+        if mcp.get("servers").is_some_and(Value::is_object) {
+            Some("v2".into())
+        } else if mcp.iter().any(|(k, v)| is_legacy_entry(k, v)) {
+            Some("v1".into())
+        } else {
+            None
+        }
     }
 
     fn detect(&self, env: &Env) -> bool {

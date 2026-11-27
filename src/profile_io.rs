@@ -96,6 +96,17 @@ struct Manifest {
     hooks: Vec<Hook>,
     #[serde(default)]
     plugins: BTreeMap<String, crate::plugins::PluginSet>,
+    #[serde(default)]
+    targets: BTreeMap<String, TargetEntry>,
+}
+
+/// `[targets.<id>]`: what the profile records about one tool. Unknown keys are
+/// refused, so a newer kitbag's additions are not silently ignored.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetEntry {
+    /// The tool's config schema the profile was captured from.
+    schema: String,
 }
 
 /// Parse and validate a `kitbag.toml` manifest into a profile without file-based parts.
@@ -159,6 +170,21 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
         spelled.insert(id.clone(), key);
         settings.insert(id, table);
     }
+    let mut schemas = BTreeMap::new();
+    for (key, entry) in m.targets {
+        let id = crate::adapters::canonical_id(&key).to_string();
+        if let Some(i) = crate::schema::id_issue(&entry.schema) {
+            issues.push(format!("targets.{key}.schema: {i}"));
+        }
+        if crate::adapters::get(&id).is_none() {
+            warnings.push(format!("targets.{key}: unknown target"));
+        }
+        if schemas.insert(id.clone(), entry.schema).is_some() {
+            issues.push(format!(
+                "[targets.{key}] names '{id}' a second time ('claude' is another name for 'claude-code'); keep one"
+            ));
+        }
+    }
     issues.extend(crate::hooks::validate(&m.hooks, None));
     let (plugin_issues, plugin_warnings) = crate::plugins::validate(&mut m.plugins);
     issues.extend(plugin_issues);
@@ -176,6 +202,7 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
         settings,
         hooks: m.hooks,
         plugins: m.plugins,
+        schemas,
         warnings,
         ..Profile::default()
     })
@@ -784,6 +811,16 @@ pub fn manifest_toml(p: &Profile) -> String {
     doc["name"] = value(p.name.as_str());
     if let Some(d) = &p.description {
         doc["description"] = value(d.as_str());
+    }
+    if !p.schemas.is_empty() {
+        let mut targets = Table::new();
+        targets.set_implicit(true);
+        for (target, schema) in &p.schemas {
+            let mut t = Table::new();
+            t.insert("schema", value(schema.as_str()));
+            targets.insert(target, Item::Table(t));
+        }
+        doc["targets"] = Item::Table(targets);
     }
     if !p.mcp_servers.is_empty() {
         let mut servers = Table::new();

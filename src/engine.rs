@@ -70,6 +70,15 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
             Err(e) => return Err(e),
         };
         read += 1;
+        // Which config schema this tool's files use, when the files say; only
+        // for a tool that gave something to the profile.
+        if !c.profile.is_empty()
+            && let Some(schema) = a
+                .detect_schema(env)
+                .filter(|s| crate::schema::id_issue(s).is_none())
+        {
+            out.profile.schemas.insert(a.id().to_string(), schema);
+        }
         out.notes.extend(c.notes);
         for s in c.sources {
             if !out.sources.contains(&s) {
@@ -395,6 +404,37 @@ pub fn plan(
             skipped.push(a.id().to_string());
             continue;
         }
+        // The schema the profile was captured from, against the one the tool
+        // uses here: refuse a claim kitbag doesn't know, skip a tool whose
+        // format kitbag can't write, say when it maps one to the other.
+        let (verdict, _) =
+            crate::schema::verdict(*a, profile.schemas.get(a.id()).map(String::as_str), env);
+        if let Some(why) = crate::schema::refusal(a.id(), a.name(), &verdict) {
+            anyhow::bail!("{why}");
+        }
+        match &verdict {
+            crate::schema::Verdict::UnwritableInstalled { schema } => {
+                work.warn(
+                    a.id(),
+                    format!(
+                        "nothing written to {}: its config uses schema '{}', which kitbag can't write{}; update kitbag, or change the tool's config by hand",
+                        a.name(),
+                        crate::ui::visible_line(schema),
+                        known_schemas(*a)
+                    ),
+                );
+                skipped.push(a.id().to_string());
+                continue;
+            }
+            crate::schema::Verdict::Converts { from, to } => work.info(
+                a.id(),
+                format!(
+                    "the profile's {} part was captured from schema '{from}', and this tool's config uses '{to}': written as '{to}'",
+                    a.name()
+                ),
+            ),
+            _ => {}
+        }
         // Rules, commands, skills and agents the profile keeps off this tool
         // are planned as if they weren't in it, and removed if kitbag put them there.
         let skipped = profile.skipped_items(a.id());
@@ -630,6 +670,21 @@ pub fn plan(
             (env.project.clone(), root)
         }),
     })
+}
+
+/// ` (it writes: v1, v2)` for the schemas `a` can write, for messages.
+fn known_schemas(a: &dyn Adapter) -> String {
+    let ids: Vec<&str> = a
+        .schemas()
+        .iter()
+        .filter(|s| s.write)
+        .map(|s| s.id)
+        .collect();
+    if ids.is_empty() {
+        String::new()
+    } else {
+        format!(" (it writes: {})", ids.join(", "))
+    }
 }
 
 fn plan_fs(env: &Env) -> PlanFs {

@@ -67,6 +67,7 @@ use crate::frontmatter;
 use crate::model::{Command, McpServer, Profile, Rule, RuleMode, Transport, is_valid_name};
 use crate::plan_fs::{join_rel, walk_files};
 use crate::profile_io::rule_from_markdown;
+use crate::schema::SchemaSpec;
 use crate::secrets::{
     RefStyle, has_other_continue_template, normalize_continue_secrets, render_refs,
 };
@@ -111,6 +112,16 @@ const KNOWN_KEYS: &[&str] = &[
     "headers",
 ];
 const MAX_FILES: usize = 500;
+
+/// `schema: v1` is the only `config.yaml` schema Continue's docs give
+/// (<https://docs.continue.dev/reference>); kitbag writes it into the files
+/// it creates. Anything else in that key is a format kitbag has not seen.
+const SCHEMAS: &[SchemaSpec] = &[SchemaSpec {
+    id: "v1",
+    summary: "config.yaml with `schema: v1`",
+    read: true,
+    write: true,
+}];
 
 pub struct ContinueIde;
 
@@ -250,6 +261,22 @@ impl Adapter for ContinueIde {
             out.push(("rules", r));
         }
         out
+    }
+
+    fn schemas(&self) -> &'static [SchemaSpec] {
+        SCHEMAS
+    }
+
+    /// The `schema` key of `config.yaml` (user scope; a project's
+    /// `.continue/` files have no one file to read it from).
+    fn detect_schema(&self, env: &Env) -> Option<String> {
+        let config = paths(env).config?;
+        let text = crate::plan_fs::read_text_opt(&config).ok()??;
+        let doc = parse_map(Some(&text), &config).ok()?;
+        match doc.get("schema")? {
+            Value::String(s) => Some(s.clone()),
+            _ => None,
+        }
     }
 
     fn detect(&self, env: &Env) -> bool {

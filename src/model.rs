@@ -566,6 +566,10 @@ pub struct Profile {
     /// Plugins and the marketplaces they come from, by reference, per target
     /// (see [`crate::plugins`]).
     pub plugins: BTreeMap<String, crate::plugins::PluginSet>,
+    /// Per target, the config schema the profile's part for it was captured
+    /// from (`[targets.<id>] schema`, see [`crate::schema`]). Only for tools
+    /// that declare schemas; a profile without it is applied as before.
+    pub schemas: BTreeMap<String, String>,
     /// Problems found while loading that don't stop the profile from loading.
     pub warnings: Vec<String>,
 }

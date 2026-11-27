@@ -463,6 +463,18 @@ pub trait Adapter: Sync {
     fn locations(&self, env: &Env) -> Vec<(&'static str, PathBuf)>;
     /// Is the tool installed or configured (in this project)?
     fn detect(&self, env: &Env) -> bool;
+    /// The config schemas of this tool kitbag knows, readable and writable
+    /// (see [`crate::schema`]). Empty for a tool that declares none.
+    fn schemas(&self) -> &'static [crate::schema::SchemaSpec] {
+        &[]
+    }
+    /// The schema the tool's own config files use here, from what is already
+    /// on disk (no command is run). `None` when there is nothing to tell by,
+    /// or the adapter declares no schemas. May name a schema that is not in
+    /// [`Adapter::schemas`]: that is a format kitbag doesn't know.
+    fn detect_schema(&self, _env: &Env) -> Option<String> {
+        None
+    }
     /// Read the tool's current setup into a (redacted) profile.
     fn capture(&self, env: &Env) -> Result<Captured>;
     /// Plan the writes that make the tool match `profile`. Never touches disk.
