@@ -18,6 +18,14 @@
 //!   project has one, since it would shadow `AGENTS.md`, and `AGENTS.md`
 //!   (shared with Codex, Cursor, Antigravity, opencode, Windsurf and Grok
 //!   Build) otherwise.
+//! * Hooks: the shell hooks of the `hooks:` block in `config.yaml` (user scope
+//!   only), through `hook_files`: `capture --include hooks` reads them,
+//!   `apply --apply-hooks` writes them, scripts go to `agent-hooks/kitbag/`.
+//!   Hermes asks for approval of each new hook (`shell-hooks-allowlist.json`)
+//!   and kitbag never writes that file. Its other hook systems are not carried:
+//!   gateway hooks (`hooks/<name>/HOOK.yaml` + `handler.py`), plugin hooks
+//!   (`ctx.register_hook()`) and outbound webhooks (`hooks.outbound`, left as
+//!   it is when `hooks:` is edited).
 //! * Never read or written: `.env`, `auth.json`, `mcp-tokens/` (credentials),
 //!   and Hermes' own stores (`skills/`, `memories/`, sessions, `profiles/`).
 //!   Run kitbag with `HERMES_HOME` set to a profile's directory to use that
@@ -25,6 +33,7 @@
 //!
 //! Docs: <https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp>,
 //! <https://hermes-agent.nousresearch.com/docs/user-guide/features/context-files>,
+//! <https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks>,
 //! <https://hermes-agent.nousresearch.com/docs/user-guide/configuration/>.
 
 use std::path::PathBuf;
@@ -68,7 +77,7 @@ struct Paths {
     instructions: PathBuf,
 }
 
-fn hermes_home(env: &Env) -> PathBuf {
+pub(super) fn hermes_home(env: &Env) -> PathBuf {
     env.location_var("HERMES_HOME")
         .unwrap_or_else(|| env.home.join(".hermes"))
 }
@@ -188,6 +197,11 @@ impl Adapter for Hermes {
         }
 
         if env.scope == Scope::User {
+            super::hook_files::capture_for(&mut cap, env, &super::hook_files::HERMES)?;
+            other_hook_systems(&mut cap, &hermes_home(env), &env.home);
+        }
+
+        if env.scope == Scope::User {
             // SOUL.md is Hermes's persona (a fresh install seeds one); its own
             // text is not instructions for other tools, so only a block kitbag
             // wrote there is captured.
@@ -249,6 +263,7 @@ impl Adapter for Hermes {
         // Codex, Cursor, Antigravity, opencode, Windsurf and Grok Build:
         // applying several plans the same block more than once, which leaves one.
         write_instructions(work, &p.instructions, profile, opts, false, ID)?;
+        super::hook_files::apply_for(profile, env, opts, work, &super::hook_files::HERMES)?;
         if profile.settings.contains_key(ID) {
             work.info(
                 ID,
@@ -256,6 +271,69 @@ impl Adapter for Hermes {
             );
         }
         Ok(())
+    }
+}
+
+/// Hermes's gateway hooks (`hooks/<name>/HOOK.yaml`) and plugin hooks
+/// (`ctx.register_hook()` in a plugin) are other systems than the shell hooks
+/// kitbag carries: say so when there are some, instead of leaving them out silently.
+fn other_hook_systems(cap: &mut Captured, home: &std::path::Path, user_home: &std::path::Path) {
+    let subdirs = |dir: &std::path::Path| -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        v.sort();
+        v
+    };
+    let name = |p: &PathBuf| {
+        p.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let gateway: Vec<String> = subdirs(&home.join("hooks"))
+        .iter()
+        .filter(|d| d.join("HOOK.yaml").is_file())
+        .map(name)
+        .collect();
+    if !gateway.is_empty() {
+        cap.warn(
+            ID,
+            format!(
+                "gateway hooks ({}) in {} (HOOK.yaml + handler.py) were not captured: kitbag carries Hermes's shell hooks only",
+                gateway.join(", "),
+                crate::ui::tildify(&home.join("hooks"), user_home)
+            ),
+        );
+    }
+    let plugins: Vec<String> = subdirs(&home.join("plugins"))
+        .iter()
+        .filter(|d| {
+            std::fs::read_dir(d)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e == "py") && p.is_file())
+                .any(|p| {
+                    std::fs::metadata(&p)
+                        .is_ok_and(|m| m.len() <= crate::profile_io::MAX_FILE_BYTES)
+                        && std::fs::read_to_string(&p).is_ok_and(|t| t.contains("register_hook("))
+                })
+        })
+        .map(name)
+        .collect();
+    if !plugins.is_empty() {
+        cap.warn(
+            ID,
+            format!(
+                "plugin hooks (ctx.register_hook() in plugin {}) were not captured: kitbag carries Hermes's shell hooks only",
+                plugins.join(", ")
+            ),
+        );
     }
 }
 

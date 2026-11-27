@@ -18,6 +18,7 @@
 //! | grok-build | `$GROK_HOME/hooks/*.json`, `.grok/hooks/*.json` | <https://docs.x.ai/build/features/hooks> |
 //! | antigravity | `~/.gemini/config/hooks.json`, `.agents/hooks.json` | <https://antigravity.google/docs/hooks> |
 //! | copilot | `$COPILOT_HOME/hooks/*.json`, `.github/hooks/*.json` | <https://docs.github.com/copilot/reference/hooks-reference> |
+//! | hermes | `$HERMES_HOME/config.yaml`, `hooks` (shell hooks only, user scope) | <https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks> |
 //!
 //! Scripts a hook runs are copied into the profile's `hooks/` directory and
 //! written back to a `hooks/kitbag/` directory next to the hook file, which the
@@ -32,6 +33,7 @@ use serde_json::{Map, Value, json};
 use super::common::{skill_file_executable, write_owned};
 use super::{ApplyOptions, Captured, Env, HookWrite, Scope, Work};
 use crate::edit::json::JsonDoc;
+use crate::edit::yaml::YamlDoc;
 use crate::hooks;
 use crate::model::{Hook, SkillFile};
 use crate::plan_fs::{join_rel, read_opt};
@@ -94,6 +96,37 @@ pub(crate) struct Format {
     pub dot_dir: &'static str,
     /// What the tool does about hooks it hasn't been told to trust.
     pub trust_note: Option<&'static str>,
+    pub quirks: Quirks,
+}
+
+/// How a tool's hook file differs from the usual JSON file of `command` hooks.
+#[derive(Clone, Copy)]
+pub(crate) struct Quirks {
+    /// The file is YAML (the hooks are one section of it, edited in place).
+    pub yaml: bool,
+    /// A handler carries `"type": "command"`.
+    pub typed: bool,
+    /// Directory (below the tool's config directory) scripts are looked for
+    /// in, and written to, in a `kitbag/` subdirectory.
+    pub script_dir: &'static str,
+    /// Keys next to the events that are other hook systems of the tool, with
+    /// what they are called: reported, never captured, never changed.
+    pub other_keys: &'static [(&'static str, &'static str)],
+    /// The tool documents no project hook file.
+    pub user_only: bool,
+    /// Events that take a matcher; `None` when every event does.
+    pub matcher_events: Option<&'static [&'static str]>,
+}
+
+impl Quirks {
+    const STANDARD: Quirks = Quirks {
+        yaml: false,
+        typed: true,
+        script_dir: "hooks",
+        other_keys: &[],
+        user_only: false,
+        matcher_events: None,
+    };
 }
 
 pub(crate) const CLAUDE: Format = Format {
@@ -114,6 +147,7 @@ pub(crate) const CLAUDE: Format = Format {
     user_relative: false,
     dot_dir: ".claude",
     trust_note: None,
+    quirks: Quirks::STANDARD,
 };
 
 pub(crate) const CURSOR: Format = Format {
@@ -157,6 +191,7 @@ pub(crate) const CURSOR: Format = Format {
     user_relative: true,
     dot_dir: ".cursor",
     trust_note: None,
+    quirks: Quirks::STANDARD,
 };
 
 pub(crate) const CODEX: Format = Format {
@@ -196,6 +231,7 @@ pub(crate) const CODEX: Format = Format {
     trust_note: Some(
         "Codex skips a new or changed hook until you review and trust it with /hooks; kitbag doesn't bypass that",
     ),
+    quirks: Quirks::STANDARD,
 };
 
 pub(crate) const GEMINI: Format = Format {
@@ -231,6 +267,7 @@ pub(crate) const GEMINI: Format = Format {
     trust_note: Some(
         "Gemini CLI warns before it runs a project hook it hasn't seen (hooks are fingerprinted by name and command); kitbag doesn't bypass that",
     ),
+    quirks: Quirks::STANDARD,
 };
 
 pub(crate) const GROK: Format = Format {
@@ -266,6 +303,7 @@ pub(crate) const GROK: Format = Format {
     trust_note: Some(
         "Grok Build runs project hooks only in a folder you have trusted (/hooks-trust or --trust); kitbag doesn't change that",
     ),
+    quirks: Quirks::STANDARD,
 };
 
 pub(crate) const ANTIGRAVITY: Format = Format {
@@ -290,6 +328,7 @@ pub(crate) const ANTIGRAVITY: Format = Format {
     user_relative: false,
     dot_dir: ".agents",
     trust_note: None,
+    quirks: Quirks::STANDARD,
 };
 
 pub(crate) const COPILOT: Format = Format {
@@ -325,6 +364,94 @@ pub(crate) const COPILOT: Format = Format {
     trust_note: Some(
         "Copilot CLI loads repository hooks only for a workspace you have admitted; kitbag doesn't change that",
     ),
+    quirks: Quirks::STANDARD,
+};
+
+/// Hermes Agent's shell hooks: the `hooks:` block of `config.yaml`, a list of
+/// `{matcher, command, timeout, fail_closed}` entries under each event.
+/// `hooks.outbound` (outbound webhooks) sits in the same block and is left
+/// alone; gateway hooks (`hooks/<name>/HOOK.yaml`) and plugin hooks are other
+/// systems, not carried. Scripts go to `agent-hooks/kitbag/`, the directory the
+/// docs suggest for them, not to `hooks/`, where Hermes loads gateway hooks.
+pub(crate) const HERMES: Format = Format {
+    id: "hermes",
+    name: "Hermes Agent",
+    events: &[
+        ("session-start", "on_session_start"),
+        ("session-end", "on_session_finalize"),
+        ("prompt-submit", "pre_llm_call"),
+        ("pre-tool", "pre_tool_call"),
+        ("post-tool", "post_tool_call"),
+        ("subagent-start", "subagent_start"),
+        ("subagent-stop", "subagent_stop"),
+        ("post-compact", "post_compaction"),
+    ],
+    only: &[
+        "transform_tool_result",
+        "transform_terminal_output",
+        "pre_transcription",
+        "post_llm_call",
+        "transform_llm_output",
+        "pre_verify",
+        "pre_api_request",
+        "post_api_request",
+        "api_request_error",
+        "pre_auxiliary_call",
+        "post_auxiliary_call",
+        "on_stream_start",
+        "on_stream_delta",
+        "on_stream_end",
+        "on_interim_message",
+        "on_session_open",
+        "on_session_end",
+        "on_session_reset",
+        "on_session_delete",
+        "post_curator_run",
+        "agent_loop_stopped",
+        "on_skill_lifecycle",
+        "pre_gateway_dispatch",
+        "post_gateway_admission",
+        "gateway_platform_event",
+        "pre_command",
+        "pre_approval_request",
+        "post_approval_response",
+        "on_human_input_request",
+        "on_human_input_resolved",
+        "on_session_prompt",
+        "on_session_prompt_settled",
+        "on_room_member_activity",
+        "kanban_task_claimed",
+        "kanban_task_completed",
+        "kanban_task_blocked",
+        "on_kanban_worker_spawned",
+        "on_kanban_worker_exited",
+        "on_kanban_worker_stale_claim",
+        "on_kanban_task_updated",
+        "on_kanban_dispatch_tick",
+    ],
+    layout: Layout::Flat,
+    root: "hooks",
+    command_keys: &["command"],
+    version: false,
+    timeout_key: "timeout",
+    timeout_ms: false,
+    extras: Extras::Only(&["fail_closed", "failClosed"]),
+    project_vars: &[],
+    project_scripts: None,
+    project_cwd: None,
+    user_relative: false,
+    dot_dir: ".hermes",
+    trust_note: Some(
+        "Hermes asks you to approve each new hook (a foreground `hermes chat` prompts; the gateway, cron and CI need --accept-hooks, HERMES_ACCEPT_HOOKS=1 or an entry in shell-hooks-allowlist.json) and kitbag doesn't write that file or set hooks_auto_accept; `hermes hooks list` shows what is waiting",
+    ),
+    quirks: Quirks {
+        yaml: true,
+        typed: false,
+        script_dir: "agent-hooks",
+        other_keys: &[("outbound", "outbound webhooks")],
+        user_only: true,
+        matcher_events: Some(&["pre_tool_call", "post_tool_call"]),
+    },
 };
 
 /// Targets that have no hook file kitbag writes, with the reason.
@@ -332,10 +459,6 @@ const NO_HOOKS: &[(&str, &str)] = &[
     (
         "claude-desktop",
         "Claude Desktop has no hook configuration of its own (Claude Code's hooks live in its settings.json)",
-    ),
-    (
-        "hermes",
-        "Hermes documents shell hooks in config.yaml (and gateway, plugin and outbound hook systems) that kitbag doesn't write yet",
     ),
     (
         "opencode",
@@ -361,6 +484,7 @@ pub(crate) fn format_for(id: &str) -> Option<&'static Format> {
         &GROK,
         &ANTIGRAVITY,
         &COPILOT,
+        &HERMES,
     ]
     .into_iter()
     .find(|f| f.id == id)
@@ -402,6 +526,18 @@ impl Format {
             Layout::Grouped => true,
             Layout::Flat => false,
             Layout::Mixed(list) => list.contains(&event),
+        }
+    }
+
+    /// A hook file of this tool, parsed (`None` when it can't be read).
+    pub fn read_doc(&self, path: &Path) -> Option<Value> {
+        let text = std::fs::read_to_string(path).ok()?;
+        if self.quirks.yaml {
+            crate::edit::yaml::parse_map(Some(&text), path)
+                .ok()
+                .map(Value::Object)
+        } else {
+            crate::edit::json::parse_value(Some(&text), path).ok()
         }
     }
 
@@ -503,6 +639,11 @@ fn locate(fmt: &Format, env: &Env) -> Where {
             };
             (d.clone(), if user { d } else { env.project.clone() })
         }
+        "hermes" => {
+            // User scope only (see `Quirks::user_only`); the project path is never used.
+            let d = super::hermes::hermes_home(env);
+            (d.clone(), d)
+        }
         // Copilot
         _ => {
             if user {
@@ -515,8 +656,12 @@ fn locate(fmt: &Format, env: &Env) -> Where {
             }
         }
     };
-    let scripts = dir.join("hooks").join("kitbag");
+    let scripts = dir.join(fmt.quirks.script_dir).join("kitbag");
     let (read, write) = match fmt.id {
+        "hermes" => {
+            let f = dir.join("config.yaml");
+            (vec![f.clone()], f)
+        }
         "cursor" | "codex" | "antigravity" => {
             let f = dir.join("hooks.json");
             (vec![f.clone()], f)
@@ -557,6 +702,9 @@ fn json_files(cap: &mut Captured, dir: &Path, id: &str) -> Vec<PathBuf> {
 
 /// Capture the hooks of the tool `fmt` describes at `env`'s scope.
 pub(super) fn capture_for(cap: &mut Captured, env: &Env, fmt: &Format) -> Result<()> {
+    if fmt.quirks.user_only && env.scope == Scope::Project {
+        return Ok(());
+    }
     let w = locate(fmt, env);
     let mut files = Vec::new();
     for p in &w.read {
@@ -577,6 +725,24 @@ pub(super) fn apply_for(
     work: &mut Work,
     fmt: &Format,
 ) -> Result<()> {
+    if fmt.quirks.user_only && env.scope == Scope::Project {
+        if !profile.hooks.is_empty() {
+            work.warn(
+                fmt.id,
+                format!(
+                    "{} hook(s) not written to {}: its docs name no project hook file, so hooks are written at user scope only. They would run:",
+                    profile.hooks.len(),
+                    fmt.name
+                ),
+            );
+            for h in &profile.hooks {
+                work.info(fmt.id, format!("hook {}", hooks::describe(h)));
+                work.hook_skipped
+                    .push((fmt.id.to_string(), hooks::describe(h)));
+            }
+        }
+        return Ok(());
+    }
     let w = locate(fmt, env);
     apply(profile, env, opts, work, fmt, &w.write, &w.scripts)
 }
@@ -643,7 +809,7 @@ fn profile_path(path: &Path, base: &Path, env: &Env, fmt: &Format) -> Option<Str
     if env.scope == Scope::Project && parts.first().is_some_and(|p| p == fmt.dot_dir) {
         parts = &parts[1..];
     }
-    if parts.len() > 1 && parts[0] == "hooks" {
+    if parts.len() > 1 && parts[0] == fmt.quirks.script_dir {
         parts = &parts[1..];
         // Where an earlier apply put them.
         if parts.len() > 1 && parts[0] == "kitbag" {
@@ -854,6 +1020,23 @@ pub(super) fn capture(
     let mut count = 0;
     for events in event_maps(cap, fmt, doc) {
         for (event, groups) in events {
+            if let Some((_, what)) = fmt
+                .quirks
+                .other_keys
+                .iter()
+                .find(|(k, _)| *k == event.as_str())
+            {
+                let n = groups.as_array().map_or(0, Vec::len);
+                cap.warn(
+                    fmt.id,
+                    format!(
+                        "hooks: the {what} ({}.{event}, {n} entr{}) were not captured: kitbag doesn't carry them, and apply leaves them as they are",
+                        fmt.root,
+                        if n == 1 { "y" } else { "ies" }
+                    ),
+                );
+                continue;
+            }
             let Some(neutral) = fmt.neutral_event(event) else {
                 if event != "enabled" {
                     cap.warn(
@@ -970,8 +1153,9 @@ pub(super) fn count(fmt: &Format, doc: &Map<String, Value>) -> usize {
     };
     events
         .into_iter()
-        .flat_map(|m| m.values())
-        .filter_map(Value::as_array)
+        .flat_map(|m| m.iter())
+        .filter(|(k, _)| !fmt.quirks.other_keys.iter().any(|(o, _)| o == k))
+        .filter_map(|(_, v)| v.as_array())
         .map(|l| handlers_in(l).len())
         .sum()
 }
@@ -990,14 +1174,20 @@ pub(super) fn capture_files(
         let Some(text) = cap.read_config(path, fmt.id)? else {
             continue;
         };
-        let doc = match crate::edit::json::parse_value(Some(&text), path) {
+        let parsed = if fmt.quirks.yaml {
+            crate::edit::yaml::parse_map(Some(&text), path).map(Value::Object)
+        } else {
+            crate::edit::json::parse_value(Some(&text), path)
+        };
+        let doc = match parsed {
             Ok(Value::Object(m)) => m,
             Ok(_) => {
                 cap.warn(
                     fmt.id,
                     format!(
-                        "{} is not a JSON object; no hooks read from it",
-                        path.display()
+                        "{} is not a {} object; no hooks read from it",
+                        path.display(),
+                        if fmt.quirks.yaml { "YAML" } else { "JSON" }
                     ),
                 );
                 continue;
@@ -1051,7 +1241,9 @@ fn handler(
     cwd: Option<&str>,
 ) -> Result<(Value, Vec<String>), String> {
     let mut m = Map::new();
-    m.insert("type".into(), json!("command"));
+    if fmt.quirks.typed {
+        m.insert("type".into(), json!("command"));
+    }
     m.insert("command".into(), json!(h.command));
     if flat && let Some(x) = &h.matcher {
         m.insert("matcher".into(), json!(x));
@@ -1203,9 +1395,31 @@ pub(super) fn apply(
     }
 
     let text = work.fs.read(file)?;
-    let mut doc = JsonDoc::parse(text.as_deref(), file)?;
-    doc.check_unique_keys(&[], &[fmt.root])?;
-    let mut all = match doc.get(&[fmt.root]) {
+    let mut doc = if fmt.quirks.yaml {
+        let doc = YamlDoc::parse(text.as_deref(), file)?;
+        if let Err(why) = doc.check_editable(fmt.root) {
+            work.warn(
+                id,
+                format!(
+                    "hooks not written to {}: {why}, which kitbag can't edit in place; add them by hand",
+                    file.display()
+                ),
+            );
+            work.hook_skipped.extend(
+                profile
+                    .hooks
+                    .iter()
+                    .map(|h| (id.to_string(), hooks::describe(h))),
+            );
+            return Ok(());
+        }
+        HookDoc::Yaml(doc)
+    } else {
+        let doc = JsonDoc::parse(text.as_deref(), file)?;
+        doc.check_unique_keys(&[], &[fmt.root])?;
+        HookDoc::Json(doc)
+    };
+    let mut all = match doc.events(fmt.root) {
         None => Map::new(),
         Some(Value::Object(m)) => m,
         Some(_) => {
@@ -1226,6 +1440,7 @@ pub(super) fn apply(
             return Ok(());
         }
     };
+    let before = all.clone();
     let mut changed = false;
     let mut written = 0;
     let mut landed: Vec<usize> = Vec::new();
@@ -1304,17 +1519,11 @@ pub(super) fn apply(
         let cwd = (env.scope == Scope::Project && !rels.is_empty())
             .then_some(fmt.project_cwd)
             .flatten();
-        let (entry, dropped) = match handler(fmt, &rendered, !grouped, cwd) {
-            Ok(x) => x,
-            Err(why) => {
-                work.warn(
-                    id,
-                    format!("hook not applied to {}: {why} ({what})", fmt.name),
-                );
-                continue;
-            }
-        };
-        let matcher = if grouped || matches!(fmt.layout, Layout::Flat) {
+        let takes_matcher = fmt
+            .quirks
+            .matcher_events
+            .is_none_or(|events| events.contains(&event));
+        let matcher = if (grouped || matches!(fmt.layout, Layout::Flat)) && takes_matcher {
             h.matcher.clone()
         } else {
             if h.matcher.is_some() {
@@ -1327,6 +1536,20 @@ pub(super) fn apply(
                 );
             }
             None
+        };
+        let rendered = Hook {
+            matcher: matcher.clone(),
+            ..rendered
+        };
+        let (entry, dropped) = match handler(fmt, &rendered, !grouped, cwd) {
+            Ok(x) => x,
+            Err(why) => {
+                work.warn(
+                    id,
+                    format!("hook not applied to {}: {why} ({what})", fmt.name),
+                );
+                continue;
+            }
         };
         if !dropped.is_empty() {
             work.info(
@@ -1453,12 +1676,42 @@ pub(super) fn apply(
     {
         work.info(id, note);
     }
-    if changed {
-        doc.set(&[fmt.root], &Value::Object(all));
-        if fmt.version && doc.get(&["version"]).is_none() {
-            doc.set(&["version"], &json!(1));
+    if written > 0 && changed {
+        for (key, what) in fmt.quirks.other_keys {
+            if let Some(Value::Array(list)) = all.get(*key) {
+                work.info(
+                    id,
+                    format!(
+                        "the {what} ({}.{key}, {} entr{}) in {} were left as they are; kitbag doesn't carry them",
+                        fmt.root,
+                        list.len(),
+                        if list.len() == 1 { "y" } else { "ies" },
+                        file.display()
+                    ),
+                );
+            }
         }
-        work.fs.write(file, doc.render())?;
+    }
+    if changed {
+        match &mut doc {
+            HookDoc::Json(doc) => {
+                doc.set(&[fmt.root], &Value::Object(all));
+                if fmt.version && doc.get(&["version"]).is_none() {
+                    doc.set(&["version"], &json!(1));
+                }
+                work.fs.write(file, doc.render())?;
+            }
+            HookDoc::Yaml(doc) => {
+                // Only the events that changed are rewritten; the rest of the
+                // block (and of the file) stays as it is.
+                for (event, list) in &all {
+                    if before.get(event) != Some(list) {
+                        doc.set(fmt.root, event, list)?;
+                    }
+                }
+                work.fs.write(file, doc.render()?)?;
+            }
+        }
     }
     work.hook_writes.extend(writes);
     work.hook_skipped.extend(
@@ -1472,11 +1725,27 @@ pub(super) fn apply(
     Ok(())
 }
 
+/// The hook file being edited.
+enum HookDoc {
+    Json(JsonDoc),
+    Yaml(YamlDoc),
+}
+
+impl HookDoc {
+    /// The value of the events object, as it is now.
+    fn events(&self, root: &str) -> Option<Value> {
+        match self {
+            HookDoc::Json(d) => d.get(&[root]),
+            HookDoc::Yaml(d) => d.get(root).filter(|v| !v.is_null()).cloned(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL: [&Format; 7] = [
+    const ALL: [&Format; 8] = [
         &CLAUDE,
         &CURSOR,
         &CODEX,
@@ -1484,6 +1753,7 @@ mod tests {
         &GROK,
         &ANTIGRAVITY,
         &COPILOT,
+        &HERMES,
     ];
 
     #[test]
@@ -1543,12 +1813,76 @@ mod tests {
                 Some("PreToolUse"),
                 Some("PreToolUse"),
                 Some("preToolUse"),
+                Some("pre_tool_call"),
             ]
         );
         // Events without a documented counterpart are not guessed.
         assert_eq!(GEMINI.native_event("stop"), None);
         assert_eq!(ANTIGRAVITY.native_event("stop"), None);
         assert_eq!(CURSOR.native_event("post-compact"), None);
+    }
+
+    #[test]
+    fn hermes_events_are_the_documented_equivalents_and_the_rest_are_its_own() {
+        assert_eq!(HERMES.native_event("pre-tool"), Some("pre_tool_call"));
+        assert_eq!(HERMES.native_event("prompt-submit"), Some("pre_llm_call"));
+        assert_eq!(
+            HERMES.native_event("session-end"),
+            Some("on_session_finalize")
+        );
+        // `on_session_end` fires after every turn, so it is not `session-end`.
+        assert_eq!(
+            HERMES.native_event("hermes:on_session_end"),
+            Some("on_session_end")
+        );
+        assert_eq!(
+            HERMES.neutral_event("on_session_end").as_deref(),
+            Some("hermes:on_session_end")
+        );
+        // No documented counterpart: not guessed.
+        for e in [
+            "stop",
+            "post-tool-failure",
+            "notification",
+            "pre-compact",
+            "permission-request",
+        ] {
+            assert_eq!(HERMES.native_event(e), None, "{e}");
+        }
+        // Shell hooks can't register this one.
+        assert_eq!(
+            HERMES.native_event("hermes:transform_api_error_classification"),
+            None
+        );
+        // Outbound webhooks are not an event.
+        assert_eq!(HERMES.neutral_event("outbound"), None);
+        assert_eq!(HERMES.quirks.script_dir, "agent-hooks");
+    }
+
+    #[test]
+    fn hermes_hooks_are_found_in_a_parsed_config() {
+        let doc = json!({"hooks": {"pre_tool_call": [
+            {"matcher": "terminal", "command": "a", "timeout": 5}]}});
+        assert_eq!(
+            HERMES
+                .find_handlers(&doc, "pre_tool_call", Some("terminal"), "a")
+                .len(),
+            1
+        );
+        assert!(
+            HERMES
+                .find_handlers(&doc, "pre_tool_call", None, "a")
+                .is_empty()
+        );
+        // Outbound webhooks are not shell hooks.
+        let doc = yaml_doc(
+            "hooks:\n  outbound:\n  - url: https://x\n    events: [a]\n  on_session_start:\n  - command: c\n",
+        );
+        assert_eq!(count(&HERMES, doc.as_object().unwrap()), 1);
+    }
+
+    fn yaml_doc(text: &str) -> Value {
+        Value::Object(crate::edit::yaml::parse_map(Some(text), Path::new("c.yaml")).unwrap())
     }
 
     #[test]
