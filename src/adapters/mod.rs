@@ -293,9 +293,6 @@ pub struct Captured {
     pub redactions: Vec<Redaction>,
     /// Files and directories that were read.
     pub sources: Vec<PathBuf>,
-    /// Rules read from a file of their own (not folded into an instructions
-    /// file), by name: lets `status` find rule files that exist only in the tool.
-    pub rule_files: Vec<(String, PathBuf)>,
     /// At project scope: the project root as given and canonicalised. Files
     /// under it are only read if their real location is inside it too.
     pub project: Option<(PathBuf, PathBuf)>,
