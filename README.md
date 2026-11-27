@@ -88,7 +88,7 @@ Starting from scratch? `kitbag init my-profile` writes a commented starter profi
 | `codex`          | OpenAI Codex CLI  | user, project | ✓   | ✓            | folded     | user         | ✓      | -      | ✓        |
 | `gemini-cli`     | Gemini CLI        | user, project | ✓   | ✓            | folded     | ✓            | ✓      | -      | ✓        |
 | `claude-desktop` | Claude Desktop    | user          | ✓ (local servers) | -  | -          | -            | -      | -      | -        |
-| `antigravity`    | Google Antigravity | user, project | ✓  | ✓            | -          | -            | -      | -      | -        |
+| `antigravity`    | Google Antigravity | user, project | ✓  | ✓            | ✓          | -            | ✓      | -      | -        |
 | `opencode`       | opencode          | user, project | ✓   | ✓            | -          | -            | -      | -      | -        |
 | `copilot`        | GitHub Copilot (CLI, VS Code) | user, project | ✓ | ✓    | ✓          | project      | ✓      | ✓      | -        |
 | `grok-build`     | Grok Build        | user, project | ✓   | ✓            | ✓*         | ✓            | ✓      | -      | -        |
@@ -116,7 +116,7 @@ Where things go:
 | Codex CLI | `$CODEX_HOME/config.toml` (default `~/.codex`), `$CODEX_HOME/AGENTS.md`, `$CODEX_HOME/prompts/`, `~/.agents/skills/` | `.codex/config.toml` (trusted projects only), `AGENTS.md`, `.agents/skills/` |
 | Gemini CLI | `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`, `~/.gemini/commands/*.toml`, `~/.gemini/skills/` | `.gemini/settings.json`, `GEMINI.md`, `.gemini/commands/`, `.gemini/skills/` |
 | Claude Desktop | `claude_desktop_config.json` in `~/Library/Application Support/Claude` (macOS), `%APPDATA%\Claude` (Windows), `~/.config/Claude` (Linux) | n/a |
-| Antigravity | `~/.gemini/config/mcp_config.json`, `~/.gemini/GEMINI.md` (the same file and managed block as Gemini CLI); capture also reads `~/.gemini/AGENTS.md` and `~/.gemini/config/{AGENTS,GEMINI}.md` | `.agents/mcp_config.json`, `AGENTS.md` (shared with Codex and Cursor); capture also reads `GEMINI.md` and `.agents/{AGENTS,GEMINI}.md` |
+| Antigravity | `~/.gemini/config/mcp_config.json`, `~/.gemini/GEMINI.md` (the same file and managed block as Gemini CLI); capture also reads `~/.gemini/AGENTS.md` and `~/.gemini/config/{AGENTS,GEMINI}.md`; `~/.gemini/config/rules/*.md`, `~/.gemini/config/skills/` | `.agents/mcp_config.json`, `AGENTS.md` (shared with Codex and Cursor); capture also reads `GEMINI.md` and `.agents/{AGENTS,GEMINI}.md`; `.agents/rules/*.md`, `.agents/skills/` (the same directory as Codex's project skills) |
 | opencode | `~/.config/opencode/opencode.json` or `opencode.jsonc` (`mcp.servers`), `~/.config/opencode/AGENTS.md`; honours `XDG_CONFIG_HOME` | `opencode.json(c)` or `.opencode/opencode.json(c)` (the first that exists, else `opencode.json`), `AGENTS.md` (shared with Codex, Cursor and Antigravity); capture reads every config file there is |
 | Grok Build | `$GROK_HOME/config.toml` (`[mcp_servers.<name>]`, default `~/.grok`), `$GROK_HOME/{AGENTS.md, rules/*.md, commands/*.md, skills/}` | `.grok/config.toml`, `AGENTS.md` (shared with Codex, Cursor, Antigravity and opencode), `.grok/{rules,commands,skills}/`; Grok reads project files only in folders you have trusted |
 | GitHub Copilot | `$COPILOT_HOME/mcp-config.json` (`mcpServers`, default `~/.copilot`), `$COPILOT_HOME/copilot-instructions.md`, `$COPILOT_HOME/instructions/*.instructions.md`, `$COPILOT_HOME/skills/`, `$COPILOT_HOME/agents/*.agent.md` | `.mcp.json` (shared with Claude Code, written in Claude Code's shape), `.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` (`applyTo`), `.github/prompts/*.prompt.md`, `.github/skills/`, `.github/agents/*.agent.md`; capture also reads `.github/mcp.json`, legacy chat modes in `.github/chatmodes/` and `.vscode/mcp.json` (`servers`), and `disabledMcpServers` from Copilot's `settings.json` |
@@ -915,9 +915,25 @@ Good next candidates: Windsurf, Zed.
   builds.
 - At project scope, Cursor and Codex both read `AGENTS.md`. When both are targeted, Cursor also
   sees Codex's folded rules section.
-- **Antigravity** shares `~/.gemini/GEMINI.md` with Gemini CLI, so it also sees the rules Gemini
-  CLI folds into that file. kitbag doesn't write Antigravity's own rules, skills or workflows
-  yet, and leaves its MCP tool approvals (Ask by default) alone.
+- **Antigravity** gets rules as files of their own, `rules/<name>.md` under `~/.gemini/config/` or
+  `.agents/`, each with the `trigger` Antigravity requires (it silently discards a rule file
+  without one): `always_on` for a rule that applies everywhere, `glob` with `globs` (one
+  comma-separated string) for a file-scoped rule, `model_decision` for an on-demand rule with a
+  description and `manual` (loaded only when you @-mention it, which the CLI can't do) for one
+  without. Capture reads those files back (a file with no valid trigger is skipped with a note) and
+  keeps a rule file's version of a rule that is also folded into `GEMINI.md`; a rule that is only
+  folded there by another tool is left to that tool's capture. Rule files over 24,000 bytes are
+  truncated by Antigravity, and the plan warns. Skills go to `skills/<name>/` in the same two places
+  (name and description filled in when missing; `.agents/skills/` is the directory Codex uses at
+  project scope, so applying both writes each skill once). Antigravity shares `~/.gemini/` with
+  Gemini CLI: it still reads the rules block Gemini CLI folds into `~/.gemini/GEMINI.md`, so when
+  both are targets at user scope it sees a rule twice (always on from the block, with its own
+  trigger from its file), and the plan says so; the two tools' skills go to different directories
+  (`~/.gemini/skills/` for Gemini CLI), which the Antigravity CLI reads both of and the app only
+  `~/.gemini/config/skills/`. Workflows (`.agents/workflows/`, Antigravity's older commands) are
+  not carried: Google has deprecated them in favour of skills, and its docs list two different
+  global directories for them. Agents, hooks and plugins aren't carried either. kitbag leaves
+  Antigravity's MCP tool approvals (Ask by default) alone.
 - **opencode** 2 keeps MCP servers under `mcp.servers` and turns one off with `disabled: true`;
   opencode 1 kept them directly under `mcp` with `enabled: false`, and opencode 2 still reads
   that. kitbag writes the layout a config file already uses (`mcp.servers` for a new one), so a
