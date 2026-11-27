@@ -323,6 +323,7 @@ impl Adapter for Codex {
             // Older Codex releases read skills from $CODEX_HOME/skills.
             capture_skills_dir(&mut cap, &codex_home(env).join("skills"), ID)?;
         }
+        super::hook_files::capture_for(&mut cap, env, &super::hook_files::CODEX)?;
         Ok(cap)
     }
 
@@ -491,6 +492,7 @@ impl Adapter for Codex {
             let s = skill_with_required_frontmatter(s);
             write_skill(work, &p.skills.join(&s.name), &s, opts, ID)?;
         }
+        super::hook_files::apply_for(profile, env, opts, work, &super::hook_files::CODEX)?;
         Ok(())
     }
 }

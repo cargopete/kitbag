@@ -572,7 +572,7 @@ fn project_hooks_use_the_project_variable() {
 }
 
 #[test]
-fn other_tools_report_hooks_instead_of_guessing() {
+fn tools_without_hooks_say_so_instead_of_dropping_them() {
     let (_a, prof) = profile_with_hooks();
     let sb = Sandbox::empty();
     sb.cli()
@@ -580,7 +580,7 @@ fn other_tools_report_hooks_instead_of_guessing() {
             "apply",
             &prof.display().to_string(),
             "--to",
-            "cursor,gemini-cli",
+            "opencode,windsurf,claude-desktop",
             "--project",
             &sb.project().display().to_string(),
             "--apply-hooks",
@@ -588,8 +588,12 @@ fn other_tools_report_hooks_instead_of_guessing() {
         ])
         .assert()
         .success()
-        .stdout(contains("Claude Code only"));
-    assert!(!sb.project().join(".cursor/hooks.json").exists());
+        .stdout(
+            contains("not written to opencode")
+                .and(contains("not written to Windsurf"))
+                .and(contains("echo started")),
+        );
+    assert!(!sb.project().join(".opencode").exists());
 }
 
 #[test]

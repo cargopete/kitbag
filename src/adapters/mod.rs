@@ -18,7 +18,6 @@ use crate::secrets::{Redaction, RenderState};
 pub mod antigravity;
 pub mod claude_code;
 pub mod claude_desktop;
-mod claude_hooks;
 pub mod codex;
 pub mod common;
 pub mod copilot;
@@ -26,6 +25,7 @@ pub mod cursor;
 pub mod gemini;
 pub mod grok_build;
 pub mod hermes;
+pub(crate) mod hook_files;
 pub mod opencode;
 pub mod windsurf;
 pub mod zed;
@@ -241,6 +241,9 @@ pub struct Work {
     pub server_writes: Vec<ServerWrite>,
     /// Hook entries the plan writes, for the state records.
     pub hook_writes: Vec<HookWrite>,
+    /// (target, [`crate::hooks::describe`]) of profile hooks the adapter
+    /// refused to write (redaction marker, missing script, no event ...).
+    pub hook_skipped: Vec<(String, String)>,
     /// Instruction blocks and rule files kitbag manages, written or not, for
     /// drift detection (`kitbag status`).
     pub tracked: Vec<Tracked>,

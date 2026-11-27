@@ -302,6 +302,7 @@ impl Adapter for Antigravity {
             );
         }
         capture_skills_dir(&mut cap, &p.skills, ID)?;
+        super::hook_files::capture_for(&mut cap, env, &super::hook_files::ANTIGRAVITY)?;
         Ok(cap)
     }
 
@@ -456,6 +457,7 @@ impl Adapter for Antigravity {
                 "kitbag doesn't manage Antigravity settings; settings.antigravity was not applied",
             );
         }
+        super::hook_files::apply_for(profile, env, opts, work, &super::hook_files::ANTIGRAVITY)?;
         Ok(())
     }
 }

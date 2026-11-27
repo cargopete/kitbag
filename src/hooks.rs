@@ -13,7 +13,9 @@
 //! What an apply wrote is remembered in `applied-hooks.json` (state directory),
 //! so `kitbag doctor` can say when a hook no longer matches it.
 //!
-//! Only Claude Code carries hooks so far.
+//! Claude Code, Cursor, Codex, Gemini CLI, Grok Build, Antigravity and GitHub
+//! Copilot carry hooks (see `adapters/hook_files.rs` for their files and
+//! events); a target without hooks says so in the plan.
 //!
 //! * <https://code.claude.com/docs/en/hooks>
 
@@ -200,6 +202,13 @@ fn insert_dir_in_shell(cmd: &str, dir: &str, plain: bool) -> String {
     out
 }
 
+/// Project-directory variables a script directory may start with, besides Claude Code's.
+const PROJECT_VARS: &[&str] = &[
+    "${GEMINI_PROJECT_DIR}/",
+    "${GROK_WORKSPACE_ROOT}/",
+    "$(git rev-parse --show-toplevel)/",
+];
+
 /// `h` with the script directory placeholder replaced by `dir` (`/`-separated),
 /// or `None` when it uses the placeholder and `dir` has characters that
 /// can't be put in a command safely (a quote, a `$`, a line break).
@@ -210,12 +219,19 @@ pub fn with_script_dir(h: &Hook, dir: &str) -> Option<Hook> {
     {
         return Some(h);
     }
-    let project = "${CLAUDE_PROJECT_DIR}/";
-    let body = dir.strip_prefix(project).unwrap_or(dir);
+    // A variable the tool expands itself stands for the project directory.
+    // Claude Code's is used bare; the others are quoted, as their paths may have spaces.
+    let (body, bare) = if let Some(b) = dir.strip_prefix("${CLAUDE_PROJECT_DIR}/") {
+        (b, true)
+    } else if let Some(b) = PROJECT_VARS.iter().find_map(|p| dir.strip_prefix(p)) {
+        (b, false)
+    } else {
+        (dir, true)
+    };
     if body.contains(['"', '\'', '`', '$', '\n', '\r', '\\']) {
         return None;
     }
-    let plain = body.chars().all(plain_path_char);
+    let plain = bare && body.chars().all(plain_path_char);
     let exec_form = matches!(h.extra.get("args"), Some(Value::Array(_)));
     if exec_form {
         for s in strings_mut(&mut h) {
@@ -564,17 +580,10 @@ pub fn drift(records: &[HookRecord]) -> Vec<String> {
             ));
             continue;
         };
-        let handlers: Vec<&Value> = doc
-            .get("hooks")
-            .and_then(|h| h.get(&r.event))
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|g| g.get("matcher").and_then(Value::as_str) == r.matcher.as_deref())
-            .filter_map(|g| g.get("hooks").and_then(Value::as_array))
-            .flatten()
-            .filter(|h| h.get("command").and_then(Value::as_str) == Some(r.command.as_str()))
-            .collect();
+        let Some(fmt) = crate::adapters::hook_files::format_for(&r.target) else {
+            continue;
+        };
+        let handlers = fmt.find_handlers(&doc, &r.event, r.matcher.as_deref(), &r.command);
         if handlers.is_empty() {
             out.push(format!(
                 "{label}: this hook no longer matches what kitbag applied (removed or its command changed in {})",

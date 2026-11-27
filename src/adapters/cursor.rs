@@ -283,6 +283,7 @@ impl Adapter for Cursor {
         }
 
         capture_skills_dir(&mut cap, &p.skills, ID)?;
+        super::hook_files::capture_for(&mut cap, env, &super::hook_files::CURSOR)?;
         Ok(cap)
     }
 
@@ -373,6 +374,7 @@ impl Adapter for Cursor {
                 "Cursor settings are managed in its UI; settings.cursor was not applied",
             );
         }
+        super::hook_files::apply_for(profile, env, opts, work, &super::hook_files::CURSOR)?;
         Ok(())
     }
 }

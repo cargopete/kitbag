@@ -100,8 +100,9 @@ enum Cmd {
         /// Show what would be captured without writing anything
         #[arg(long)]
         dry_run: bool,
-        /// Also capture what is left out by default. 'hooks': the hooks in
-        /// Claude Code's settings.json, and the scripts they run (redacted like
+        /// Also capture what is left out by default. 'hooks': the hooks of the
+        /// tools that have them (Claude Code, Cursor, Codex, Gemini CLI, Grok
+        /// Build, Antigravity, Copilot), and the scripts they run (redacted like
         /// everything else). Hooks run commands by themselves, so applying
         /// them needs --apply-hooks
         #[arg(long, value_enum, value_delimiter = ',', value_name = "WHAT")]
@@ -1691,13 +1692,29 @@ fn plan_apply(
             message: "skill scripts are not marked executable, because the profile comes from a remote repository (pass --trust-source to keep the executable bit)".to_string(),
         });
     }
-    if plan.targets.iter().any(|t| t == adapters::claude_code::ID) {
-        for h in withheld_hooks {
+    // Said for every target the profile is applied to, with each hook in full
+    // under the first and a count under the others.
+    for (i, target) in plan.targets.clone().iter().enumerate() {
+        if withheld_hooks.is_empty() {
+            break;
+        }
+        if i == 0 {
+            for h in &withheld_hooks {
+                plan.notes.push(adapters::Note {
+                    level: adapters::Level::Warn,
+                    target: target.clone(),
+                    message: format!(
+                        "hook not applied, because the profile comes from a remote repository: {h} (needs --trust-source and --apply-hooks)"
+                    ),
+                });
+            }
+        } else {
             plan.notes.push(adapters::Note {
                 level: adapters::Level::Warn,
-                target: adapters::claude_code::ID.to_string(),
+                target: target.clone(),
                 message: format!(
-                    "hook not applied, because the profile comes from a remote repository: {h} (needs --trust-source and --apply-hooks)"
+                    "{} hook(s) not applied, because the profile comes from a remote repository (needs --trust-source and --apply-hooks)",
+                    withheld_hooks.len()
                 ),
             });
         }
@@ -2058,6 +2075,125 @@ fn tool_only_notes(found: &[crate::sync::ToolOnly], env: &Env) -> Vec<adapters::
 
 /// MCP servers, commands, skills and agents of `profile` (as loaded, before any
 /// remote restrictions) compared with each planned target: names only.
+/// Status rows for the profile's hooks: the ones that would be written (as
+/// with `--apply-hooks`) are `not applied` or `changed`, the others in sync;
+/// hooks a target has no place or event for, or a git source withholds, say so.
+fn hook_rows(
+    ctx: &Ctx,
+    resolved: &source::Resolved,
+    loaded: &Profile,
+    targets: &[&'static dyn Adapter],
+) -> Result<Vec<StatusRow>> {
+    use crate::adapters::hook_files::{format_for, no_hooks_reason};
+    use crate::sync::State;
+    let mut rows = Vec::new();
+    if loaded.hooks.is_empty() {
+        return Ok(rows);
+    }
+    let args = ApplyArgs {
+        apply_hooks: true,
+        ..ApplyArgs::default()
+    };
+    let (kept, plan) = plan_apply(
+        ctx,
+        resolved,
+        loaded.clone(),
+        targets,
+        &args,
+        &BTreeSet::new(),
+    )?;
+    let withheld = kept.hooks.is_empty();
+    for a in targets {
+        let id = a.id();
+        if !plan.targets.iter().any(|t| t == id) {
+            continue;
+        }
+        let row = |item: String, state, detail: Option<String>, path: Option<PathBuf>| StatusRow {
+            target: id.to_string(),
+            item,
+            path,
+            state,
+            detail,
+        };
+        let Some(fmt) = format_for(id) else {
+            let why = no_hooks_reason(id).unwrap_or("kitbag doesn't know where it keeps hooks");
+            for h in &loaded.hooks {
+                rows.push(row(
+                    format!("hook {}", crate::hooks::describe(h)),
+                    State::Unsupported,
+                    Some(format!("not written: {why}")),
+                    None,
+                ));
+            }
+            continue;
+        };
+        let mut writes: Vec<(&str, Option<&str>)> = Vec::new();
+        for w in plan.hook_writes.iter().filter(|w| w.target == id) {
+            writes.push((w.event.as_str(), w.matcher.as_deref()));
+            let doc = std::fs::read_to_string(&w.path)
+                .ok()
+                .and_then(|t| crate::edit::json::parse_value(Some(&t), &w.path).ok());
+            let there = doc.is_some_and(|d| {
+                !fmt.find_handlers(&d, &w.event, w.matcher.as_deref(), &w.command)
+                    .is_empty()
+            });
+            let item = format!(
+                "hook {}{}: {}",
+                w.event,
+                w.matcher
+                    .as_ref()
+                    .map(|m| format!(" [{m}]"))
+                    .unwrap_or_default(),
+                w.command
+            );
+            let state = if there {
+                State::Changed
+            } else {
+                State::NotApplied
+            };
+            rows.push(row(item, state, None, Some(w.path.clone())));
+        }
+        for h in &loaded.hooks {
+            let item = format!("hook {}", crate::hooks::describe(h));
+            match fmt.native_event(&h.event) {
+                None => rows.push(row(
+                    item,
+                    State::Unsupported,
+                    Some(format!("no equivalent event in {}", fmt.name)),
+                    None,
+                )),
+                Some(_) if withheld => rows.push(row(
+                    item,
+                    State::NotApplied,
+                    Some(
+                        "withheld: the profile comes from a remote repository (needs --trust-source and --apply-hooks)"
+                            .to_string(),
+                    ),
+                    None,
+                )),
+                Some(_)
+                    if plan
+                        .hook_skipped
+                        .iter()
+                        .any(|(t, d)| t == id && *d == crate::hooks::describe(h)) =>
+                {
+                    rows.push(row(
+                        item,
+                        State::NotApplied,
+                        Some("apply refuses to write it; see the warning 'hook not applied' in 'kitbag diff'".to_string()),
+                        None,
+                    ));
+                }
+                Some(ev) if !writes.iter().any(|(e, _)| *e == ev) => {
+                    rows.push(row(item, State::InSync, None, None));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    Ok(rows)
+}
+
 fn inventory_rows(
     env: &Env,
     profile: &Profile,
@@ -2368,6 +2504,7 @@ fn cmd_status(ctx: &Ctx, src: Option<&str>, s: &StatusArgs) -> Result<i32> {
                     }),
             );
             rows.extend(inventory_rows(env, &loaded, &plan, &targets));
+            rows.extend(hook_rows(ctx, &resolved, &loaded, &targets)?);
             let has_text = profile.instructions.is_some() || !profile.rules.is_empty();
             for a in &targets {
                 if has_text
