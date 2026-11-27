@@ -13,9 +13,10 @@
 //! What an apply wrote is remembered in `applied-hooks.json` (state directory),
 //! so `kitbag doctor` can say when a hook no longer matches it.
 //!
-//! Claude Code, Cursor, Codex, Gemini CLI, Grok Build, Antigravity and GitHub
-//! Copilot carry hooks (see `adapters/hook_files.rs` for their files and
-//! events); a target without hooks says so in the plan.
+//! Claude Code, Cursor, Codex, Gemini CLI, Grok Build, Antigravity, GitHub
+//! Copilot and Hermes Agent (its shell hooks) carry hooks (see
+//! `adapters/hook_files.rs` for their files and events); a target without
+//! hooks says so in the plan.
 //!
 //! * <https://code.claude.com/docs/en/hooks>
 
@@ -570,17 +571,14 @@ pub fn drift(records: &[HookRecord]) -> Vec<String> {
                 .unwrap_or_default(),
             r.command
         );
-        let doc = fs::read_to_string(&r.path)
-            .ok()
-            .and_then(|t| crate::edit::json::parse_value(Some(&t), &r.path).ok());
-        let Some(doc) = doc else {
+        let Some(fmt) = crate::adapters::hook_files::format_for(&r.target) else {
+            continue;
+        };
+        let Some(doc) = fmt.read_doc(&r.path) else {
             out.push(format!(
                 "{label}: this hook no longer matches what kitbag applied ({} can't be read)",
                 r.path.display()
             ));
-            continue;
-        };
-        let Some(fmt) = crate::adapters::hook_files::format_for(&r.target) else {
             continue;
         };
         let handlers = fmt.find_handlers(&doc, &r.event, r.matcher.as_deref(), &r.command);

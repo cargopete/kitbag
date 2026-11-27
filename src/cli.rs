@@ -102,9 +102,9 @@ enum Cmd {
         dry_run: bool,
         /// Also capture what is left out by default. 'hooks': the hooks of the
         /// tools that have them (Claude Code, Cursor, Codex, Gemini CLI, Grok
-        /// Build, Antigravity, Copilot), and the scripts they run (redacted like
-        /// everything else). Hooks run commands by themselves, so applying
-        /// them needs --apply-hooks
+        /// Build, Antigravity, Copilot, Hermes), and the scripts they run
+        /// (redacted like everything else). Hooks run commands by themselves,
+        /// so applying them needs --apply-hooks
         #[arg(long, value_enum, value_delimiter = ',', value_name = "WHAT")]
         include: Vec<Include>,
     },
@@ -2228,10 +2228,7 @@ fn hook_rows(
         let mut writes: Vec<(&str, Option<&str>)> = Vec::new();
         for w in plan.hook_writes.iter().filter(|w| w.target == id) {
             writes.push((w.event.as_str(), w.matcher.as_deref()));
-            let doc = std::fs::read_to_string(&w.path)
-                .ok()
-                .and_then(|t| crate::edit::json::parse_value(Some(&t), &w.path).ok());
-            let there = doc.is_some_and(|d| {
+            let there = fmt.read_doc(&w.path).is_some_and(|d| {
                 !fmt.find_handlers(&d, &w.event, w.matcher.as_deref(), &w.command)
                     .is_empty()
             });
