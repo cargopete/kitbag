@@ -17,8 +17,8 @@
 //!
 //! The ids are the tool's own (`name@marketplace`, as Claude Code keys
 //! `enabledPlugins`; an npm package spec for opencode) and are never
-//! translated to another tool's. Claude Code and opencode are carried
-//! ([`TARGETS`]); the other systems are documented skips, see below.
+//! translated to another tool's. Claude Code, opencode and Antigravity are
+//! carried ([`TARGETS`]); the other systems are documented skips, see below.
 //!
 //! Claude Code, from its docs (checked 2026-11-27):
 //!
@@ -52,26 +52,50 @@
 //! marketplaces, and `plugins/` folders are the plugin code itself, so they are
 //! never copied.
 //!
+//! Antigravity, from its docs (checked 2026-11-27): the `plugins.json`
+//! discovery manifest, in `~/.gemini/config/` (user) or `.agents/` (workspace),
+//! lists folders to load: `{"entries": [{"path": .., "include_only": [..],
+//! "exclude": [..]}]}`. Antigravity doesn't expand `~`, resolves a relative
+//! path from `~/.gemini/config/` in the personal manifest and from the project
+//! in a workspace one, and (changelog) loads a workspace entry only from inside
+//! the workspace or repository. kitbag carries those entries, with the folder's
+//! path as the id (`~/...` for the home directory), and writes only `entries`.
+//! It never copies, installs or enables a plugin; Antigravity keeps the enabled
+//! state itself (the changelog says in `config.json`, whose keys are not
+//! documented, so not written). The folders `agy plugin install` makes in
+//! `plugins/` have no recorded source and are the plugin code, so they are
+//! counted and left out.
+//! <https://antigravity.google/docs/customization-discovery/>,
+//! <https://antigravity.google/docs/plugins>
+//!
 //! Skipped, with the docs read on 2026-11-27 (all would need plugin code
 //! copied, or a layout the docs don't give):
 //!
-//! * Antigravity: plugins are folders under `~/.gemini/config/plugins/<name>/`
-//!   (or `.agents/plugins/`), unpacked by `agy plugin install`, and enabled
-//!   and disabled with `agy plugin enable|disable`. The docs name no
-//!   `plugins.json`, no setting that lists plugins or marketplaces, and no
-//!   file holding enablement, so there is nothing to write by reference.
-//!   <https://antigravity.google/docs/plugins>, <https://antigravity.google/docs/build-plugins/>
 //! * Gemini CLI: extensions are copied into `~/.gemini/extensions/<name>/` by
 //!   `gemini extensions install`; the docs name no file that records an
-//!   install source or enablement (UNVERIFIED: `extension-enablement.json`).
+//!   install source or enablement (UNVERIFIED: `extension-enablement.json`) and
+//!   no `settings.json` key. The only by-reference route is the `gemini
+//!   extensions link <path>` command (a symlink to a directory on that machine),
+//!   which is a command and not a layout.
 //!   <https://geminicli.com/docs/extensions/reference/>
-//! * Claude Desktop: the only filesystem layout its docs name is the
-//!   organization plugins directory (`/Library/Application Support/Claude/org-plugins/`
-//!   on macOS, `C:\Program Files\Claude\org-plugins\` on Windows, none on Linux),
-//!   which an administrator owns (root or administrators only) and which
-//!   holds the plugins themselves. User plugins are added in the app and live
-//!   in its local data directory, whose path the docs don't give.
-//!   <https://claude.com/docs/third-party/claude-desktop/extensions>
+//! * Claude Desktop: the only filesystem layout its docs name for plugins you
+//!   could set up is the organization plugins directory
+//!   (`/Library/Application Support/Claude/org-plugins/` on macOS,
+//!   `C:\Program Files\Claude\org-plugins\` on Windows, none on Linux),
+//!   which an administrator owns (root or administrators only) and which holds
+//!   the plugins themselves. User plugins are added in the app and live under
+//!   `local-agent-mode-sessions/.../cowork_plugins/` in its data directory (the
+//!   docs elide the middle of the path), as plugin code; no file lists one by
+//!   reference, and marketplaces are admin policy or set in the app.
+//!   <https://claude.com/docs/third-party/claude-desktop/extensions>,
+//!   <https://claude.com/docs/third-party/claude-desktop/data-storage>
+//! * Amp: plugins are files or folders in `plugins/` directories (or hosted
+//!   repositories); no manifest lists them. Cline: SDK code, loaded by
+//!   `extensions` / `pluginPaths` or `cline plugin install`; no settings file.
+//!
+//! Documented but not carried yet (#12): Codex (`[plugins."name@marketplace"]`
+//! and `[marketplaces.<name>]` in `config.toml`) and Copilot CLI
+//! (`enabledPlugins` and `extraKnownMarketplaces` in `~/.copilot/settings.json`).
 //!
 //! * <https://code.claude.com/docs/en/plugins/install>
 //! * <https://code.claude.com/docs/en/plugins/loading>
@@ -90,7 +114,7 @@ use crate::edit::json::JsonDoc;
 use crate::model::{Profile, is_valid_name, targeting_issues, targeting_skip_reason};
 
 /// The targets that have a plugin section.
-pub const TARGETS: &[&str] = &["claude-code", "opencode"];
+pub const TARGETS: &[&str] = &["claude-code", "opencode", "antigravity"];
 
 /// Origins in a plugin id (`name@origin`) that are not marketplaces: a plugin
 /// loaded for one session, from a skills directory or synced from claude.ai.
@@ -145,6 +169,12 @@ pub struct Plugin {
     /// the plan and not enforced (pin the marketplace with `ref` instead).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Antigravity only: the `include_only` of the `plugins.json` entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include_only: Vec<String>,
+    /// Antigravity only: the `exclude` of the `plugins.json` entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub targets: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -210,6 +240,16 @@ pub fn describe_plugin(id: &str, p: &Plugin) -> String {
     match &p.version {
         Some(v) => format!("plugin '{id}' (captured at version {v})"),
         None => format!("plugin '{id}'"),
+    }
+}
+
+/// What a plan, a withheld-list or `inspect` calls a plugin of `target`: for
+/// Antigravity the id is the path of a plugin folder.
+pub fn describe(target: &str, id: &str, p: &Plugin) -> String {
+    if target == "antigravity" {
+        format!("plugin folder '{}'", id.escape_default())
+    } else {
+        describe_plugin(id, p)
     }
 }
 
@@ -341,6 +381,11 @@ pub fn validate(plugins: &mut BTreeMap<String, PluginSet>) -> (Vec<String>, Vec<
                 "{at}: opencode has no plugin marketplaces; list its npm packages under [{at}.enabled]"
             ));
         }
+        if target == "antigravity" && !set.marketplaces.is_empty() {
+            issues.push(format!(
+                "{at}: Antigravity has no marketplace setting kitbag can write; list local plugin folders under [{at}.enabled]"
+            ));
+        }
         for (name, m) in &mut set.marketplaces {
             let label = format!("{at}.marketplaces.{}", name.escape_default());
             issues.extend(name_issue("marketplace", name).map(|i| format!("{at}: {i}")));
@@ -361,6 +406,39 @@ pub fn validate(plugins: &mut BTreeMap<String, PluginSet>) -> (Vec<String>, Vec<
         }
         for (id, p) in &mut set.enabled {
             let label = format!("{at}.enabled.{}", id.escape_default());
+            if target != "antigravity" && (!p.include_only.is_empty() || !p.exclude.is_empty()) {
+                issues.push(format!(
+                    "{label}: include_only and exclude are Antigravity plugins.json fields, not used for {target}"
+                ));
+            }
+            if target == "antigravity" {
+                issues.extend(antigravity_path_issue(id).map(|i| format!("{label}: {i}")));
+                if p.version.is_some() {
+                    issues.push(format!(
+                        "{label}: version is not used for Antigravity; a plugin folder has no version in plugins.json"
+                    ));
+                }
+                for (key, list) in [("include_only", &p.include_only), ("exclude", &p.exclude)] {
+                    if list
+                        .iter()
+                        .any(|v| v.trim().is_empty() || has_control(v) || v.len() > 256)
+                    {
+                        issues.push(format!(
+                            "{label}: {key} must be short plain names (a folder name or a relative path)"
+                        ));
+                    }
+                }
+                targeting(
+                    &label,
+                    &mut p.targets,
+                    &mut p.disabled_on,
+                    "plugin",
+                    &valid,
+                    &mut issues,
+                    &mut warnings,
+                );
+                continue;
+            }
             if target == "opencode" {
                 issues.extend(opencode_spec_issue(id).map(|i| format!("{label}: {i}")));
                 if p.version.is_some() {
@@ -409,6 +487,22 @@ pub fn validate(plugins: &mut BTreeMap<String, PluginSet>) -> (Vec<String>, Vec<
     }
     *plugins = by_id;
     (issues, warnings)
+}
+
+/// What is wrong with the path of an Antigravity plugin folder, as a profile
+/// holds it: absolute, `~/...` (expanded on the machine you apply to) or
+/// relative (to the project, in a project profile).
+fn antigravity_path_issue(path: &str) -> Option<String> {
+    if path.trim().is_empty() || has_control(path) || path.len() > 1024 {
+        return Some("a plugin folder path must be a short, plain, non-empty path".into());
+    }
+    if path.starts_with('~') && path != "~" && !path.starts_with("~/") {
+        return Some(format!(
+            "'{}' is not a path Antigravity or kitbag reads; write ~/... for a folder in your home directory",
+            path.escape_default()
+        ));
+    }
+    None
 }
 
 fn targeting(
@@ -1106,6 +1200,430 @@ pub fn apply_opencode(
 }
 
 // ---------------------------------------------------------------------------
+// Antigravity
+
+/// Antigravity's discovery manifest for plugins: `plugins.json` in
+/// `~/.gemini/config/` (user) or `.agents/` (workspace), `{"entries": [{"path":
+/// ..., "include_only": [..], "exclude": [..]}]}`.
+pub const ANTIGRAVITY_MANIFEST: &str = "plugins.json";
+
+fn is_absolute_path(p: &str) -> bool {
+    let b = p.as_bytes();
+    p.starts_with('/')
+        || p.starts_with('\\')
+        || (b.len() >= 3
+            && b[0].is_ascii_alphabetic()
+            && b[1] == b':'
+            && matches!(b[2], b'/' | b'\\'))
+}
+
+/// `p` with `\` as `/`, `.` and `..` segments folded and no trailing `/`.
+fn fold_path(p: &str) -> String {
+    let p = p.replace('\\', "/");
+    let rooted = p.starts_with('/');
+    let mut out: Vec<&str> = Vec::new();
+    for seg in p.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." if out.last().is_some_and(|l| *l != "..") => {
+                out.pop();
+            }
+            s => out.push(s),
+        }
+    }
+    let joined = out.join("/");
+    if p.starts_with("//") {
+        format!("//{joined}")
+    } else if rooted {
+        format!("/{joined}")
+    } else {
+        joined
+    }
+}
+
+/// `abs`, a folded path with `/` separators, with this machine's home
+/// directory written as `~`.
+fn home_relative(abs: &str, home: &Path, os: crate::adapters::Os) -> String {
+    let h = fold_path(&home.display().to_string());
+    if h.is_empty() || h == "/" {
+        return abs.to_string();
+    }
+    let same = |a: &str, b: &str| {
+        if os == crate::adapters::Os::Linux {
+            a == b
+        } else {
+            a.eq_ignore_ascii_case(b)
+        }
+    };
+    match abs.get(..h.len()) {
+        Some(head)
+            if same(head, &h) && (abs.len() == h.len() || abs[h.len()..].starts_with('/')) =>
+        {
+            format!("~{}", &abs[h.len()..])
+        }
+        _ => abs.to_string(),
+    }
+}
+
+/// Where an `entries` path points: absolute as it is, relative to `base`.
+fn resolve_entry(path: &str, base: &Path, os: crate::adapters::Os) -> String {
+    let full = if is_absolute_path(path) {
+        path.to_string()
+    } else {
+        format!("{}/{path}", base.display())
+    };
+    let folded = fold_path(&full);
+    if os == crate::adapters::Os::Linux {
+        folded
+    } else {
+        folded.to_lowercase()
+    }
+}
+
+fn plain_strings(v: Option<&Value>) -> Option<Vec<String>> {
+    match v {
+        None | Some(Value::Null) => Some(Vec::new()),
+        Some(Value::Array(a)) => a
+            .iter()
+            .map(|x| {
+                x.as_str()
+                    .filter(|s| !s.trim().is_empty() && !has_control(s) && s.len() <= 256)
+                    .map(str::to_string)
+            })
+            .collect(),
+        Some(_) => None,
+    }
+}
+
+/// How many folders sit directly in `dir` (the plugins `agy plugin install`
+/// unpacked, or that were put there by hand). Names only; nothing is read.
+fn count_dirs(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(std::result::Result::ok)
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Read the plugin folders an Antigravity `plugins.json` lists into the
+/// profile, by reference. `file` is how the plan names the manifest; `folder`
+/// is the plugins directory Antigravity unpacks its installs into.
+pub fn capture_antigravity(
+    cap: &mut Captured,
+    env: &Env,
+    doc: Option<&Value>,
+    file: &str,
+    folder: &Path,
+) {
+    let target = "antigravity";
+    let base = match env.scope {
+        Scope::User => env.home.join(".gemini").join("config"),
+        Scope::Project => env.project.clone(),
+    };
+    let mut found: BTreeMap<String, Plugin> = BTreeMap::new();
+    let (mut other, mut outside, mut tilde) = (Vec::new(), 0, Vec::new());
+    if let Some(doc) = doc {
+        match doc.get("entries") {
+            None | Some(Value::Null) => {}
+            Some(Value::Array(list)) => {
+                for entry in list {
+                    let Some(path) = entry.get("path").and_then(Value::as_str) else {
+                        other.push(entry.to_string());
+                        continue;
+                    };
+                    let (Some(include_only), Some(exclude)) = (
+                        plain_strings(entry.get("include_only")),
+                        plain_strings(entry.get("exclude")),
+                    ) else {
+                        other.push(path.to_string());
+                        continue;
+                    };
+                    if path.starts_with('~') {
+                        tilde.push(path.to_string());
+                        continue;
+                    }
+                    let key = match env.scope {
+                        Scope::User => {
+                            let abs = if is_absolute_path(path) {
+                                fold_path(path)
+                            } else {
+                                fold_path(&format!("{}/{path}", base.display()))
+                            };
+                            home_relative(&abs, &env.home, env.os)
+                        }
+                        Scope::Project => {
+                            let rel = fold_path(path);
+                            if is_absolute_path(path) || rel.starts_with("..") || rel.is_empty() {
+                                outside += 1;
+                                continue;
+                            }
+                            rel
+                        }
+                    };
+                    if antigravity_path_issue(&key).is_some() {
+                        other.push(path.to_string());
+                        continue;
+                    }
+                    found.entry(key).or_insert_with(|| Plugin {
+                        include_only,
+                        exclude,
+                        ..Plugin::default()
+                    });
+                }
+            }
+            Some(_) => cap.info(
+                target,
+                format!("'entries' in {file} is not a list, so no plugins were captured from it"),
+            ),
+        }
+        let inherits = doc
+            .get("inherits")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        if inherits > 0 {
+            cap.info(
+                target,
+                format!("{inherits} 'inherits' manifest(s) in {file} are not carried; they point at other manifests on this machine"),
+            );
+        }
+        if doc
+            .get("exclude")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty())
+        {
+            cap.info(
+                target,
+                format!("the top-level 'exclude' list in {file} is not carried"),
+            );
+        }
+    }
+    let shown = |l: &[String]| {
+        l.iter()
+            .take(5)
+            .map(|s| s.escape_default().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if !other.is_empty() {
+        cap.info(
+            target,
+            format!(
+                "{} plugin entr{} in {file} not carried (no path, or include_only/exclude that isn't a list of names): {}",
+                other.len(),
+                if other.len() == 1 { "y" } else { "ies" },
+                shown(&other)
+            ),
+        );
+    }
+    if !tilde.is_empty() {
+        cap.info(
+            target,
+            format!(
+                "{} plugin entr{} in {file} not carried: Antigravity doesn't expand '~', so it never loads {}",
+                tilde.len(),
+                if tilde.len() == 1 { "y" } else { "ies" },
+                shown(&tilde)
+            ),
+        );
+    }
+    if outside > 0 {
+        cap.info(
+            target,
+            format!(
+                "{outside} plugin entr{} in {file} not carried: a project profile keeps only paths inside the project (Antigravity's changelog says it skips a workspace entry that points elsewhere)",
+                if outside == 1 { "y" } else { "ies" }
+            ),
+        );
+    }
+    let installed = count_dirs(folder);
+    if installed > 0 {
+        cap.info(
+            target,
+            format!(
+                "{installed} plugin folder(s) in {} were installed by `agy plugin install` (or put there by hand) and are not carried: Antigravity records no source for them, and kitbag never copies plugin files; reinstall them with `agy plugin install` on the other machine",
+                folder.display()
+            ),
+        );
+    }
+    if found.is_empty() {
+        return;
+    }
+    let n = found.len();
+    cap.profile
+        .plugins
+        .entry(target.to_string())
+        .or_default()
+        .enabled
+        .extend(found);
+    cap.info(
+        target,
+        format!("{n} plugin folder(s) captured by reference from {file}; the plugins themselves are not copied"),
+    );
+}
+
+/// Add the profile's plugin folders to the `entries` of the Antigravity
+/// `plugins.json` at `path`, nothing else. A folder already listed (by the same
+/// resolved path) is left alone, unless the profile gives it different
+/// `include_only` / `exclude` lists (replaced, but not with `--no-overwrite`).
+pub fn apply_antigravity(
+    profile: &Profile,
+    env: &Env,
+    opts: &ApplyOptions,
+    work: &mut Work,
+    path: &Path,
+) -> Result<()> {
+    let target = "antigravity";
+    let Some(set) = profile.plugins.get(target) else {
+        return Ok(());
+    };
+    let (base, user) = match env.scope {
+        Scope::User => (env.home.join(".gemini").join("config"), true),
+        Scope::Project => (env.project.clone(), false),
+    };
+    let mut wanted = Vec::new();
+    for (key, p) in &set.enabled {
+        if let Some(why) = targeting_skip_reason(&p.targets, &p.disabled_on, target) {
+            work.info(
+                target,
+                format!(
+                    "{} skipped: disabled in profile ({why})",
+                    describe(target, key, p)
+                ),
+            );
+            continue;
+        }
+        // A relative path means something else in each scope, so a profile's
+        // path is written only where it means what it says. A workspace
+        // manifest is committed, so it holds nothing machine-specific.
+        let abs = is_absolute_path(key);
+        let outside = fold_path(key).starts_with("..") || fold_path(key).is_empty();
+        if (user && !abs) || (!user && (abs || outside)) {
+            work.warn(
+                target,
+                format!(
+                    "{} not written: {}",
+                    describe(target, key, p),
+                    if user {
+                        "a relative path would be read from ~/.gemini/config/ here and from the project elsewhere; write it as ~/... or an absolute path"
+                    } else {
+                        "a project's plugins.json is committed, and Antigravity's changelog says it skips workspace entries that point outside the workspace; use a path inside the project"
+                    }
+                ),
+            );
+            continue;
+        }
+        wanted.push((key, p));
+    }
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    let text = work.fs.read(path)?;
+    let mut doc = JsonDoc::parse(text.as_deref(), path)?;
+    doc.check_unique_keys(&[], &["entries"])?;
+    let current = doc.value();
+    if current.get("entries").is_some_and(|v| !v.is_array()) {
+        bail!(
+            "entries in {} is not a list; fix it by hand, kitbag won't overwrite it",
+            path.display()
+        );
+    }
+    let mut entries: Vec<Value> = current
+        .get("entries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let file = path
+        .file_name()
+        .map_or_else(String::new, |f| f.to_string_lossy().into_owned());
+    let mut added = Vec::new();
+    let mut changed = false;
+    for (key, p) in wanted {
+        let want = resolve_entry(key, &base, env.os);
+        let at = entries.iter().position(|e| {
+            e.get("path")
+                .and_then(Value::as_str)
+                .is_some_and(|have| resolve_entry(have, &base, env.os) == want)
+        });
+        let strings = |e: &Value, k: &str| plain_strings(e.get(k)).unwrap_or_default();
+        match at {
+            None => {
+                let mut e = Map::new();
+                e.insert("path".into(), json!(key));
+                if !p.include_only.is_empty() {
+                    e.insert("include_only".into(), json!(p.include_only));
+                }
+                if !p.exclude.is_empty() {
+                    e.insert("exclude".into(), json!(p.exclude));
+                }
+                entries.push(Value::Object(e));
+                changed = true;
+                added.push(describe(target, key, p));
+                let there = if is_absolute_path(key) {
+                    Path::new(key).to_path_buf()
+                } else {
+                    base.join(key)
+                };
+                if !there.exists() {
+                    work.warn(
+                        target,
+                        format!(
+                            "{} doesn't exist on this machine: Antigravity has nothing to load from it until the plugin is there (kitbag doesn't copy or fetch plugins)",
+                            describe(target, key, p)
+                        ),
+                    );
+                }
+            }
+            Some(i) => {
+                let differs = (!p.include_only.is_empty()
+                    && strings(&entries[i], "include_only") != p.include_only)
+                    || (!p.exclude.is_empty() && strings(&entries[i], "exclude") != p.exclude);
+                if !differs {
+                    continue;
+                }
+                if !opts.overwrite {
+                    work.warn(
+                        target,
+                        format!(
+                            "kept the existing {file} entry for '{}' because --no-overwrite was given; the profile has a different include_only / exclude",
+                            key.escape_default()
+                        ),
+                    );
+                    continue;
+                }
+                if let Value::Object(o) = &mut entries[i] {
+                    if !p.include_only.is_empty() {
+                        o.insert("include_only".into(), json!(p.include_only));
+                    }
+                    if !p.exclude.is_empty() {
+                        o.insert("exclude".into(), json!(p.exclude));
+                    }
+                }
+                changed = true;
+                added.push(format!(
+                    "{} (include_only / exclude)",
+                    describe(target, key, p)
+                ));
+            }
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    doc.set(&["entries"], &Value::Array(entries));
+    work.fs.write(path, doc.render())?;
+    for d in &added {
+        work.info(target, format!("{d} added to {file}"));
+    }
+    work.warn(
+        target,
+        "kitbag doesn't install or enable plugins. Antigravity loads the folders above itself and keeps its own enabled / disabled state (`agy plugin enable|disable`); a plugin can bundle hooks, MCP servers and skills that run on this machine",
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Policy
 
 /// Take the plugins and marketplaces out of a profile from a git source that
@@ -1122,7 +1640,7 @@ pub fn drop_untrusted(profile: &mut Profile) -> Vec<(String, String)> {
             out.push((target.clone(), describe_marketplace(name, m)));
         }
         for (id, p) in &set.enabled {
-            out.push((target.clone(), describe_plugin(id, p)));
+            out.push((target.clone(), describe(&target, id, p)));
         }
     }
     out
@@ -1136,7 +1654,7 @@ pub fn list(profile: &Profile) -> Vec<String> {
             out.push(format!("{target}: {}", describe_marketplace(name, m)));
         }
         for (id, p) in &set.enabled {
-            out.push(format!("{target}: {}", describe_plugin(id, p)));
+            out.push(format!("{target}: {}", describe(target, id, p)));
         }
     }
     out
@@ -1157,12 +1675,18 @@ pub fn review_lines(profile: &Profile) -> Vec<String> {
             ));
         }
         for (id, p) in &set.enabled {
-            let what = if target == "opencode" {
-                "an npm package opencode installs itself and runs inside opencode, with its permissions"
-            } else {
-                "runs whatever the plugin bundles (hooks, MCP servers, commands) once the tool installs it"
+            let what = match target.as_str() {
+                "opencode" => {
+                    "an npm package opencode installs itself and runs inside opencode, with its permissions"
+                }
+                "antigravity" => {
+                    "a folder on this machine Antigravity loads as a plugin, with whatever it bundles (hooks, MCP servers, skills) once it is enabled"
+                }
+                _ => {
+                    "runs whatever the plugin bundles (hooks, MCP servers, commands) once the tool installs it"
+                }
             };
-            out.push(format!("{} for {target}: {what}", describe_plugin(id, p)));
+            out.push(format!("{} for {target}: {what}", describe(target, id, p)));
         }
     }
     out
@@ -1198,12 +1722,19 @@ pub fn keep_targeting(new: &mut Profile, old: &Profile) -> Vec<String> {
     kept
 }
 
-/// Expand `~` in local marketplace paths for this machine.
+/// Expand `~` in local marketplace paths and in the plugin folders of
+/// Antigravity (whose `plugins.json` doesn't expand it) for this machine.
 pub fn expand_paths(
     plugins: &mut BTreeMap<String, PluginSet>,
     home: &Path,
     os: crate::adapters::Os,
 ) {
+    if let Some(set) = plugins.get_mut("antigravity") {
+        set.enabled = std::mem::take(&mut set.enabled)
+            .into_iter()
+            .map(|(k, v)| (crate::portable::expand_home(&k, home, os), v))
+            .collect();
+    }
     for m in plugins
         .values_mut()
         .flat_map(|s| s.marketplaces.values_mut())
@@ -1304,6 +1835,46 @@ mod tests {
         assert_eq!(opencode_entry(&json!({"package": "a"})), Some(("a", false)));
         assert_eq!(opencode_entry(&json!(["a", {"k": 1}])), Some(("a", true)));
         assert_eq!(opencode_entry(&json!(3)), None);
+    }
+
+    #[test]
+    fn antigravity_paths_fold_and_resolve_the_same_on_every_os() {
+        assert_eq!(fold_path("a/./b/../c/"), "a/c");
+        assert_eq!(fold_path("../x"), "../x");
+        assert_eq!(fold_path(r"C:\Users\me\plugins\"), "C:/Users/me/plugins");
+        assert_eq!(fold_path(r"\\server\share\p"), "//server/share/p");
+        assert!(is_absolute_path("/a") && is_absolute_path(r"C:\a") && is_absolute_path("c:/a"));
+        assert!(!is_absolute_path("a/b") && !is_absolute_path("~/a") && !is_absolute_path("C:a"));
+        let base = Path::new("/home/me/.gemini/config");
+        let linux = crate::adapters::Os::Linux;
+        assert_eq!(resolve_entry("../../x/", base, linux), "/home/me/x");
+        assert_eq!(resolve_entry("/abs/y", base, linux), "/abs/y");
+        let win = crate::adapters::Os::Windows;
+        assert_eq!(resolve_entry(r"C:\Users\Me\P", base, win), "c:/users/me/p");
+    }
+
+    #[test]
+    fn antigravity_paths_in_the_home_directory_become_tilde_paths() {
+        let linux = crate::adapters::Os::Linux;
+        let home = Path::new("/home/me");
+        assert_eq!(home_relative("/home/me/team/x", home, linux), "~/team/x");
+        assert_eq!(home_relative("/home/me", home, linux), "~");
+        assert_eq!(home_relative("/home/meow/x", home, linux), "/home/meow/x");
+        assert_eq!(home_relative("/Home/me/x", home, linux), "/Home/me/x");
+        let win = crate::adapters::Os::Windows;
+        let home = Path::new(r"C:\Users\Me");
+        assert_eq!(home_relative("c:/users/me/team", home, win), "~/team");
+        assert_eq!(home_relative("D:/other", home, win), "D:/other");
+    }
+
+    #[test]
+    fn antigravity_plugin_paths_are_checked() {
+        assert!(antigravity_path_issue("~/team/x").is_none());
+        assert!(antigravity_path_issue("tools/x").is_none());
+        assert!(antigravity_path_issue(r"C:\Users\me\x").is_none());
+        assert!(antigravity_path_issue("").is_some());
+        assert!(antigravity_path_issue("~other/x").is_some());
+        assert!(antigravity_path_issue("a\nb").is_some());
     }
 
     #[test]
