@@ -513,6 +513,32 @@ fn claude_code_to_zed_user() {
     assert_eq!(back.instructions, profile.instructions);
 }
 
+/// User-scope Zed paths relative to the sandbox root, for CLI tests.
+/// The CLI uses the host OS (`APPDATA` is ignored under `--home`).
+fn zed_cli_settings() -> &'static str {
+    if cfg!(windows) {
+        "home/AppData/Roaming/Zed/settings.json"
+    } else {
+        "home/.config/zed/settings.json"
+    }
+}
+
+fn zed_cli_agents() -> &'static str {
+    if cfg!(windows) {
+        "home/AppData/Roaming/Zed/AGENTS.md"
+    } else {
+        "home/.config/zed/AGENTS.md"
+    }
+}
+
+fn zed_cli_dir(sb: &Sandbox) -> std::path::PathBuf {
+    if cfg!(windows) {
+        sb.home().join("AppData").join("Roaming").join("Zed")
+    } else {
+        sb.home().join(".config").join("zed")
+    }
+}
+
 #[test]
 fn apply_to_zed_then_undo_through_the_cli() {
     let sb = Sandbox::empty();
@@ -527,18 +553,18 @@ fn apply_to_zed_then_undo_through_the_cli() {
         .env("DOCS_TOKEN", "fake-token-value")
         .assert()
         .success();
-    let cfg = sb.json(SETTINGS);
+    let cfg = sb.json(zed_cli_settings());
     assert_eq!(
         cfg["context_servers"]["docs"],
         json!({"url": "https://docs.example.com/mcp", "headers": {"Authorization": "Bearer fake-token-value"}})
     );
     assert!(
-        sb.read(PERSONAL)
+        sb.read(zed_cli_agents())
             .contains("Write instructions every agent should follow")
     );
     sb.cli().arg("undo").assert().success();
     assert!(
-        !sb.home().join(".config/zed").exists(),
+        !zed_cli_dir(&sb).exists(),
         "undo removes what apply created"
     );
 }
