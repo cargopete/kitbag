@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- New target `amp` for Amp, for MCP servers and instructions, at user and project scope. MCP servers go to `amp.mcpServers` in `~/.config/amp/settings.json` or `settings.jsonc` (`%USERPROFILE%\.config\amp` on Windows) and in a project's `.amp/settings.json` or `settings.jsonc`, edited in place so comments, trailing commas, your other `amp.*` settings, your own servers and keys of yours on an entry (`includeTools`, `oauth` ...) stay: `command`, `args` and `env` for local servers, `url` and `headers` for remote ones. Amp expands `${VAR}` in these values, so references are written as they are and no secret is written to disk. Capture reads one scope at a time, without merging them, and when a workspace and the user settings define the same server the plan says Amp uses the workspace's. Amp asks you to approve a workspace's MCP servers before it runs them (`amp mcp approve`): kitbag never approves one and writes no `amp.mcpTrustedServers` or `amp.mcpPermissions`, and the plan says so. A server that uses `${amp:id-token}` (for Amp orbs) is neither captured nor written. `cwd` is dropped with a warning, a server the profile disables is not written, and an SSE server is written as a plain `url` with a warning, since Amp documents no transport key. Instructions go to `~/.config/amp/AGENTS.md`, and in a project to the file Amp reads, `AGENTS.md`, else `AGENT.md`, else `CLAUDE.md` (shared with the other tools that use the file, so applying several leaves one managed block); capture reads the same file and names the ones Amp ignores, and `~/.config/AGENTS.md`, which Amp also reads, is left alone and named. MCP servers defined on ampcode.com (`amp mcp remote`), servers bundled in a skill's `mcp.json`, skills, permissions, other settings and hooks are not carried, and capture says so (#25).
+
 ## [0.1.8] - 2026-11-27
 
 ### Added

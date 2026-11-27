@@ -266,7 +266,8 @@ fn list_targets_json() {
             "grok-build",
             "windsurf",
             "zed",
-            "hermes"
+            "hermes",
+            "amp"
         ]
     );
     assert_eq!(v[2]["support"]["rules"], "folded");
