@@ -31,9 +31,13 @@
 //!   `$COPILOT_HOME/instructions/` and `.github/instructions/`. A rule that is
 //!   always on gets `applyTo: "**"`; an on-demand rule gets no `applyTo`.
 //! * Commands: VS Code prompt files, `.github/prompts/<name>.prompt.md`, at
-//!   project scope only (VS Code keeps user prompt files in its profile
-//!   storage, whose path its docs don't give, and Copilot CLI's docs don't
-//!   list prompt files among what it reads).
+//!   project scope. VS Code keeps user prompt files in its profile storage,
+//!   whose path its docs don't give, and Copilot CLI's docs don't list prompt
+//!   files among what it reads; VS Code's migration guide (migrate-
+//!   customizations) turns prompt files into skills (`name`, `description`,
+//!   `argument-hint` and `disable-model-invocation: true`, dropping `agent`,
+//!   `model` and `tools`), so at user scope a command is written that way, as
+//!   `$COPILOT_HOME/skills/<name>/SKILL.md`.
 //! * Skills: `$COPILOT_HOME/skills/<name>/SKILL.md` and
 //!   `.github/skills/<name>/SKILL.md`, the locations both Copilot CLI and
 //!   VS Code list for Copilot.
@@ -64,10 +68,10 @@ use serde_json::{Map, Value, json};
 use super::claude_code;
 use super::common::{
     MdKind, add_agent, add_rule, capture_instructions, capture_markdown_dir, capture_skills_dir,
-    claim_name, import_server, keep_shared_servers, merge_json_servers, name_from_rel,
-    read_text_item, render_server, same_server, server_entries, server_from_json, servers_for,
-    skill_with_required_frontmatter, string_list, write_agent, write_command, write_instructions,
-    write_rule, write_skill,
+    claim_name, commands_as_skills, import_server, keep_shared_servers, merge_json_servers,
+    name_from_rel, read_text_item, render_server, same_server, server_entries, server_from_json,
+    servers_for, skill_with_required_frontmatter, string_list, write_agent, write_command,
+    write_instructions, write_rule, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
@@ -460,6 +464,9 @@ impl Adapter for Copilot {
                 f,
                 if native {
                     Support::Native
+                } else if f == Feature::Commands {
+                    // User scope: skills, as VS Code's prompt-file migration does.
+                    Support::Folded
                 } else {
                     Support::None
                 },
@@ -653,7 +660,31 @@ impl Adapter for Copilot {
             }
         }
 
-        for s in &profile.skills {
+        // At user scope there is no prompt-file folder, so commands become
+        // skills that only a slash command invokes (VS Code's own migration).
+        let skills = if p.prompts.is_none() {
+            let skills = commands_as_skills(
+                work,
+                ID,
+                "Copilot",
+                &profile.skills,
+                &profile.commands,
+                true,
+            );
+            if !profile.commands.is_empty() {
+                work.info(
+                    ID,
+                    format!(
+                        "Copilot keeps user prompt files in VS Code's profile storage, which its docs give no path for, so commands are written as skills in {} (VS Code's prompt-file migration: name, description, argument-hint and disable-model-invocation; agent, model and tools are not carried); project scope writes prompt files",
+                        crate::ui::tildify(&p.skills, &work.home)
+                    ),
+                );
+            }
+            skills
+        } else {
+            profile.skills.clone()
+        };
+        for s in &skills {
             if let Some(why) = skill_name_issue(s) {
                 work.warn(ID, why);
             }

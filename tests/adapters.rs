@@ -521,11 +521,17 @@ fn antigravity_apply_user() {
         planned(&p, &sb.home().join(".gemini/config/rules/ts.md")).unwrap(),
         "---\ntrigger: glob\ndescription: TypeScript\nglobs: \"src/**/*.ts\"\n---\n\nStrict mode.\n"
     );
-    assert!(p.notes.iter().any(|n| n.target == "antigravity"
-        && n.message.contains("not supported")
-        && n.message.contains("1 commands")
-        && !n.message.contains("rules")));
-    assert_eq!(p.changes.len(), 3, "{:?}", p.changes);
+    // Commands are written as skills (Antigravity's workflows-to-skills
+    // migration), not as workflows.
+    let skill = planned(&p, &sb.home().join(".gemini/config/skills/review/SKILL.md")).unwrap();
+    assert!(skill.contains("name: review") && skill.contains("Review $ARGUMENTS"));
+    assert!(p.notes.iter().any(|n| {
+        n.target == "antigravity"
+            && n.message
+                .contains("deprecated workflows in favour of skills")
+    }));
+    assert!(!p.notes.iter().any(|n| n.message.contains("not supported")));
+    assert_eq!(p.changes.len(), 4, "{:?}", p.changes);
 }
 
 #[test]
@@ -981,7 +987,8 @@ fn antigravity_rules_and_skills_coexist_with_gemini_cli() {
         // Capturing both gives one rule of each name: the file's version wins.
         let r = capture(&["antigravity", "gemini-cli"], &env);
         assert_eq!(r.profile.rules.len(), 1, "{:?}", r.profile.rules);
-        assert_eq!(r.profile.skills.len(), 1);
+        // db-migrate, and the `review` command Antigravity holds as a skill.
+        assert_eq!(r.profile.skills.len(), 2, "{:?}", r.profile.skills);
         Store::new(sb.state()).undo(None, false).unwrap();
         assert_eq!(sb.read("home/.gemini/GEMINI.md"), "My own notes.\n");
         assert!(!sb.home().join(".gemini/config").exists());
@@ -1463,10 +1470,17 @@ fn copilot_apply_user() {
         .unwrap(),
         "---\ndescription: TypeScript\napplyTo: \"src/**/*.ts\"\n---\n\nStrict mode.\n"
     );
-    assert!(p.notes.iter().any(|n| n.target == "copilot"
-        && n.message.contains("not supported")
-        && n.message.contains("1 commands")));
-    assert_eq!(p.changes.len(), 3, "{:?}", p.changes);
+    // No prompt-file folder at user scope: the command is a skill only a
+    // slash command invokes.
+    let skill = planned(&p, &sb.home().join(".copilot/skills/review/SKILL.md")).unwrap();
+    assert!(skill.contains("name: review") && skill.contains("disable-model-invocation: true"));
+    assert!(!sb.home().join(".copilot/prompts").exists());
+    assert!(
+        p.notes
+            .iter()
+            .any(|n| n.target == "copilot" && n.message.contains("commands are written as skills"))
+    );
+    assert_eq!(p.changes.len(), 4, "{:?}", p.changes);
 }
 
 #[test]
