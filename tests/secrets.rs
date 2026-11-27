@@ -30,6 +30,7 @@ const ALL: &[&str] = &[
     "opencode",
     "copilot",
     "windsurf",
+    "zed",
 ];
 
 #[test]

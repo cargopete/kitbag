@@ -27,6 +27,7 @@ pub mod gemini;
 pub mod grok_build;
 pub mod opencode;
 pub mod windsurf;
+pub mod zed;
 
 /// Global (per-user) configuration or one project's configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -474,6 +475,7 @@ pub fn all() -> &'static [&'static dyn Adapter] {
         &copilot::Copilot,
         &grok_build::GrokBuild,
         &windsurf::Windsurf,
+        &zed::Zed,
     ]
 }
 

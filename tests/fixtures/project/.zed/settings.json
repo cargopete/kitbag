@@ -1,0 +1,8 @@
+{
+  "context_servers": {
+    "project-db": {
+      "command": "node",
+      "args": ["tools/db-mcp.js"]
+    }
+  }
+}

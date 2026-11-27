@@ -264,7 +264,8 @@ fn list_targets_json() {
             "opencode",
             "copilot",
             "grok-build",
-            "windsurf"
+            "windsurf",
+            "zed"
         ]
     );
     assert_eq!(v[2]["support"]["rules"], "folded");
