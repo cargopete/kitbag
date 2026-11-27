@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-11-27
+
 ### Added
 
 - `kitbag inspect <SOURCE>` shows what a profile or plugin (local, or from git) holds: whether it has instructions (with their size), the names of its rules, commands, skills and agents, and each MCP server with its command line or URL, transport, env and headers. A safety summary lists the commands its MCP servers run, the URLs they connect to, the env vars it references, the skill files it would install as executable (on Unix), risky settings, hooks and shell snippets, and anything in it that looks like a secret; or says there is nothing to review. Secrets are redacted as capture would redact them and masked as in a diff, and URL credentials are left out. With `--to` (default `detected`) it also lists, per tool, the files `apply` would create or modify, from the same planner as `apply` and `diff`; with no tool detected it says the list needs `--to`. A git source shows the full SHA of the commit fetched. `--json` prints the same as JSON. It takes the `apply` source and planning flags (`--path`, `--scope`, `--project`, `--allow-insecure-source`, `--require-pin`, `--allow-git-mcp`, `--trust-source`, `--secrets`) and never writes files or state, or starts a server.
@@ -195,7 +197,8 @@ All notable changes to this project are documented here. The format follows
 - `capture` with several tools (`--from all`, `detected` or a list) reports a tool whose config can't be read and captures the rest; it fails only if nothing could be read. A single `--from` still fails loudly.
 - `install.sh` and `install.ps1` download `kitbag-<target>.sha256`, the checksum name the release workflow uploads (found in the v0.1.0-rc.1 dry run).
 
-[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/cargopete/kitbag/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/cargopete/kitbag/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/cargopete/kitbag/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/cargopete/kitbag/compare/v0.1.3...v0.1.4
