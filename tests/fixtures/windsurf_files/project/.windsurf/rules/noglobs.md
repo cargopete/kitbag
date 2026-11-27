@@ -1,0 +1,5 @@
+---
+trigger: glob
+---
+
+No globs.

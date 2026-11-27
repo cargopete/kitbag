@@ -10,7 +10,7 @@ from the AI coding tools you already use. It stores them as a small, git-friendl
 redacted and applies that profile to any other tool in one step. Claude Code, Cursor,
 OpenAI Codex CLI, Gemini CLI, Claude Desktop, Google Antigravity, opencode (the last two
 for MCP servers and instructions), GitHub Copilot (MCP servers, instructions, rules, prompt files and skills)
-xAI's Grok Build CLI, Windsurf, Zed, Hermes Agent, Amp, Cline, Roo Code and Continue (the last seven for MCP servers and instructions; Hermes also for shell hooks, Zed and Amp also for skills, Continue also for project rules and, at user scope, commands, Cline and Roo Code also for rules, commands and skills) are supported, at user and
+xAI's Grok Build CLI, Windsurf, Zed, Hermes Agent, Amp, Cline, Roo Code and Continue (the last seven for MCP servers and instructions; Hermes also for shell hooks, Zed and Amp also for skills, Windsurf also for commands (workflows) and, in a project, rules and skills, Continue also for project rules and, at user scope, commands, Cline and Roo Code also for rules, commands and skills) are supported, at user and
 project scope.
 
 > [!IMPORTANT]
@@ -99,7 +99,7 @@ preview with `kitbag diff github:cargopete/dotagents --to all`.
 | `opencode`       | opencode          | user, project | ✓   | ✓            | folded     | ✓            | ✓      | ✓      | -        |
 | `copilot`        | GitHub Copilot (CLI, VS Code) | user, project | ✓ | ✓    | ✓          | project      | ✓      | ✓      | -        |
 | `grok-build`     | Grok Build        | user, project | ✓   | ✓            | ✓*         | ✓            | ✓      | -      | -        |
-| `windsurf`       | Windsurf          | user, project | user | ✓           | -          | -            | -      | -      | -        |
+| `windsurf`       | Windsurf          | user, project | user | ✓           | project    | ✓            | project | -     | -        |
 | `zed`            | Zed               | user, project | ✓   | ✓            | -          | -            | ✓      | -      | -        |
 | `hermes`         | Hermes Agent      | user, project | user | ✓           | -          | -            | -      | -      | -        |
 | `amp`            | Amp               | user, project | ✓   | ✓            | -          | as skills    | ✓      | -      | -        |
@@ -133,7 +133,7 @@ Where things go:
 | Antigravity | `~/.gemini/config/mcp_config.json`, `~/.gemini/GEMINI.md` (the same file and managed block as Gemini CLI); capture also reads `~/.gemini/AGENTS.md` and `~/.gemini/config/{AGENTS,GEMINI}.md`; `~/.gemini/config/rules/*.md`, `~/.gemini/config/skills/` | `.agents/mcp_config.json`, `AGENTS.md` (shared with Codex and Cursor); capture also reads `GEMINI.md` and `.agents/{AGENTS,GEMINI}.md`; `.agents/rules/*.md`, `.agents/skills/` (the same directory as Codex's project skills) |
 | opencode | `~/.config/opencode/opencode.json` or `opencode.jsonc` (`mcp.servers`), `~/.config/opencode/{AGENTS.md, commands/*.md, skills/<name>/, agents/*.md}`; honours `XDG_CONFIG_HOME` | `opencode.json(c)` or `.opencode/opencode.json(c)` (the first that exists, else `opencode.json`), `AGENTS.md` (shared with Codex, Cursor and Antigravity), `.opencode/{commands,skills,agents}/`; capture reads every config file there is |
 | Grok Build | `$GROK_HOME/config.toml` (`[mcp_servers.<name>]`, default `~/.grok`), `$GROK_HOME/{AGENTS.md, rules/*.md, commands/*.md, skills/}` | `.grok/config.toml`, `AGENTS.md` (shared with Codex, Cursor, Antigravity and opencode), `.grok/{rules,commands,skills}/`; Grok reads project files only in folders you have trusted |
-| Windsurf | `~/.codeium/windsurf/mcp_config.json` (`mcpServers`), `~/.codeium/windsurf/memories/global_rules.md` | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode and Grok Build); capture also reads the legacy `.windsurfrules`; Windsurf's docs describe no project MCP file, so MCP servers are not written at project scope |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` (`mcpServers`), `~/.codeium/windsurf/memories/global_rules.md`, `~/.codeium/windsurf/global_workflows/<name>.md` | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode and Grok Build); capture also reads the legacy `.windsurfrules`; `.windsurf/rules/<name>.md`, `.windsurf/workflows/<name>.md`, `.windsurf/skills/<name>/`; Windsurf's docs describe no project MCP file, so MCP servers are not written at project scope |
 | Zed | `settings.json` in `~/.config/zed` (macOS), `$XDG_CONFIG_HOME/zed` or `~/.config/zed` (Linux), `%APPDATA%\Zed` (Windows) (`context_servers`), and `AGENTS.md` next to it (Zed's personal instructions), `~/.agents/skills/<name>/` (skills) | `.zed/settings.json` (`context_servers`; Zed starts these only in a trusted worktree); instructions go to the first of `.rules`, `.cursorrules`, `.windsurfrules`, `.clinerules`, `.github/copilot-instructions.md`, `AGENT.md` and `AGENTS.md` that exists, since Zed reads only that one, and to `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build and Windsurf) when none does; `.agents/skills/<name>/` (skills; Amp writes its project skills to the same folder) |
 | Hermes Agent | `$HERMES_HOME/config.yaml` (`mcp_servers`, default `~/.hermes`), `$HERMES_HOME/SOUL.md` (Hermes's identity file, the only global file it reads for instructions; capture reads only a kitbag-managed block in it) | `.hermes.md` or `HERMES.md` when the project has one (Hermes loads it before `AGENTS.md`), otherwise `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf and Grok Build); Hermes documents no project MCP file, so MCP servers are not written at project scope |
 | Amp | `~/.config/amp/settings.json` or `settings.jsonc` (`amp.mcpServers`; `%USERPROFILE%\.config\amp` on Windows), `~/.config/amp/AGENTS.md`, `~/.config/agents/skills/<name>/` | `.amp/settings.json` or `settings.jsonc` (`amp.mcpServers`; Amp asks you to approve these servers, `amp mcp approve`), `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf, Grok Build and Hermes), or `AGENT.md` / `CLAUDE.md` when that is the file Amp reads, `.agents/skills/<name>/` |
@@ -1219,8 +1219,23 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   `disabled` in the profile is not written (the docs list no such key), though capture reads
   `disabled: true`, and Windsurf-only keys on an entry are kept. SSE servers are skipped, since
   the docs don't say how the file marks one. Windsurf's docs have limited `global_rules.md` to
-  6,000 characters, and kitbag warns when the instructions are longer. Rules
-  (`.windsurf/rules/`), workflows, skills and agents are not carried yet.
+  6,000 characters, and kitbag warns when the instructions are longer.
+  Rules, commands and skills are files of their own. A rule is `.windsurf/rules/<name>.md` with
+  a `trigger` in its frontmatter: `always_on`, `glob` with `globs` (several patterns are written
+  as one comma-separated string, since the docs show a single one) or, for an on-demand rule,
+  `model_decision` with its description. Capture reads those three; a `manual` rule (the profile
+  has no such mode), a rule with no `trigger` (the docs don't say when it applies) and a `glob`
+  rule with no `globs` are left behind and named in the capture notes, and so are the files in
+  `.windsurf/` and in `~/.codeium/windsurf/memories/` and `global_workflows/` that capture does not
+  read, and anything under `.devin/`. Commands are Windsurf's workflows, `/<name>`, in
+  `~/.codeium/windsurf/global_workflows/` and `.windsurf/workflows/`: the prompt as the body, with
+  the description as `description` in frontmatter when the command has one (the docs name a
+  description but give no syntax, so that form is unverified), and a warning when a file is over
+  the docs' 12,000-character limit. Skills go to `.windsurf/skills/<name>/` (Windsurf's docs call
+  it the legacy workspace folder, still read) with their bundled files. Windsurf's docs, now at
+  docs.devin.ai, name no user-level rules or skills folder of Windsurf's own, only Devin Desktop's
+  `~/.devin/rules/` and `~/.config/devin/skills/`, so rules and skills are not carried at user
+  scope. Agents (#14) and hooks (#13) are not carried yet.
 - **Zed** keeps MCP servers ("context servers") under `context_servers` in `settings.json`, in
   the user config directory and in a project's `.zed/settings.json`; the file may hold comments
   and trailing commas, which are kept, and Zed's own keys on an entry (`timeout`, `oauth`, `source` ...)
