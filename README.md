@@ -10,7 +10,7 @@ from the AI coding tools you already use. It stores them as a small, git-friendl
 redacted and applies that profile to any other tool in one step. Claude Code, Cursor,
 OpenAI Codex CLI, Gemini CLI, Claude Desktop, Google Antigravity, opencode (the last two
 for MCP servers and instructions), GitHub Copilot (MCP servers, instructions, rules, prompt files and skills)
-xAI's Grok Build CLI, Windsurf and Zed (the last two for MCP servers and instructions) are supported, at user and
+xAI's Grok Build CLI, Windsurf, Zed and Hermes Agent (the last three for MCP servers and instructions) are supported, at user and
 project scope.
 
 > [!IMPORTANT]
@@ -96,6 +96,7 @@ Starting from scratch? `kitbag init my-profile` writes a commented starter profi
 | `grok-build`     | Grok Build        | user, project | ✓   | ✓            | ✓*         | ✓            | ✓      | -      | -        |
 | `windsurf`       | Windsurf          | user, project | user | ✓           | -          | -            | -      | -      | -        |
 | `zed`            | Zed               | user, project | ✓   | ✓            | -          | -            | -      | -      | -        |
+| `hermes`         | Hermes Agent      | user, project | user | ✓           | -          | -            | -      | -      | -        |
 
 `claude` is accepted as an alias for `claude-code` wherever a target id is given (`--to`,
 `--from`, `targets`, `disabled_on`, and `[settings.claude]`, read as `[settings.claude-code]`;
@@ -125,6 +126,7 @@ Where things go:
 | Grok Build | `$GROK_HOME/config.toml` (`[mcp_servers.<name>]`, default `~/.grok`), `$GROK_HOME/{AGENTS.md, rules/*.md, commands/*.md, skills/}` | `.grok/config.toml`, `AGENTS.md` (shared with Codex, Cursor, Antigravity and opencode), `.grok/{rules,commands,skills}/`; Grok reads project files only in folders you have trusted |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` (`mcpServers`), `~/.codeium/windsurf/memories/global_rules.md` | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode and Grok Build); capture also reads the legacy `.windsurfrules`; Windsurf's docs describe no project MCP file, so MCP servers are not written at project scope |
 | Zed | `settings.json` in `~/.config/zed` (macOS), `$XDG_CONFIG_HOME/zed` or `~/.config/zed` (Linux), `%APPDATA%\Zed` (Windows) (`context_servers`), and `AGENTS.md` next to it (Zed's personal instructions) | `.zed/settings.json` (`context_servers`; Zed starts these only in a trusted worktree); instructions go to the first of `.rules`, `.cursorrules`, `.windsurfrules`, `.clinerules`, `.github/copilot-instructions.md`, `AGENT.md` and `AGENTS.md` that exists, since Zed reads only that one, and to `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build and Windsurf) when none does |
+| Hermes Agent | `$HERMES_HOME/config.yaml` (`mcp_servers`, default `~/.hermes`), `$HERMES_HOME/SOUL.md` (Hermes's identity file, the only global file it reads for instructions; capture reads only a kitbag-managed block in it) | `.hermes.md` or `HERMES.md` when the project has one (Hermes loads it before `AGENTS.md`), otherwise `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf and Grok Build); Hermes documents no project MCP file, so MCP servers are not written at project scope |
 | GitHub Copilot | `$COPILOT_HOME/mcp-config.json` (`mcpServers`, default `~/.copilot`), `$COPILOT_HOME/copilot-instructions.md`, `$COPILOT_HOME/instructions/*.instructions.md`, `$COPILOT_HOME/skills/`, `$COPILOT_HOME/agents/*.agent.md` | `.mcp.json` (shared with Claude Code, written in Claude Code's shape), `.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` (`applyTo`), `.github/prompts/*.prompt.md`, `.github/skills/`, `.github/agents/*.agent.md`; capture also reads `.github/mcp.json`, legacy chat modes in `.github/chatmodes/` and `.vscode/mcp.json` (`servers`), and `disabledMcpServers` from Copilot's `settings.json` |
 
 How each tool receives `${VAR}` references:
@@ -141,6 +143,7 @@ How each tool receives `${VAR}` references:
 | GitHub Copilot | `${VAR}` / `${VAR:-default}` (expanded by Copilot); capture also reads `${env:VAR}` from `.vscode/mcp.json` | no |
 | Windsurf | `${env:VAR}` (expanded by Windsurf, in `command`, `args`, `env`, `serverUrl`, `url` and `headers`); remote servers get `serverUrl`, SSE servers are skipped | no |
 | Zed | resolved value (its docs describe no interpolation); SSE servers are skipped | yes, unless `--secrets never` |
+| Hermes Agent | `${VAR}` (expanded by Hermes in `config.yaml`, from its environment and `~/.hermes/.env`; defaults resolved at apply time); SSE servers get `transport: sse` | no |
 | Grok Build | `${VAR}` / `${VAR:-default}` (expanded by Grok Build); an `Authorization: Bearer ${VAR}` header is written as `bearer_token_env_var = "VAR"` and read back the same way; SSE servers get `type = "sse"`, and capture reads a server named in `disabled_mcp_servers` as disabled | no |
 
 ## The profile format
@@ -205,7 +208,7 @@ releases will refuse newer profiles instead of misreading them.
 don't need it. `targets` lists the only tools a server is applied to; `disabled_on` lists the
 tools it is kept out of. Use one or the other, not both, and give `targets` at least one tool.
 Target names are those of `kitbag list-targets` (`claude-code`, `cursor`, `codex`,
-`gemini-cli`, `claude-desktop`, `antigravity`, `opencode`, `copilot`, `grok-build`, `windsurf`, `zed`). An unknown name (a typo, or a tool from a newer
+`gemini-cli`, `claude-desktop`, `antigravity`, `opencode`, `copilot`, `grok-build`, `windsurf`, `zed`, `hermes`). An unknown name (a typo, or a tool from a newer
 kitbag) is a warning that lists the valid ones, and the name is ignored: it matches no tool.
 `only` and `except` still load as older names for the same fields (an empty `only` still means
 no restriction, with a warning); set each field under one name, not both. Capture writes the new
@@ -1098,6 +1101,23 @@ No further candidates are named here; open an issue for the tool you miss.
   commands, skills (`~/.agents/skills/`, `.agents/skills/`), agents and settings are not carried
   yet. The config directory follows Zed's source (`XDG_CONFIG_HOME` on Linux, `~/.config/zed` on
   macOS); `FLATPAK_XDG_CONFIG_HOME` is not honoured.
+- **Hermes Agent** (Nous Research) keeps MCP servers under `mcp_servers` in
+  `~/.hermes/config.yaml` (or `$HERMES_HOME/config.yaml`; run kitbag with `HERMES_HOME` set to
+  `~/.hermes/profiles/<name>` to use one of its profiles). kitbag edits only the entries it
+  writes: the rest of the file, its comments and the servers you added stay as they are, and
+  keys Hermes has that kitbag doesn't manage (`timeout`, `tools`, `auth`, `sampling` ...) are
+  kept while the entry runs the same command or URL. A server marked `disabled` is written with
+  `enabled: false`, and SSE servers with `transport: sse`. If `mcp_servers` is written in a form
+  that can't be edited in place (a flow mapping with entries, an alias), the plan says so and
+  leaves the file alone. Hermes documents no project MCP file, so none is written at project
+  scope. Instructions go in a managed block in `SOUL.md`, next to what is already there (Hermes
+  documents it as its identity file; it has no global AGENTS.md). Capture reads only that
+  block, never the persona text around it (a fresh install seeds one), so it doesn't end up in
+  the other tools' instructions, and says so; in a project, to `.hermes.md` or `HERMES.md` if there is
+  one, since Hermes loads that before `AGENTS.md`, otherwise to `AGENTS.md`, with a warning when
+  an `AGENTS.override.md` would shadow it. `.env`, `auth.json` and `mcp-tokens/` are never read
+  or written (capture warns when it finds them), and Hermes's skills, memories, sessions and
+  profiles are not carried yet.
 - **GitHub Copilot** and Claude Code both read a project's `.mcp.json`. kitbag writes it in
   Claude Code's shape for both (no `cwd`, no `tools`; a `cwd` is dropped with a warning), so
   applying both writes each server once, and a server the profile keeps off one of them stays

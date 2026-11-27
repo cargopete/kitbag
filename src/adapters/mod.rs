@@ -25,6 +25,7 @@ pub mod copilot;
 pub mod cursor;
 pub mod gemini;
 pub mod grok_build;
+pub mod hermes;
 pub mod opencode;
 pub mod windsurf;
 pub mod zed;
@@ -98,6 +99,7 @@ pub const LOCATION_VARS: &[&str] = &[
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
     "COPILOT_HOME",
+    "HERMES_HOME",
     "XDG_CONFIG_HOME",
     "APPDATA",
 ];
@@ -476,6 +478,7 @@ pub fn all() -> &'static [&'static dyn Adapter] {
         &grok_build::GrokBuild,
         &windsurf::Windsurf,
         &zed::Zed,
+        &hermes::Hermes,
     ]
 }
 

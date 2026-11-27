@@ -1,0 +1,46 @@
+# Hermes config (fixture)
+model:
+  default: "anthropic/claude-sonnet-5"   # keep this comment
+  provider: openrouter
+
+terminal:
+  backend: local
+
+mcp_servers:
+  # filesystem access for the projects folder
+  filesystem:
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/projects"]
+    timeout: 120
+
+  github:
+    command: npx
+    args:
+      - -y
+      - "@modelcontextprotocol/server-github"
+    env:
+      GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_PERSONAL_ACCESS_TOKEN}"
+    tools:
+      include: [create_issue, list_issues]
+
+  remote_api:
+    url: "https://mcp.example.com/mcp"
+    headers:
+      Authorization: "Bearer ${env:REMOTE_API_TOKEN}"
+      X-Api-Key: "sntrys_FAKEhermesYpYXQiOjE3MDAwMDAwMDAsInVybCI6Imh0dHBz"
+
+  linear:
+    url: "https://mcp.linear.app/mcp"
+    auth: oauth
+
+  events:
+    url: "https://events.example.com/sse"
+    transport: sse
+
+  time:
+    command: uvx
+    args: ["mcp-server-time"]
+    enabled: false
+
+memory:
+  memory_enabled: true
