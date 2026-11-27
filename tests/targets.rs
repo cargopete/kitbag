@@ -147,7 +147,7 @@ fn older_and_newer_profiles_still_load() {
     write_profile(
         &sb,
         "p",
-        &profile("shared", "targets = [\"vscode\", \"cursor\"]\n"),
+        &profile("shared", "targets = [\"emacs\", \"cursor\"]\n"),
     );
     let out = sb
         .cli()
@@ -157,15 +157,15 @@ fn older_and_newer_profiles_still_load() {
     assert!(out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains(
-            "warning: mcp_servers.heavy: unknown target 'vscode' in 'targets' is ignored"
-        ) && stderr.contains("claude-desktop, antigravity, opencode"),
+        stderr
+            .contains("warning: mcp_servers.heavy: unknown target 'emacs' in 'targets' is ignored")
+            && stderr.contains("claude-desktop, antigravity, opencode"),
         "{stderr}"
     );
     assert!(cursor_has(&sb, "heavy"));
     assert!(!sb.read(CODEX).contains("heavy"));
     sb.cli().args(["doctor", "p"]).assert().stdout(contains(
-        "warn mcp_servers.heavy: unknown target 'vscode' in 'targets' is ignored",
+        "warn mcp_servers.heavy: unknown target 'emacs' in 'targets' is ignored",
     ));
 
     // An empty 'only' meant no restriction before 'targets', and still does.

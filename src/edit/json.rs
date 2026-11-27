@@ -230,6 +230,65 @@ impl JsonDoc {
     }
 }
 
+/// A JSON/JSONC file whose top level is an array (Zed's `keymap.json`),
+/// edited in place like [`JsonDoc`]: comments and what is already there stay.
+pub struct JsonArrayDoc {
+    root: CstRootNode,
+    crlf: bool,
+}
+
+impl JsonArrayDoc {
+    /// Parse `text` (missing or blank files start as `[]`).
+    pub fn parse(text: Option<&str>, path: &Path) -> Result<Self> {
+        let text = match text {
+            Some(t) if !t.trim().is_empty() => t,
+            _ => "[]\n",
+        };
+        let root = CstRootNode::parse(text, &ParseOptions::default()).map_err(|e| {
+            anyhow!(
+                "{}: invalid JSON at {}",
+                path.display(),
+                super::safe_parse_error(text, Some(e.range().start), &e.kind().to_string())
+            )
+        })?;
+        match root.value() {
+            Some(v) if v.as_array().is_some() => {}
+            _ => bail!("{}: expected a JSON array at the top level", path.display()),
+        }
+        Ok(JsonArrayDoc {
+            root,
+            crlf: super::uses_crlf(text),
+        })
+    }
+
+    /// The elements as plain values.
+    pub fn items(&self) -> Vec<Value> {
+        match self.root.to_serde_value() {
+            Some(Value::Array(a)) => a,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Add `value` after the last element.
+    pub fn append(&mut self, value: &Value) {
+        if let Some(arr) = self.root.array_value() {
+            arr.ensure_multiline();
+            arr.append(to_input(value));
+        }
+    }
+
+    pub fn render(&self) -> String {
+        let mut s = self.root.to_string();
+        if !s.ends_with('\n') {
+            s.push('\n');
+        }
+        if self.crlf {
+            s = super::keep_line_endings(Some("\r\n"), s);
+        }
+        s
+    }
+}
+
 /// Parse a JSON/JSONC file into a value (missing -> empty object).
 pub fn parse_value(text: Option<&str>, path: &Path) -> Result<Value> {
     Ok(JsonDoc::parse(text, path)?.value())

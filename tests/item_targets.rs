@@ -177,11 +177,11 @@ fn bad_targeting_is_an_error_and_unknown_targets_a_warning() {
         );
 
         // An unknown tool only warns, and matches nothing.
-        k.write(&sb, "p", "shared", "disabled_on: [vscode]\n");
+        k.write(&sb, "p", "shared", "disabled_on: [emacs]\n");
         let (ok, _, err) = run(&sb, &["apply", "p", "--to", "claude-code", "--yes"]);
         assert!(ok, "{err}");
         assert!(
-            err.contains("unknown target 'vscode' in 'disabled_on' is ignored"),
+            err.contains("unknown target 'emacs' in 'disabled_on' is ignored"),
             "{}: {err}",
             k.name
         );

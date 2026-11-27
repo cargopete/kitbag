@@ -270,7 +270,8 @@ fn list_targets_json() {
             "amp",
             "cline",
             "roo",
-            "continue"
+            "continue",
+            "vscode"
         ]
     );
     assert_eq!(v[2]["support"]["rules"], "folded");

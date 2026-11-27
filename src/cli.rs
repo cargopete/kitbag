@@ -1234,6 +1234,18 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
             println!("  - {}", visible_line(r));
         }
     }
+    if !plan.extensions.is_empty() {
+        println!(
+            "\n{}",
+            paint(
+                YELLOW,
+                "Editor extensions (they run code inside the editor):"
+            )
+        );
+        for e in &plan.extensions {
+            println!("  - {}", e.line());
+        }
+    }
     // Shown as in the profile; anything that still looks like a secret is masked,
     // and control characters can't rewrite the terminal.
     let shown = |s: &str| {
@@ -1467,6 +1479,70 @@ fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) ->
     present(ctx, &resolved, &profile, &plan, mode)
 }
 
+/// How many extensions the plan would install.
+fn pending_installs(plan: &Plan) -> usize {
+    plan.extensions
+        .iter()
+        .filter(|e| e.state == crate::editor::ExtState::Install)
+        .count()
+}
+
+/// Ask before installing extensions when no file is written (`--yes` skips it).
+fn confirm_installs(plan: &Plan, yes: bool) -> Result<bool> {
+    if yes {
+        return Ok(true);
+    }
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "not installing extensions without confirmation in a non-interactive session; review with 'kitbag diff', then pass --yes"
+        );
+    }
+    println!();
+    let ok = confirm(&format!(
+        "Install {} extension(s)? They run code in the editor, and 'kitbag undo' does not remove them.",
+        pending_installs(plan)
+    ))?;
+    if !ok {
+        println!("Aborted; nothing installed.");
+    }
+    Ok(ok)
+}
+
+/// Install the extensions the plan lists as to be installed, after the files
+/// are written. False when one failed (the others are still tried).
+fn install_extensions(plan: &Plan) -> bool {
+    let todo: Vec<&crate::editor::ExtensionPlan> = plan
+        .extensions
+        .iter()
+        .filter(|e| e.state == crate::editor::ExtState::Install)
+        .collect();
+    if todo.is_empty() {
+        return true;
+    }
+    let Some(cli) = crate::editor::find_cli() else {
+        println!(
+            "{} `code` is not on PATH; no extension was installed",
+            paint(YELLOW, "warning:")
+        );
+        return false;
+    };
+    let mut all = true;
+    for e in todo {
+        let name = visible_line(&crate::editor::describe_extension(&e.spec)).into_owned();
+        match crate::editor::install(&cli, &e.spec) {
+            Ok(()) => println!("{} extension {name}", paint(GREEN, "Installed")),
+            Err(why) => {
+                all = false;
+                println!(
+                    "{} extension {name}: {why}",
+                    paint(YELLOW, "Could not install")
+                );
+            }
+        }
+    }
+    all
+}
+
 /// An MCP server as `inspect` shows it: redacted as capture would redact
 /// it, then masked like a diff line, so no secret in the profile is shown.
 struct ServerView {
@@ -1603,6 +1679,11 @@ fn cmd_inspect(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, as_json: boo
         .collect();
     risky.extend(policy::risky_content(&profile));
     risky.extend(crate::plugins::review_lines(&profile));
+    risky.extend(
+        crate::editor::list(&profile)
+            .into_iter()
+            .map(|l| format!("{l} (installs and runs code in the editor)")),
+    );
     let risky: Vec<String> = risky
         .iter()
         .map(|r| {
@@ -1940,6 +2021,13 @@ fn plan_apply(
     } else {
         Vec::new()
     };
+    // Editor extensions run code inside the editor: from a git source they are
+    // withheld unless it is trusted, and listed in the plan either way.
+    let withheld_extensions = if untrusted {
+        crate::editor::drop_untrusted(&mut profile)
+    } else {
+        Vec::new()
+    };
     let secrets = a.secrets.unwrap_or(if untrusted {
         SecretsMode::Never
     } else {
@@ -2058,6 +2146,18 @@ fn plan_apply(
                 target,
                 message: format!(
                     "not applied, because the profile comes from a remote repository: {d} (needs --trust-source)"
+                ),
+            });
+        }
+    }
+    for (target, d) in withheld_extensions {
+        if plan.targets.contains(&target) {
+            plan.notes.push(adapters::Note {
+                level: adapters::Level::Warn,
+                target,
+                message: format!(
+                    "extension {} not installed, because the profile comes from a remote repository (needs --trust-source)",
+                    visible_line(&d)
                 ),
             });
         }
@@ -2253,6 +2353,20 @@ fn present(
                 paint(BOLD, format!("kitbag undo {}", tx.id))
             );
         }
+        if let Mode::Apply {
+            yes,
+            dry_run: false,
+        } = mode
+            && pending_installs(plan) > 0
+        {
+            if !confirm_installs(plan, yes)? {
+                record(None)?;
+                return Ok(1);
+            }
+            let ok = install_extensions(plan);
+            record(None)?;
+            return Ok(i32::from(!ok));
+        }
         record(None)?;
         return Ok(0);
     }
@@ -2282,8 +2396,14 @@ fn present(
                     );
                 }
                 println!();
+                let installs = pending_installs(plan);
+                let also = if installs > 0 {
+                    format!(" and install {installs} extension(s) (they run code)")
+                } else {
+                    String::new()
+                };
                 if !confirm(&format!(
-                    "Write {} file(s)? Backups are kept; 'kitbag undo' reverts.",
+                    "Write {} file(s){also}? Backups are kept; 'kitbag undo' reverts the files.",
                     plan.changes.len()
                 ))? {
                     println!("Aborted; nothing written.");
@@ -2315,7 +2435,7 @@ fn present(
                     println!("Nothing to write.");
                 }
             }
-            Ok(0)
+            Ok(i32::from(!install_extensions(plan)))
         }
     }
 }

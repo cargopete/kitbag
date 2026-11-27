@@ -566,6 +566,9 @@ pub struct Profile {
     /// Plugins and the marketplaces they come from, by reference, per target
     /// (see [`crate::plugins`]).
     pub plugins: BTreeMap<String, crate::plugins::PluginSet>,
+    /// Editor extensions, AI settings and AI keybindings, per editor (see
+    /// [`crate::editor`]).
+    pub editor: BTreeMap<String, crate::editor::EditorSet>,
     /// Per target, the config schema the profile's part for it was captured
     /// from (`[targets.<id>] schema`, see [`crate::schema`]). Only for tools
     /// that declare schemas; a profile without it is applied as before.
@@ -597,6 +600,7 @@ impl Profile {
                 .plugins
                 .values()
                 .all(crate::plugins::PluginSet::is_empty)
+            && self.editor.values().all(crate::editor::EditorSet::is_empty)
     }
 
     pub fn sort(&mut self) {

@@ -12,6 +12,7 @@
 pub mod adapters;
 pub mod cli;
 pub mod edit;
+pub mod editor;
 pub mod engine;
 pub mod frontmatter;
 pub mod hooks;
