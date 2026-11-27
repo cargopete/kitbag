@@ -143,6 +143,24 @@ fn capture(sb: &Sandbox, t: &Tool, include: bool) -> assert_cmd::assert::Assert 
 }
 
 /// A profile with a script hook and an inline one, in a directory of its own.
+fn bump_timeout_20(text: &str) -> String {
+    // Only bump a timeout field. A blanket replace of "20" also rewrites that
+    // digit sequence when it appears in a temp path, and status then treats
+    // the hook as missing instead of changed.
+    let replacements = [
+        ("\"timeout\": 20", "\"timeout\": 21"),
+        ("\"timeout\":20", "\"timeout\":21"),
+        ("\"timeoutSec\": 20", "\"timeoutSec\": 21"),
+        ("\"timeoutSec\":20", "\"timeoutSec\":21"),
+    ];
+    for (from, to) in replacements {
+        if text.contains(from) {
+            return text.replace(from, to);
+        }
+    }
+    panic!("expected a timeout of 20 in {text}");
+}
+
 fn profile(dir: &Path) -> String {
     write(
         &dir.join("kitbag.toml"),
@@ -430,7 +448,7 @@ fn doctor_flags_a_hook_that_changed_since_it_was_applied() {
         sb.cli().args(["doctor", "--to", t.id]).assert().success();
         let path = sb.home().join(t.written);
         let text = fs::read_to_string(&path).unwrap();
-        fs::write(&path, text.replace("20", "21")).unwrap();
+        fs::write(&path, bump_timeout_20(&text)).unwrap();
         sb.cli()
             .args(["doctor", "--to", t.id])
             .assert()
@@ -738,7 +756,7 @@ fn status_lists_hooks_and_what_drifted() {
         .stdout(contains("in sync"));
     let path = sb.home().join(".cursor/hooks.json");
     let text = fs::read_to_string(&path).unwrap();
-    fs::write(&path, text.replace("20", "21")).unwrap();
+    fs::write(&path, bump_timeout_20(&text)).unwrap();
     sb.cli()
         .args(["status", &prof, "--to", "cursor,codex", "--exit-code"])
         .assert()
