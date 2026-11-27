@@ -1462,12 +1462,16 @@ stay), and `apply --to zed` appends the bindings as a block at the end of `keyma
 the later binding win; a binding the file already has is not repeated, and one it binds
 differently is noted). Both are idempotent, and `kitbag undo` restores the files.
 
-**VS Code, default profile and user scope only.** The settings go to `User/settings.json`
-(`%APPDATA%\Code\User` on Windows, `~/Library/Application Support/Code/User` on macOS,
-`~/.config/Code/User` on Linux). `User/profiles/<id>/` is never written: VS Code's profiles page
-says how to see the active profile in the UI but gives no way for a program to tell, so kitbag
-doesn't guess. A workspace's `.vscode/settings.json` is not written yet (today the target has user
-scope only; project-scope allow-listed settings are #144). `code --user-data-dir` and portable mode are not followed.
+**VS Code, default profile at user scope; workspace settings at project scope.** At user scope the
+settings go to `User/settings.json` (`%APPDATA%\Code\User` on Windows,
+`~/Library/Application Support/Code/User` on macOS, `~/.config/Code/User` on Linux).
+`User/profiles/<id>/` is never written: VS Code's profiles page says how to see the active profile
+in the UI but gives no way for a program to tell, so kitbag doesn't guess. With `--project`, the
+same allow-listed settings (and no others) are captured from and merged into the project's
+`.vscode/settings.json` (the directory is created if needed); `User/settings.json` is not written
+then, and `.vscode/settings.json` is not written at user scope. Extensions stay a user-level
+`code --install-extension` concern: none is listed or installed at project scope. `code
+--user-data-dir` and portable mode are not followed.
 
 **What is carried.**
 
