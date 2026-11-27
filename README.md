@@ -555,7 +555,7 @@ With a profile, status also lists what a tool has that never made it back to the
 `tool only`:
 
 - a rule file of its own that the profile doesn't have, such as a one-off
-  `~/.claude/rules/hotfix.md` or `.cursor/rules/hotfix.mdc` (rule files another profile
+  `~/.claude/rules/hotfix.md`, `.cursor/rules/hotfix.mdc` or `~/.grok/rules/hotfix.md` (rule files another profile
   applied are not listed);
 - text outside kitbag's block in an instructions file where the profile has its block
   (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`), paragraph by paragraph, when the profile's

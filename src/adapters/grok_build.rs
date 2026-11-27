@@ -186,6 +186,7 @@ fn capture_rules(cap: &mut Captured, dir: &Path) {
             continue;
         };
         cap.sources.push(path.clone());
+        cap.rule_files.push((name.clone(), path.clone()));
         add_rule(cap, rule_from_grok(&name, &text), ID);
     }
 }
