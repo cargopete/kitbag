@@ -185,6 +185,7 @@ impl Adapter for GeminiCli {
             }
         }
         capture_skills_dir(&mut cap, &p.skills, ID)?;
+        super::hook_files::capture_for(&mut cap, env, &super::hook_files::GEMINI)?;
         Ok(cap)
     }
 
@@ -264,6 +265,7 @@ impl Adapter for GeminiCli {
             let s = skill_with_required_frontmatter(s);
             write_skill(work, &p.skills.join(&s.name), &s, opts, ID)?;
         }
+        super::hook_files::apply_for(profile, env, opts, work, &super::hook_files::GEMINI)?;
         Ok(())
     }
 }

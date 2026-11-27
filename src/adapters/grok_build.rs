@@ -395,6 +395,7 @@ impl Adapter for GrokBuild {
                 ),
             );
         }
+        super::hook_files::capture_for(&mut cap, env, &super::hook_files::GROK)?;
         Ok(cap)
     }
 
@@ -584,6 +585,7 @@ impl Adapter for GrokBuild {
                 ),
             );
         }
+        super::hook_files::apply_for(profile, env, opts, work, &super::hook_files::GROK)?;
         Ok(())
     }
 }

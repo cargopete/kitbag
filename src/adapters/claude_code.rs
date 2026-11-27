@@ -13,7 +13,7 @@
 //!   Docs: <https://code.claude.com/docs/en/sub-agents>.
 //! * Settings: `.claude/settings.json` (allow-listed keys only).
 //! * Hooks: the `hooks` key of that file, with `capture --include hooks` and
-//!   `apply --apply-hooks` (see `claude_hooks.rs`).
+//!   `apply --apply-hooks` (see `hook_files.rs`).
 
 use std::path::{Path, PathBuf};
 
@@ -539,7 +539,14 @@ impl Adapter for ClaudeCode {
             if let Value::Object(doc) = parse_value(Some(&text), &p.settings)? {
                 pick_settings(&mut cap, ID, &doc);
                 if env.include_hooks {
-                    super::claude_hooks::capture(&mut cap, env, &doc, &settings_base(env));
+                    super::hook_files::capture(
+                        &mut cap,
+                        env,
+                        &super::hook_files::CLAUDE,
+                        &doc,
+                        &settings_base(env),
+                        "settings.json",
+                    );
                 }
                 let skipped: Vec<&str> = [
                     "env",
@@ -557,7 +564,7 @@ impl Adapter for ClaudeCode {
                         ID,
                         format!(
                             "{} hook(s) in settings.json were not captured: they run commands by themselves, so capture only reads them with --include hooks",
-                            super::claude_hooks::count(&doc)
+                            super::hook_files::count(&super::hook_files::CLAUDE, &doc)
                         ),
                     );
                 }
@@ -649,7 +656,15 @@ impl Adapter for ClaudeCode {
             Scope::User => config_dir(env),
             Scope::Project => env.project.join(".claude"),
         };
-        super::claude_hooks::apply(profile, env, opts, work, &p.settings, &claude_dir)?;
+        super::hook_files::apply(
+            profile,
+            env,
+            opts,
+            work,
+            &super::hook_files::CLAUDE,
+            &p.settings,
+            &claude_dir.join("hooks").join("kitbag"),
+        )?;
         Ok(())
     }
 }

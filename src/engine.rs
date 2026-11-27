@@ -143,8 +143,19 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
             }
         }
         for f in c.profile.hook_files {
-            if !merged.hook_files.iter().any(|x| x.path == f.path) {
-                merged.hook_files.push(f);
+            match merged.hook_files.iter().find(|x| x.path == f.path) {
+                None => merged.hook_files.push(f),
+                // Two tools' scripts with one name: the hooks that run the
+                // second would run the first's.
+                Some(x) if x.content != f.content => out.notes.push(note(
+                    Level::Warn,
+                    a.id(),
+                    format!(
+                        "hook script hooks/{} differs from the one already captured from another tool; kept the first, so hooks that run it use that one",
+                        f.path
+                    ),
+                )),
+                Some(_) => {}
             }
         }
         for (t, s) in c.profile.settings {
@@ -393,14 +404,21 @@ pub fn plan(
             );
             work.info(a.id(), message);
         }
-        if !profile.hooks.is_empty() && a.id() != crate::adapters::claude_code::ID {
-            work.info(
+        if !profile.hooks.is_empty() && crate::adapters::hook_files::format_for(a.id()).is_none() {
+            // Never drop hooks without saying so: this target has nowhere to put them.
+            let why = crate::adapters::hook_files::no_hooks_reason(a.id())
+                .unwrap_or("kitbag doesn't know where it keeps hooks");
+            work.warn(
                 a.id(),
                 format!(
-                    "{} hook(s) not applied: kitbag carries hooks to Claude Code only so far",
-                    profile.hooks.len()
+                    "{} hook(s) not written to {}: {why}. They would run:",
+                    profile.hooks.len(),
+                    a.name()
                 ),
             );
+            for h in &profile.hooks {
+                work.info(a.id(), format!("hook {}", crate::hooks::describe(h)));
+            }
         }
         a.apply(profile, env, opts, &mut work)?;
         remove_disabled_items(&mut work, *a, env, opts, original, &skipped)?;

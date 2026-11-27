@@ -604,6 +604,7 @@ impl Adapter for Copilot {
                 ),
             );
         }
+        super::hook_files::capture_for(&mut cap, env, &super::hook_files::COPILOT)?;
         Ok(cap)
     }
 
@@ -670,6 +671,7 @@ impl Adapter for Copilot {
                 "kitbag doesn't manage Copilot settings; settings.copilot was not applied",
             );
         }
+        super::hook_files::apply_for(profile, env, opts, work, &super::hook_files::COPILOT)?;
         Ok(())
     }
 }

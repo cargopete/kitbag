@@ -475,8 +475,8 @@ pub struct Agent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Hook {
-    /// A neutral event name (`pre-tool`, `session-start` ...), or `claude-code:Name`
-    /// for an event only that tool has. See [`crate::hooks::EVENTS`].
+    /// A neutral event name (`pre-tool`, `session-start` ...), or `<target>:Name` (`claude-code:Name`,
+    /// `cursor:Name` ...) for an event only that tool has. See [`crate::hooks::EVENTS`].
     pub event: String,
     /// What the event is narrowed to (a tool name for `pre-tool`), as the tool
     /// reads it. Absent: every time.
