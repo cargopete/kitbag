@@ -561,13 +561,32 @@ flattened (`My style.md` becomes `My-style.md`) and gets `name: My style` so Cla
 calls the style what it did. Apply writes `<name>.md` to `~/.claude/output-styles/`
 (`$CLAUDE_CONFIG_DIR/output-styles/`) or the project's `.claude/output-styles/`.
 
-The `outputStyle` setting (`~/.claude/settings.json` or the project's `.claude/settings.json`;
-the docs say `/output-style` itself saves to `.claude/settings.local.json`, which kitbag does not
-read) is carried in `[settings.claude-code]` like the other settings, whatever it names: a
+The `outputStyle` setting (`~/.claude/settings.json` or the project's `.claude/settings.json`)
+is carried in `[settings.claude-code]` like the other settings, whatever it names: a
 built-in style (`Proactive`, `Concise`, `Explanatory`, `Learning`, `default`), a style in the
 profile, or one kitbag has no file for (a plugin's or a managed one), which is kept with a
 note, since Claude Code falls back to its default style when it can't find the name. The
 value is case-sensitive in Claude Code.
+
+`/output-style` and the `/config` menu save the choice somewhere else: the project's
+`.claude/settings.local.json` ([output styles](https://code.claude.com/docs/en/output-styles) and
+[settings](https://code.claude.com/docs/en/settings), checked 2026-11-27). kitbag does not read or write
+the choice there, because the settings page defines that file as the "Project local" scope,
+"You, in this one project only", for "Personal overrides for one project", which Claude Code
+keeps out of git itself (it adds `**/.claude/settings.local.json` to your global git excludes
+the first time it writes the file; one made by hand needs your own `.gitignore` entry), and
+places at the repository root, in a worktree at the main checkout's root, and beside
+`settings.json` outside git, on Windows or when the root isn't yours. Carrying it would turn
+one project's personal override into a default for every project (the profile's setting also
+applies at user scope) or write a personal file into a place kitbag cannot tell, and kitbag does
+not touch your git excludes. A capture of a project that has `outputStyle` there says so and
+takes the value in `settings.json`; an apply never changes the local file, whose value still
+wins over the one kitbag writes (local settings sit above shared project settings). To carry a
+style you picked with `/output-style`, put the same name in `outputStyle` of `settings.json`.
+(The one other key kitbag writes in that file is `disabledMcpjsonServers`, the documented way to
+reject a server of a project's `.mcp.json`.) The managed-policy folder and a plugin's
+`output-styles/` are never read or written either: the first belongs to your administrator and the
+second to the plugin.
 
 Apply is additive and undo removes only the files and keys kitbag wrote. The style text is a
 prompt sent with every request, so `kitbag diff` shows it in full, including for a git
