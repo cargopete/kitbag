@@ -719,6 +719,21 @@ fn apply_agent(
             ),
         );
     }
+    let claude_only: Vec<&str> = claude_code::CLAUDE_ONLY_AGENT_KEYS
+        .iter()
+        .copied()
+        .filter(|k| a.extra.contains_key(*k))
+        .collect();
+    if !claude_only.is_empty() {
+        work.info(
+            ID,
+            format!(
+                "agent '{}': {} are Claude Code subagent keys with no Copilot counterpart that kitbag knows of; written as they are, not translated",
+                a.name,
+                claude_only.join(", ")
+            ),
+        );
+    }
     let agent_md = dir.join(format!("{}{AGENT_EXT}", a.name));
     let plain = dir.join(format!("{}.md", a.name));
     let path = if work.fs.read_bytes(&agent_md)?.is_none() && work.fs.read_bytes(&plain)?.is_some()

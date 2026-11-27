@@ -83,7 +83,7 @@ Starting from scratch? `kitbag init my-profile` writes a commented starter profi
 
 | Target id        | Tool              | Scopes        | MCP | Instructions | Rules      | Commands     | Skills | Agents | Settings |
 |------------------|-------------------|---------------|-----|--------------|------------|--------------|--------|--------|----------|
-| `claude-code`    | Claude Code       | user, project | ✓   | ✓            | ✓          | ✓            | ✓      | -      | ✓        |
+| `claude-code`    | Claude Code       | user, project | ✓   | ✓            | ✓          | ✓            | ✓      | ✓      | ✓        |
 | `cursor`         | Cursor            | user, project | ✓   | project      | project    | ✓            | ✓      | -      | -        |
 | `codex`          | OpenAI Codex CLI  | user, project | ✓   | ✓            | folded     | user         | ✓      | -      | ✓        |
 | `gemini-cli`     | Gemini CLI        | user, project | ✓   | ✓            | folded     | ✓            | ✓      | -      | ✓        |
@@ -111,7 +111,7 @@ Where things go:
 
 | Target | User scope | Project scope |
 |---|---|---|
-| Claude Code | `~/.claude.json` (`mcpServers`), `~/.claude/{CLAUDE.md, rules/, commands/, skills/, settings.json}`; honours `CLAUDE_CONFIG_DIR` | `.mcp.json`, `CLAUDE.md` (or `.claude/CLAUDE.md`), `.claude/{rules,commands,skills}/`, `.claude/settings.json`; capture also reads local-scope servers from `~/.claude.json` |
+| Claude Code | `~/.claude.json` (`mcpServers`), `~/.claude/{CLAUDE.md, rules/, commands/, skills/, agents/, settings.json}`; honours `CLAUDE_CONFIG_DIR` | `.mcp.json`, `CLAUDE.md` (or `.claude/CLAUDE.md`), `.claude/{rules,commands,skills,agents}/`, `.claude/settings.json`; capture also reads local-scope servers from `~/.claude.json` |
 | Cursor | `~/.cursor/mcp.json`, `~/.cursor/commands/`, `~/.cursor/skills/` | `.cursor/mcp.json`, `.cursor/rules/*.mdc`, `AGENTS.md`, `.cursor/commands/`, `.cursor/skills/`; capture also reads legacy `.cursorrules` |
 | Codex CLI | `$CODEX_HOME/config.toml` (default `~/.codex`), `$CODEX_HOME/AGENTS.md`, `$CODEX_HOME/prompts/`, `~/.agents/skills/` | `.codex/config.toml` (trusted projects only), `AGENTS.md`, `.agents/skills/` |
 | Gemini CLI | `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`, `~/.gemini/commands/*.toml`, `~/.gemini/skills/` | `.gemini/settings.json`, `GEMINI.md`, `.gemini/commands/`, `.gemini/skills/` |
@@ -257,8 +257,9 @@ covers `permissions.defaultMode = bypassPermissions` (and `acceptEdits`, `dontAs
 `Bash(rm -rf *)` are named), `approval_policy = never` and `sandbox_mode = danger-full-access`.
 It also covers commands and skills whose frontmatter pre-approves tools (`allowed-tools`) or
 defines `hooks`, and commands and skills that run shell snippets (``!`cmd` `` in Claude Code,
-`!{cmd}` in Gemini CLI commands), and custom agents that do any of these or start MCP
-servers of their own (`mcp-servers`).
+`!{cmd}` in Gemini CLI commands), and custom agents and subagents that do any of these, start
+MCP servers of their own (`mcp-servers`, `mcpServers`) or set a `permissionMode` that never
+asks (`acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`).
 
 **From a git source, the riskiest settings are dropped** unless you pass
 `--allow-risky-settings` (or its alias `--trust-source`): permissive `defaultMode`s,
@@ -278,7 +279,7 @@ write `--allow-git-mcp=NAME` to be explicit), or `--trust-source`, which implies
 in place with the same definition are left as they are and aren't listed; servers from a local
 directory apply as written. From a git source, commands and skills that run shell snippets are
 skipped, `hooks` and `allowed-tools` are removed from the frontmatter of the rest, custom
-agents with `hooks`, `allowed-tools`, `mcp-servers` or a shell snippet are skipped whole, and
+agents with `hooks`, `allowed-tools`, `mcp-servers` / `mcpServers`, a permissive `permissionMode` or a shell snippet are skipped whole, and
 skill scripts are not made executable, unless you pass the same flag. The warning for local profiles
 names broad rules, judged case-insensitively and ignoring extra whitespace: bare tools (`Bash`, `Write`), any command (`Bash(*:*)`), the whole file system
 (`Read(//**)`, `Edit(~/**)`), shells, interpreters, package runners and containers with open
@@ -326,8 +327,9 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
 
 ### Agents: `agents/<name>.md`
 
-Custom agents, which only the `copilot` target carries for now: one agent per file, named
-after the file, in Copilot's `.agent.md` format.
+Custom agents, carried by the `copilot` and `claude-code` targets: one agent per file, named
+after the file. `description` is a field of its own and every other frontmatter key is kept
+as it is, whichever tool the agent came from.
 
 ```markdown
 ---
@@ -339,13 +341,36 @@ model: GPT-5
 Review the change for bugs and missing tests. Don't edit files.
 ```
 
-The frontmatter is kept as it is, so every key of Copilot's
+**Copilot** agents use Copilot's `.agent.md` format, so every key of its
 [custom agent file reference](https://code.visualstudio.com/docs/agents/reference/custom-agent-file-reference)
 (`name`, `argument-hint`, `tools`, `model`, `handoffs`, `mcp-servers`, `user-invocable` ...)
-round-trips. Other targets skip agents with a note. Claude Code subagents are a different
-format and are not carried yet. From a git source, an agent with `hooks`, `allowed-tools`,
-`mcp-servers` (servers it starts itself) or a shell snippet is skipped unless you pass
-`--trust-source`.
+round-trips.
+
+**Claude Code** subagents are markdown files in `~/.claude/agents/` (or
+`$CLAUDE_CONFIG_DIR/agents/`) and `.claude/agents/`, with `name` and `description` frontmatter
+and the system prompt as the body; see Claude Code's
+[subagent docs](https://code.claude.com/docs/en/sub-agents). Capture reads `*.md` files there,
+including sub-folders (`review/security.md` becomes `review-security`; two files that flatten
+to one name are an error, as for commands), skips a `README.md` with a note, and keeps all the
+frontmatter (`name`, `tools`, `disallowedTools`, `model`, `permissionMode`, `skills`,
+`mcpServers`, `hooks`, `color` ...). Claude Code identifies a subagent by its `name` key, not
+its file name, so that key is kept; an agent that has none (one captured from Copilot, say)
+gets one when written, equal to its name in the profile. Apply writes `<name>.md`, never
+Copilot's `.agent.md`.
+
+Keys and values are not translated between tools. `tools` and `model` hold each tool's own
+tool names and model ids, so an agent moved between Claude Code and Copilot needs them
+checked by hand. Apply notes the keys Claude Code's docs don't list (Copilot's `handoffs`,
+`mcp-servers` ...) and the Claude Code keys that Copilot has no counterpart for
+(`disallowedTools`, `permissionMode`, `mcpServers` ...), and writes them as they are. Other
+targets skip agents with a note. A plugin's `agents/` is not read.
+
+Apply is additive and undo removes only the files kitbag wrote. From a git source, an agent with
+`hooks`, `allowed-tools`, `mcp-servers` or `mcpServers` (servers it starts itself), a
+`permissionMode` that acts without asking (`acceptEdits`, `auto`, `dontAsk`,
+`bypassPermissions`) or a shell snippet is skipped unless you pass `--trust-source`. A plain
+`tools` list only narrows what an agent may use, so it doesn't count. The plan warns about
+such agents in a local profile.
 
 ### Plugins: `rules/` at the root, no `kitbag.toml`
 
@@ -377,7 +402,7 @@ root `plugin.json`, if one is there; otherwise it is the directory's name (for a
 sub-directory's or the repository's) as a slug, like `My Plugin` -> `my-plugin`. A plugin has
 no instructions, MCP servers or settings (an `instructions.md` in it is not read, with a
 warning); `commands/` and `skills/` are read as in a profile, and `agents/` is not read,
-since a plugin's agents are Claude Code subagents.
+since a plugin's agents are Claude Code subagents (plugins are not carried yet).
 A plugin from a git URL is a git source, with the same rules as a git profile. `sync --from`
 doesn't work on a plugin, since that writes the edits into a profile. `kitbag undo` takes the
 plugin's rules out again (its own rule files and managed block, nothing you wrote), even
@@ -945,8 +970,7 @@ Good next candidates: Windsurf, Zed.
   `.agent.md` wins over a `.md`, and an agent over a chat mode. Agents VS Code keeps in its
   own profile storage aren't read. Copilot's own MCP and folder trust prompts are left alone.
 - Apply is additive and doesn't delete entries that were removed from the profile (see above).
-- **Not carried yet:** Claude Code subagents (`agents/`), output styles (`output-styles/`),
-  plugins and hooks. Capture lists what it found of these and leaves them out. It also drops
+- **Not carried yet:** output styles (`output-styles/`), plugins and hooks. Capture lists what it found of these and leaves them out. It also drops
   `outputStyle` when it names a custom style (built-ins such as `Explanatory` are kept),
   since the style file wouldn't be in the profile.
 - **Encodings.** Capture reads UTF-8 (with or without a byte-order mark) and UTF-16 with a

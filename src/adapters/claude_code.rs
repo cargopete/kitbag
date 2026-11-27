@@ -6,24 +6,30 @@
 //! * Instructions: `~/.claude/CLAUDE.md` / `./CLAUDE.md` (or `./.claude/CLAUDE.md`).
 //! * Rules: `.claude/rules/*.md` with `paths:` frontmatter for file scoping.
 //! * Commands: `.claude/commands/*.md`. Skills: `.claude/skills/<name>/SKILL.md`.
+//! * Subagents: `~/.claude/agents/*.md` and `.claude/agents/*.md` (scanned
+//!   recursively), markdown with `name` and `description` frontmatter, the body
+//!   being the system prompt. Frontmatter keys other than `description` are kept
+//!   as they are in the profile's agent.
+//!   Docs: <https://code.claude.com/docs/en/sub-agents>.
 //! * Settings: `.claude/settings.json` (allow-listed keys only).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde_json::{Map, Value, json};
 
 use super::common::{
-    MdKind, capture_instructions, capture_markdown_dir, capture_skills_dir, import_server,
-    keep_shared_servers, merge_json_servers, merge_json_settings, pick_settings, render_server,
-    safe_settings, server_entries, server_from_json, servers_for, write_instructions, write_skill,
+    MdKind, add_agent, capture_instructions, capture_markdown_dir, capture_skills_dir, claim_name,
+    import_server, keep_shared_servers, merge_json_servers, merge_json_settings, name_from_rel,
+    pick_settings, read_text_item, render_server, safe_settings, server_entries, server_from_json,
+    servers_for, write_agent, write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
 use crate::frontmatter::{self, opt};
-use crate::model::{McpServer, Profile, Rule, RuleMode, Transport};
-use crate::plan_fs::{read_text_opt, walk_files};
-use crate::profile_io::command_to_markdown;
+use crate::model::{Agent, McpServer, Profile, Rule, RuleMode, Transport, is_valid_name};
+use crate::plan_fs::{join_rel, read_text_opt, walk_files};
+use crate::profile_io::{agent_from_markdown, command_to_markdown};
 use crate::secrets::RefStyle;
 
 pub(crate) const ID: &str = "claude-code";
@@ -38,6 +44,7 @@ struct Paths {
     rules: PathBuf,
     commands: PathBuf,
     skills: PathBuf,
+    agents: PathBuf,
     settings: PathBuf,
 }
 
@@ -63,6 +70,7 @@ fn paths(env: &Env) -> Paths {
                 rules: d.join("rules"),
                 commands: d.join("commands"),
                 skills: d.join("skills"),
+                agents: d.join("agents"),
                 settings: d.join("settings.json"),
             }
         }
@@ -80,6 +88,7 @@ fn paths(env: &Env) -> Paths {
                 rules: p.join(".claude").join("rules"),
                 commands: p.join(".claude").join("commands"),
                 skills: p.join(".claude").join("skills"),
+                agents: p.join(".claude").join("agents"),
                 settings: p.join(".claude").join("settings.json"),
             }
         }
@@ -96,6 +105,143 @@ pub fn claude_rule(r: &Rule) -> String {
         &[("description", opt(&r.description)), ("paths", paths)],
         &r.body,
     )
+}
+
+/// Frontmatter keys the Claude Code subagent docs list. Any other key in an
+/// agent is kept and written as it is, with a note, since Claude Code ignores
+/// unrecognised fields.
+const AGENT_KEYS: &[&str] = &[
+    "name",
+    "description",
+    "tools",
+    "disallowedTools",
+    "model",
+    "permissionMode",
+    "maxTurns",
+    "autoCompactWindow",
+    "skills",
+    "mcpServers",
+    "hooks",
+    "memory",
+    "background",
+    "omitClaudeMd",
+    "effort",
+    "isolation",
+    "color",
+    "initialPrompt",
+    "experimental",
+];
+
+/// Subagent keys with no counterpart in Copilot's custom agent format that
+/// kitbag knows of; apply to Copilot says so.
+pub(crate) const CLAUDE_ONLY_AGENT_KEYS: &[&str] = &[
+    "disallowedTools",
+    "permissionMode",
+    "maxTurns",
+    "autoCompactWindow",
+    "mcpServers",
+    "memory",
+    "background",
+    "omitClaudeMd",
+    "isolation",
+    "initialPrompt",
+    "experimental",
+];
+
+/// A subagent as a Claude Code file: `name` (required by Claude Code; the
+/// profile's agent name unless the agent carries one) and `description`, then
+/// the other keys as they were.
+pub fn claude_agent(a: &Agent) -> String {
+    let name = a
+        .extra
+        .get("name")
+        .cloned()
+        .unwrap_or_else(|| json!(a.name));
+    let mut entries: Vec<(&str, Value)> =
+        vec![("name", name), ("description", opt(&a.description))];
+    entries.extend(
+        a.extra
+            .iter()
+            .filter(|(k, _)| k.as_str() != "name")
+            .map(|(k, v)| (k.as_str(), v.clone())),
+    );
+    frontmatter::render(&entries, &a.body)
+}
+
+/// Capture `<dir>/**/*.md` as subagents. The file stem is the agent's name
+/// (Claude Code's own identity is the `name` key, which is kept with the
+/// other frontmatter), and two files that flatten to the same name are an
+/// error, as for commands and rules.
+fn capture_agents(cap: &mut Captured, dir: &Path) -> Result<()> {
+    if cap.escapes(dir, ID) {
+        return Ok(());
+    }
+    let mut seen = std::collections::BTreeMap::new();
+    for rel in walk_files(dir, 500)? {
+        if !rel.ends_with(".md") {
+            continue;
+        }
+        let path = join_rel(dir, &rel);
+        if rel
+            .rsplit('/')
+            .next()
+            .is_some_and(|f| f.eq_ignore_ascii_case("readme.md"))
+        {
+            cap.warn(
+                ID,
+                format!("skipped {}: a README, not a subagent", path.display()),
+            );
+            continue;
+        }
+        let name = name_from_rel(&rel, ".md");
+        claim_name(&mut seen, dir, &rel, &name)?;
+        if !is_valid_name(&name) {
+            cap.warn(
+                ID,
+                format!("skipped {}: unsupported file name", path.display()),
+            );
+            continue;
+        }
+        let Some(text) = read_text_item(cap, &path, ID) else {
+            continue;
+        };
+        if add_agent(cap, agent_from_markdown(&name, &text), ID) {
+            cap.sources.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// One subagent as `<dir>/<name>.md`.
+fn apply_agent(work: &mut Work, dir: &Path, a: &Agent, opts: &ApplyOptions) -> Result<()> {
+    if a.description.is_none() {
+        work.info(
+            ID,
+            format!(
+                "agent '{}' has no description; Claude Code requires one, since it decides from it when to use the agent",
+                a.name
+            ),
+        );
+    }
+    let other: Vec<&str> = a
+        .extra
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !AGENT_KEYS.contains(k))
+        .collect();
+    if !other.is_empty() {
+        work.info(
+            ID,
+            format!(
+                "agent '{}': {} {} not documented for Claude Code subagents; written as they are, Claude Code ignores unrecognised fields",
+                a.name,
+                other.join(", "),
+                if other.len() == 1 { "is" } else { "are" }
+            ),
+        );
+    }
+    let path = dir.join(format!("{}.md", a.name));
+    write_agent(work, &path, claude_agent(a).as_bytes(), opts, ID, &a.name)
 }
 
 pub(crate) fn server_json(s: &McpServer) -> Value {
@@ -193,13 +339,6 @@ fn note_not_carried(cap: &mut Captured, env: &Env) {
     let plural =
         |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
     let mut parts = Vec::new();
-    let agents = count_md("agents");
-    if agents > 0 {
-        parts.push(format!(
-            "{} (agents/)",
-            plural(agents, "subagent", "subagents")
-        ));
-    }
     let styles = count_md("output-styles");
     if styles > 0 {
         parts.push(format!(
@@ -316,17 +455,7 @@ impl Adapter for ClaudeCode {
         &[Scope::User, Scope::Project]
     }
     fn support(&self, _scope: Scope) -> [(Feature, Support); 7] {
-        // Claude Code subagents are a different format; not carried yet.
-        Feature::ALL.map(|f| {
-            (
-                f,
-                if f == Feature::Agents {
-                    Support::None
-                } else {
-                    Support::Native
-                },
-            )
-        })
+        Feature::ALL.map(|f| (f, Support::Native))
     }
 
     fn locations(&self, env: &Env) -> Vec<(&'static str, PathBuf)> {
@@ -337,6 +466,7 @@ impl Adapter for ClaudeCode {
             ("rules", p.rules),
             ("commands", p.commands),
             ("skills", p.skills),
+            ("agents", p.agents),
             ("settings", p.settings),
         ]
     }
@@ -392,6 +522,7 @@ impl Adapter for ClaudeCode {
         capture_markdown_dir(&mut cap, &p.rules, ".md", MdKind::Rule, ID)?;
         capture_markdown_dir(&mut cap, &p.commands, ".md", MdKind::Command, ID)?;
         capture_skills_dir(&mut cap, &p.skills, ID)?;
+        capture_agents(&mut cap, &p.agents)?;
 
         if let Some(text) = cap.read_config(&p.settings, ID)? {
             cap.sources.push(p.settings.clone());
@@ -480,6 +611,9 @@ impl Adapter for ClaudeCode {
         for s in &profile.skills {
             write_skill(work, &p.skills.join(&s.name), s, opts, ID)?;
         }
+        for a in &profile.agents {
+            apply_agent(work, &p.agents, a, opts)?;
+        }
 
         let mut settings = safe_settings(profile, ID, work);
         drop_redacted_rules(&mut settings, work);
@@ -490,5 +624,27 @@ impl Adapter for ClaudeCode {
         }
         merge_json_settings(work, &p.settings, &settings, opts, ID)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profile_io::agent_from_markdown;
+
+    #[test]
+    fn a_subagent_file_keeps_every_documented_key() {
+        let text = "---\nname: reviewer\ndescription: Reviews\ntools: Read, Grep\nmodel: inherit\nmcpServers:\n  - github\n---\n\nBody.\n";
+        let a = agent_from_markdown("rev", text);
+        assert_eq!(a.extra["name"], "reviewer");
+        let out = claude_agent(&a);
+        assert_eq!(agent_from_markdown("rev", &out), a);
+        assert!(out.starts_with("---\nname: reviewer\ndescription: Reviews\n"));
+    }
+
+    #[test]
+    fn name_defaults_to_the_agent_name() {
+        let a = agent_from_markdown("helper", "---\ndescription: Helps\n---\nGo.\n");
+        assert!(claude_agent(&a).starts_with("---\nname: helper\ndescription: Helps\n"));
     }
 }

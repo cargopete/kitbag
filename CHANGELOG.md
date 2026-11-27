@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The `claude-code` target carries Claude Code subagents, through the profile's existing `agents/` directory. Capture reads `*.md` files in `~/.claude/agents/` (or `$CLAUDE_CONFIG_DIR/agents/`) and `.claude/agents/`, sub-folders included (flattened to one name as for commands; a clash is an error, and a `README.md` is skipped with a note), and keeps `description` and every other frontmatter key (`name`, `tools`, `disallowedTools`, `model`, `permissionMode`, `skills`, `mcpServers`, `hooks` ...) as it is. Apply writes `<name>.md` into those folders, with a `name` added when the agent has none (Claude Code requires it), so an agent captured from Copilot also works; a second apply is up to date, apply is additive and undo removes only the files kitbag wrote. Keys and values are not translated between tools: apply notes the keys Claude Code's docs don't list and, when writing to Copilot, the Claude Code keys Copilot has no counterpart for. `capture` no longer lists subagents as not carried; output styles and plugins still are. A plugin's `agents/` is still not read (#14).
+- Agents with a `permissionMode` that never asks (`acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`) or an `mcpServers` key are warned about in the plan for a local profile and, like agents with `hooks`, `allowed-tools`, `mcp-servers` or a shell snippet, skipped from a git source unless you pass `--trust-source`. A `tools` list alone is not held back (#14).
+
 ## [0.1.7] - 2026-11-27
 
 ### Added
