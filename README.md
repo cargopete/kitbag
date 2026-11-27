@@ -10,7 +10,7 @@ from the AI coding tools you already use. It stores them as a small, git-friendl
 redacted and applies that profile to any other tool in one step. Claude Code, Cursor,
 OpenAI Codex CLI, Gemini CLI, Claude Desktop, Google Antigravity, opencode (the last two
 for MCP servers and instructions), GitHub Copilot (MCP servers, instructions, rules, prompt files and skills)
-xAI's Grok Build CLI, Windsurf, Zed, Hermes Agent, Amp, Cline, Roo Code and Continue (the last seven for MCP servers and instructions; Hermes also for shell hooks, Continue also for project rules and, at user scope, commands) are supported, at user and
+xAI's Grok Build CLI, Windsurf, Zed, Hermes Agent, Amp, Cline, Roo Code and Continue (the last seven for MCP servers and instructions; Hermes also for shell hooks, Amp also for skills, Continue also for project rules and, at user scope, commands) are supported, at user and
 project scope.
 
 > [!IMPORTANT]
@@ -102,7 +102,7 @@ preview with `kitbag diff github:cargopete/dotagents --to all`.
 | `windsurf`       | Windsurf          | user, project | user | ✓           | -          | -            | -      | -      | -        |
 | `zed`            | Zed               | user, project | ✓   | ✓            | -          | -            | -      | -      | -        |
 | `hermes`         | Hermes Agent      | user, project | user | ✓           | -          | -            | -      | -      | -        |
-| `amp`            | Amp               | user, project | ✓   | ✓            | -          | -            | -      | -      | -        |
+| `amp`            | Amp               | user, project | ✓   | ✓            | -          | as skills    | ✓      | -      | -        |
 | `cline`          | Cline             | user, project | user | ✓           | folded     | -            | -      | -      | -        |
 | `roo`            | Roo Code (alias: `roo-code`) | user, project | ✓ | ✓    | folded     | -            | -      | -      | -        |
 | `continue`       | Continue          | user, project | ✓   | ✓            | project    | user         | -      | -      | -        |
@@ -136,7 +136,7 @@ Where things go:
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` (`mcpServers`), `~/.codeium/windsurf/memories/global_rules.md` | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode and Grok Build); capture also reads the legacy `.windsurfrules`; Windsurf's docs describe no project MCP file, so MCP servers are not written at project scope |
 | Zed | `settings.json` in `~/.config/zed` (macOS), `$XDG_CONFIG_HOME/zed` or `~/.config/zed` (Linux), `%APPDATA%\Zed` (Windows) (`context_servers`), and `AGENTS.md` next to it (Zed's personal instructions) | `.zed/settings.json` (`context_servers`; Zed starts these only in a trusted worktree); instructions go to the first of `.rules`, `.cursorrules`, `.windsurfrules`, `.clinerules`, `.github/copilot-instructions.md`, `AGENT.md` and `AGENTS.md` that exists, since Zed reads only that one, and to `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build and Windsurf) when none does |
 | Hermes Agent | `$HERMES_HOME/config.yaml` (`mcp_servers`, default `~/.hermes`), `$HERMES_HOME/SOUL.md` (Hermes's identity file, the only global file it reads for instructions; capture reads only a kitbag-managed block in it) | `.hermes.md` or `HERMES.md` when the project has one (Hermes loads it before `AGENTS.md`), otherwise `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf and Grok Build); Hermes documents no project MCP file, so MCP servers are not written at project scope |
-| Amp | `~/.config/amp/settings.json` or `settings.jsonc` (`amp.mcpServers`; `%USERPROFILE%\.config\amp` on Windows), `~/.config/amp/AGENTS.md` | `.amp/settings.json` or `settings.jsonc` (`amp.mcpServers`; Amp asks you to approve these servers, `amp mcp approve`), `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf, Grok Build and Hermes), or `AGENT.md` / `CLAUDE.md` when that is the file Amp reads |
+| Amp | `~/.config/amp/settings.json` or `settings.jsonc` (`amp.mcpServers`; `%USERPROFILE%\.config\amp` on Windows), `~/.config/amp/AGENTS.md`, `~/.config/agents/skills/<name>/` | `.amp/settings.json` or `settings.jsonc` (`amp.mcpServers`; Amp asks you to approve these servers, `amp mcp approve`), `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf, Grok Build and Hermes), or `AGENT.md` / `CLAUDE.md` when that is the file Amp reads, `.agents/skills/<name>/` |
 | Cline | `~/.cline/data/settings/cline_mcp_settings.json` (`mcpServers`; `CLINE_MCP_SETTINGS_PATH` names the file, `CLINE_DATA_DIR` replaces `~/.cline/data`, `CLINE_DIR` replaces `~/.cline`), `~/.cline/rules/kitbag.md` (a managed block in a file of its own; Cline reads every file in that directory) | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build, Windsurf and Zed); Cline's docs describe no project MCP file, so MCP servers are not written at project scope |
 | Roo Code | `mcp_settings.json` in `<editor user data>/User/globalStorage/rooveterinaryinc.roo-cline/settings/` (`mcpServers`; the editor is VS Code, else VS Code Insiders, VSCodium or Cursor, whichever has the extension's folder: `~/.config/Code` or `$XDG_CONFIG_HOME/Code` on Linux, `~/Library/Application Support/Code` on macOS, `%APPDATA%\Code` on Windows), `~/.roo/rules/kitbag.md` (a managed block in a file of its own; Roo reads every file in that directory) | `.roo/mcp.json` (`mcpServers`; wins over the user file for a server of the same name), `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build, Windsurf and Zed) |
 | Continue | `~/.continue/config.yaml` (`%USERPROFILE%\.continue\config.yaml` on Windows): `mcpServers`, for instructions a `kitbag-instructions` entry of `rules`, and for commands the `prompts` list | `.continue/mcpServers/*.yaml` (a server already defined in one of those files is edited there, new ones go to `kitbag.yaml`; JSON files there are read, not written), `.continue/rules/<name>.md`, and the instructions in `.continue/rules/kitbag-instructions.md`; `AGENTS.md` is not used, since Continue's docs don't mention it |
@@ -1243,12 +1243,35 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   written (Amp documents no flag), and an SSE server is written as a plain `url` with a warning,
   since Amp has no transport key. Servers defined on ampcode.com (`amp mcp remote`), servers
   bundled in a skill's `mcp.json`, and `oauth` / `includeTools` on an entry are not captured, and
-  capture says so; skills, permissions and other settings are not carried yet. Only the settings
+  capture says so; permissions, hooks and other settings are not carried. Only the settings
   file at the project root is used; Amp also searches parent directories. Instructions go to
   `~/.config/amp/AGENTS.md` (Amp also reads `~/.config/AGENTS.md`, which kitbag leaves alone and
   names), and in a project to the file Amp reads: `AGENTS.md`, else `AGENT.md`, else `CLAUDE.md`
   (so no `AGENTS.md` is created that would hide them from Amp), as a managed block shared with
-  the other tools using that file.
+  the other tools using that file. Amp has no rules directory (it uses `@`-mentions in `AGENTS.md`
+  and files with `globs` frontmatter), so rules are not written for it.
+  **Skills** are `<name>/SKILL.md` folders with their bundled files. kitbag writes them to
+  `~/.config/agents/skills/<name>/` (where `amp skill add --global` installs; under `--home`
+  like the rest of `~/.config/amp`) and, in a project, `.agents/skills/<name>/`, and never to the
+  `.claude/skills` folders Amp also reads, which are Claude Code's. Capture reads, in Amp's order
+  (the first skill of a name wins and the plan names the one it skipped), `~/.config/agents/skills`,
+  `~/.agents/skills`, `~/.config/amp/skills` and `~/.claude/skills` for the user, and
+  `.agents/skills` and `.claude/skills` in the project (not parent directories), leaving out the
+  Claude-compatible folders when `amp.skills.disableClaudeCodeSkills` is set and the first two
+  when `amp.skills.disableGlobalAgentsSkills` is. Only skills directly under those folders are
+  read; `amp.skills.path` folders, `~/.claude/plugins/cache` and skill repositories that are not
+  plain folders are not. Amp reads user skills before a project's, so a user skill of the same
+  name hides a project one, and the plan says so. A skill's own MCP servers (`mcp.json` next to
+  `SKILL.md`, or an `mcpServers` key in its frontmatter) are not carried: Amp starts them when it
+  finds the skill and its docs describe no approval for them, so capture leaves `mcp.json` out,
+  apply writes neither it nor the `mcpServers` key, and both warn; put the servers in the
+  profile's `mcp_servers` instead. **Commands:** Amp removed custom commands in favour of skills
+  ([announcement](https://ampcode.com/news/slashing-custom-commands)), so kitbag follows its
+  migration and writes a profile's commands as skills (`code-review.md` becomes
+  `code-review/SKILL.md` with `name` and `description`), never into a commands folder. A command's
+  argument hint, other frontmatter and `$ARGUMENTS` / `$1` substitution have no counterpart and
+  are listed in the plan; a command that shares a name with a skill is skipped with a warning.
+  Capture brings such a skill back as a skill, not a command.
 - **Cline** keeps MCP servers under `mcpServers` in `cline_mcp_settings.json`, in
   `~/.cline/data/settings/` (the CLI, the IDE extensions and the SDK share it; `CLINE_MCP_SETTINGS_PATH`,
   `CLINE_DATA_DIR` and `CLINE_DIR` move it, in that order of precedence). The older location in
