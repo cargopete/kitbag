@@ -390,7 +390,7 @@ impl Adapter for GrokBuild {
             cap.info(
                 ID,
                 format!(
-                    "{} (Grok Build agent definitions) not captured; kitbag doesn't carry them yet",
+                    "{} (Grok Build agent definitions) not captured; docs.x.ai documents no file format for them",
                     agents.display()
                 ),
             );
@@ -592,7 +592,7 @@ impl Adapter for GrokBuild {
             work.info(
                 ID,
                 format!(
-                    "{} custom agent(s) not written: kitbag doesn't carry Grok Build agent definitions yet",
+                    "{} custom agent(s) not written: docs.x.ai names `.grok/agents/` but documents no agent file format",
                     profile.agents.len()
                 ),
             );

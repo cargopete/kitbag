@@ -496,6 +496,24 @@ doesn't know may make the subagent hang, so the plan repeats that whenever `tool
 Cursor also reads `~/.claude/agents/` and `.claude/agents/`; with both tools targeted an agent
 lands in both places, and Cursor's own folder is the one kitbag captures for Cursor.
 
+**Targets without agent files.** Re-checked against each tool's official docs on 2026-11-27;
+none of these gets agents, and the plan says agents were skipped there:
+
+| Target | What the docs say today | Why it is skipped |
+|---|---|---|
+| `cline` | The [customization overview](https://docs.cline.bot/customization/overview) lists `agents/` ("Global agent definitions" under `~/.cline/`, "Project agent definitions" under `.cline/`) and nothing else; the [subagents](https://docs.cline.bot/features/subagents), [agent teams](https://docs.cline.bot/cli/agent-teams) and SDK agent pages describe no definition file | folder named, file format and frontmatter not documented |
+| `grok-build` | [docs.x.ai subagents](https://docs.x.ai/build/features/subagents): "Add or override types under `.grok/agents/` or `~/.grok/agents/`"; the settings reference only has `[subagents]` switches and per-type model routing | folder named, no format on docs.x.ai (the format appears only in the `xai-org/grok-build` repo guide, which kitbag does not treat as official) |
+| `amp` | [Modes & Models](https://ampcode.com/docs/models-and-subagents): "Plugins can define custom agents and custom subagents" | custom agents are plugins, not files (#12) |
+| `continue` | `.continue/agents/*.md` are the local agents `cn check --agent` and CI runs ("Local agents — markdown files in `.continue/agents/*.md`", each one a check that reviews your diff); the docs never call them subagents | check files, not subagents |
+| `roo` | [Custom modes](https://roocodeinc.github.io/Roo-Code/features/custom-modes): `custom_modes.yaml` and `.roomodes`; "agent" and "subagent" do not appear | modes are not documented as agents |
+| `zed` | [Agent profiles](https://zed.dev/docs/ai/agent-profiles): "Profiles are stored under `agent.profiles` in your settings"; subagents only get `agent.subagent_model` | no agent files; per-tool settings are #17 |
+| `windsurf` | The [Cascade docs](https://docs.devin.ai/desktop/cascade/cascade) cover workflows and skills, no agent definitions | no agent files |
+| `hermes` | [Delegation](https://hermes-agent.nousresearch.com/docs/user-guide/features/delegation): subagents are set in the `delegation:` block of `config.yaml` and per `delegate_task` call | no agent files |
+| `claude-desktop` | no official Claude Desktop page documents agent files; subagent files are documented for Claude Code (`~/.claude/agents/`) only | no agent files |
+
+Kitbag writes no Devin folders (`.devin/`, `~/.config/devin/`). If one of these tools later
+documents an agent file with a format, it can be added with the same helpers as the four above.
+
 Apply is additive and undo removes only the files kitbag wrote. From a git source, an agent with
 `hooks`, `allowed-tools`, `mcp-servers` or `mcpServers` (servers it starts itself), a
 `permissionMode` that acts without asking (`acceptEdits`, `auto`, `dontAsk`,
@@ -1329,7 +1347,8 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   same instructions would load twice, and that Codex's folded rules in a shared `AGENTS.md` sit
   next to `.grok/rules/`. Commands are Claude Code style markdown; Grok counts positional
   arguments from `$0`, so kitbag warns about commands that use `$1`-style placeholders. Grok
-  Build agent definitions (`.grok/agents/`), personas, plugins and settings are not
+  Build agent definitions (`.grok/agents/`) are not carried: docs.x.ai names the folder but gives
+  no file format (see [Agents](#agents-agentsnamemd)). Personas, plugins and settings are not
   carried yet; hooks are (see Hooks).
 - **Windsurf** (now also shipped as Devin Desktop) keeps MCP servers in
   `~/.codeium/windsurf/mcp_config.json` and global rules in
@@ -1355,7 +1374,7 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   it the legacy workspace folder, still read) with their bundled files. Windsurf's docs, now at
   docs.devin.ai, name no user-level rules or skills folder of Windsurf's own, only Devin Desktop's
   `~/.devin/rules/` and `~/.config/devin/skills/`, so rules and skills are not carried at user
-  scope. Agents (#14) are not carried yet, and hooks are not written: Windsurf's hooks page now
+  scope. Windsurf has no agent definition files (see [Agents](#agents-agentsnamemd)), and hooks are not written: Windsurf's hooks page now
   redirects to Devin Desktop's docs (see Hooks, #20).
 - **Zed** keeps MCP servers ("context servers") under `context_servers` in `settings.json`, in
   the user config directory and in a project's `.zed/settings.json`; the file may hold comments
@@ -1387,7 +1406,7 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   that declares its own MCP servers (which kitbag leaves out for Amp) would differ between the
   two. Zed's docs name no folder of its own for skills, nor a rules file or a commands folder
   (the Rules Library is the only place they live), so rules and commands are not carried; agents
-  (#14) and settings are not carried yet, and Zed's docs describe no hooks (see Hooks). The skills path for Windows is
+  (profiles live in `settings.json`, see [Agents](#agents-agentsnamemd)) and settings are not carried yet, and Zed's docs describe no hooks (see Hooks). The skills path for Windows is
   `%USERPROFILE%\.agents\skills` here, which the docs write as `~/.agents/skills/`. The config directory follows Zed's source (`XDG_CONFIG_HOME` on Linux, `~/.config/zed` on
   macOS); `FLATPAK_XDG_CONFIG_HOME` is not honoured.
 - **Hermes Agent** (Nous Research) keeps MCP servers under `mcp_servers` in
@@ -1498,7 +1517,7 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   scope), which belong to other tools and are never written, and the plan says when a skill of the
   same name is in one of them. The name in `SKILL.md` must match the directory name. Rules that an
   older kitbag folded into `kitbag.md` are removed from it on apply (user scope) and still read by
-  capture. Agents are not carried yet, and Cline's hooks are not carried (see Hooks).
+  capture. Agents are not carried (Cline's docs name the folders but no file format, see [Agents](#agents-agentsnamemd)), and Cline's hooks are not carried (see Hooks).
 - **Roo Code** (the `RooVeterinaryInc.roo-cline` extension) keeps MCP servers under `mcpServers` in
   `mcp_settings.json` in the extension's global storage, and in a project's `.roo/mcp.json`, which
   wins for a server of the same name. Roo's docs don't give the global path; the file name and the
@@ -1532,7 +1551,7 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   them. Roo needs a skill name of 1-64 lowercase letters, digits and single hyphens that matches the
   directory, so a skill with another name is skipped with a warning. Rules that an older kitbag folded
   into `kitbag.md` are removed from it on apply (user scope) and still read by capture. Custom
-  modes and settings are not carried, and Roo's docs describe no hooks (see Hooks). A project's servers run what `.roo/mcp.json` says:
+  modes (Roo's docs call them modes, not agents) and settings are not carried, and Roo's docs describe no hooks (see Hooks). A project's servers run what `.roo/mcp.json` says:
   kitbag writes no `alwaysAllow`, so Roo's own tool approval applies.
 - **Continue** (VS Code and JetBrains) keeps user settings in `~/.continue/config.yaml`
   (`%USERPROFILE%\.continue\config.yaml` on Windows). kitbag edits it in place: comments, your
