@@ -1496,23 +1496,36 @@ No further candidates are named here; open an issue for the tool you miss. Issue
 - **Codex custom prompts** are written for commands at user scope only. Codex now favours skills,
   and kitbag notes this. Codex loads `.codex/config.toml` only in trusted projects and reads the
   first 32 KiB of `AGENTS.md` by default. kitbag warns about both.
-- **Commands not carried, by design** (docs checked 2026-11-27; the Commands column says `-` or `user`
-  for these). Hermes Agent: its `quick_commands` in `config.yaml` map a slash command to a shell
-  command or another slash command and, in its docs' words, "string-only prompt shortcuts are not
-  supported"; there is no commands folder. Installed skills also appear as slash commands, and
-  kitbag already carries Hermes skills, but profile `commands/` are not rewritten as Hermes skills.
-  Claude Desktop (the chat app) has no standalone commands folder; official docs
-  (claude.com/docs/third-party/claude-desktop/extensions, checked 2026-11-27) place slash-command
-  definitions in a plugin's `commands/` directory; the only plugin folder those docs name is an
-  administrator-owned organization directory, which kitbag doesn't write (see the plugins section).
-  Copilot's user-level prompt files live in VS Code's profile storage, with no path the docs
-  name; user-level commands are written as skills instead (see the Copilot note). Codex custom
-  prompts are documented for `~/.codex/prompts/` only ("not shared through your repository"),
-  and are deprecated for skills with no migration described. Continue's prompts docs
-  (`invokable: true` in a markdown file) name no folder. Zed's docs name no commands folder
-  (a `.zed/commands/` directory is only a feature request). Hermes's docs only advise putting
-  reusable prompts in a skill, with no mapping, so kitbag doesn't convert for it. Antigravity
-  workflows: see its note.
+- **Commands not carried, by design** (official docs re-read 2026-11-27; the Commands column says `-` or `user`
+  for these, and nothing here is left to write, so the commands work in #16 is complete).
+  Hermes Agent ([skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills)):
+  "Every installed skill is automatically available as a slash command", and the only way to
+  make a skill from something you already have is `/learn`; no commands folder and no mapping
+  from commands or prompt files to skills. Its `quick_commands` in `config.yaml` map a slash
+  command to a shell command or another slash command and, in its docs' words, "string-only
+  prompt shortcuts are not supported". Skills are already carried, but profile `commands/` are
+  not rewritten as Hermes skills, since no mapping is documented (Amp, Antigravity and Copilot's
+  user scope are the ones whose docs describe one). Codex
+  ([custom prompts](https://learn.chatgpt.com/docs/custom-prompts), formerly
+  developers.openai.com/codex/custom-prompts): "Custom prompts are deprecated. Use skills for
+  reusable instructions"; prompts live in `~/.codex/prompts` (top-level Markdown files only) and
+  are "not shared through your repository", so there is no project path, and no migration to
+  skills is described; the user path stays written. Claude Desktop (the chat app) has no
+  standalone commands folder: the [Desktop app docs](https://code.claude.com/docs/en/desktop)
+  list slash commands as built-ins, skills and plugin skills only, and official docs
+  (claude.com/docs/third-party/claude-desktop/extensions) place slash-command definitions in a
+  plugin's `commands/` directory (plugins are #12; the only plugin folder those docs name is an
+  administrator-owned organization directory, which kitbag doesn't write). Copilot's user-level
+  prompt files live in VS Code's profile storage, with no path the docs name; user-level commands
+  are written as skills instead (see the Copilot note). Continue's
+  [prompts guide](https://docs.continue.dev/customize/deep-dives/prompts) and
+  [config reference](https://docs.continue.dev/reference) (`invokable: true` in a markdown
+  file, `prompts` in `config.yaml`) name no prompts folder, so only the `config.yaml` list is
+  written. Zed: its [text threads](https://zed.dev/docs/ai/text-threads) and
+  [extensions](https://zed.dev/docs/extensions/slash-commands) docs have slash commands only from
+  an extension (`extension.toml` plus code), not from a file kitbag could write, and the AI
+  overview names no commands folder (a user-defined commands directory is only a feature request,
+  zed-industries/zed discussion 57943). Antigravity workflows: see its note.
 - **Claude Desktop** has no official Linux build. The `~/.config/Claude` path matches community
   builds.
 - At project scope, Cursor, Codex and opencode all read `AGENTS.md`. When Cursor is targeted
