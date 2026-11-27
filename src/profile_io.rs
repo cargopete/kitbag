@@ -792,6 +792,9 @@ fn load_with_limit(dir: &Path, limit: u64, name_hint: Option<&str>) -> Result<Pr
     if !plugin {
         read_skill_dir(&dir.join("memory"), "", &mut p.memory, budget)?;
         issues.extend(crate::memory::issues(&p));
+        let (errors, warnings) = crate::memory::setting_issues(&p);
+        issues.extend(errors);
+        p.warnings.extend(warnings);
     }
     issues.extend(portable_name_issues(&p));
     if !issues.is_empty() {

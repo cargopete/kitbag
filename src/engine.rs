@@ -488,6 +488,16 @@ pub fn plan(
         let skipped = profile.skipped_items(a.id());
         let for_target = profile.for_target(a.id());
         let profile = for_target.as_ref().unwrap_or(profile);
+        // Notes marked for it go into the instructions of a tool with no
+        // memory store, in the file and block its adapter already writes.
+        let folded = crate::memory::fold_into(
+            profile,
+            a.id(),
+            a.supports(env.scope, Feature::Instructions) != Support::None,
+            env,
+            &mut work,
+        );
+        let profile = folded.as_ref().unwrap_or(profile);
         for s in &skipped {
             if a.supports(env.scope, item_feature(s)) != Support::None {
                 work.info(

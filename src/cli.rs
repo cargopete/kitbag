@@ -1102,6 +1102,9 @@ fn cmd_capture(
             });
         }
     }
+    if let Some(old) = old.as_ref().filter(|_| env.include_memory) {
+        crate::memory::keep_settings(&mut r.profile, old);
+    }
     if let Some(old) = old.as_ref().filter(|_| !env.include_memory) {
         let n = profile_io::keep_memory(&mut r.profile, old);
         if n > 0 {

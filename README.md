@@ -1017,8 +1017,16 @@ A note that still holds a `[REDACTED]` marker is not written (Hermes: that entry
 is additive and `kitbag undo` puts back what it changed; the notes are listed in the plan. They are
 read into later sessions as context, so a profile from a **git source** has them withheld unless you
 pass `--trust-source`. Notes apply only to their own tool, and only if that tool is among the
-targets; per-note `targets` / `disabled_on` and folding notes into an instructions file are not
-offered yet (#141). The missing portable `<project>` recipe, Codex's generated memory files,
+targets. A note can carry kitbag's own frontmatter keys (kept in the profile, never written into a
+tool's note file, and never set by capture; a re-capture keeps them): `targets` or `disabled_on`
+(not both; `only` / `except` are accepted; unknown ids are warned about and ignored) skip the note
+when its own tool is left out, and `fold_into_instructions: true` also appends the note's text
+(without its frontmatter) to the instructions kitbag already writes for a target that has no memory
+store (for instance Gemini CLI's `GEMINI.md`), in the same managed block as the profile's
+instructions, so text outside it is untouched. Targeting never copies a note into another tool's
+store (a Claude note does not go into Hermes's folder), Claude Code and Hermes are not folded into,
+Codex's generated-state notes are never folded, a note with `[REDACTED]` markers is not folded, and a
+git source's notes (folds included) still need `--trust-source`. The missing portable `<project>` recipe, Codex's generated memory files,
 and the stores below that official docs don't name are dated skips (2026-11-27). Not carried, with the reason: `CLAUDE.local.md` (documented as personal project
 *instructions*, not memory); Cursor (its Memories UI was removed in 2.1, nothing on disk); Windsurf
 (memories are workspace-bound and the docs name no folder); Gemini CLI (its auto memory page gives
