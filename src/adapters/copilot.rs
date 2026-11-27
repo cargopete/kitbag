@@ -578,7 +578,8 @@ impl Adapter for Copilot {
                     );
                     continue;
                 }
-                cap.sources.push(path);
+                cap.sources.push(path.clone());
+                cap.rule_files.push((name.clone(), path.clone()));
                 add_rule(&mut cap, rule_from_instructions(&name, &text), ID);
             }
         }

@@ -272,6 +272,10 @@ struct StatusArgs {
     /// Exit with status 1 when anything drifted
     #[arg(long)]
     exit_code: bool,
+    /// With --exit-code, also count what is only in the tool ('tool only'
+    /// rule files and text, 'removed' MCP servers, commands, skills, agents)
+    #[arg(long, requires = "exit_code")]
+    strict: bool,
     /// Machine-readable output
     #[arg(long)]
     json: bool,
@@ -285,6 +289,12 @@ struct SyncArgs {
     /// claude-desktop, antigravity, opencode, copilot)
     #[arg(long, value_name = "ID")]
     from: Option<String>,
+    /// With --from: also pull in what is only in that tool ('tool only' in
+    /// 'kitbag status'): rule files the profile doesn't have, and text outside
+    /// kitbag's block in its instructions file (added to the end of the
+    /// profile's instructions; the tool's file keeps it where it is)
+    #[arg(long, requires = "from")]
+    adopt: bool,
     /// Replace instructions edited in the tool with the profile's (backed up)
     #[arg(long)]
     overwrite: bool,
@@ -1049,7 +1059,11 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
 fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) -> Result<i32> {
     let (resolved, profile) = load_source(src, t.path.as_deref(), t.allow_insecure_source)?;
     let targets = select_targets(&t.to, &ctx.env, "to")?;
-    let (profile, plan) = plan_apply(ctx, &resolved, profile, &targets, a, &BTreeSet::new())?;
+    let (profile, mut plan) = plan_apply(ctx, &resolved, profile, &targets, a, &BTreeSet::new())?;
+    if matches!(mode, Mode::Diff { .. }) {
+        let found = tool_only_items(ctx, &profile, &plan, &targets)?;
+        plan.notes.extend(tool_only_notes(&found, &ctx.env));
+    }
     present(ctx, &resolved, &profile, &plan, mode)
 }
 
@@ -1391,6 +1405,51 @@ fn instruction_rows(ctx: &Ctx, plan: &Plan) -> Result<Vec<(StatusRow, engine::It
     Ok(rows)
 }
 
+/// What the planned targets hold that `profile` doesn't (see
+/// [`crate::sync::tool_only`]).
+fn tool_only_items(
+    ctx: &Ctx,
+    profile: &Profile,
+    plan: &Plan,
+    targets: &[&'static dyn Adapter],
+) -> Result<Vec<crate::sync::ToolOnly>> {
+    let caps: Vec<(&str, Option<adapters::Captured>)> = targets
+        .iter()
+        .filter(|a| plan.targets.iter().any(|t| t == a.id()))
+        .map(|a| {
+            let cap = (a.supports(ctx.env.scope, Feature::Rules) != adapters::Support::None)
+                .then(|| a.capture(&ctx.env).ok())
+                .flatten();
+            (a.id(), cap)
+        })
+        .collect();
+    let refs: Vec<(&str, Option<&adapters::Captured>)> =
+        caps.iter().map(|(id, c)| (*id, c.as_ref())).collect();
+    crate::sync::tool_only(&ctx.state_dir, &ctx.env, profile, plan, &refs)
+}
+
+/// One note per target naming what is only in it, for `diff`.
+fn tool_only_notes(found: &[crate::sync::ToolOnly], env: &Env) -> Vec<adapters::Note> {
+    let mut by_target: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for t in found {
+        by_target
+            .entry(t.target.as_str())
+            .or_default()
+            .push(format!("{} ({})", t.item(), tildify(&t.path, &env.home)));
+    }
+    by_target
+        .into_iter()
+        .map(|(target, items)| adapters::Note {
+            level: adapters::Level::Info,
+            target: target.to_string(),
+            message: format!(
+                "only in the tool, not in the profile: {}. 'kitbag status' lists them; 'kitbag sync PROFILE --from {target} --adopt' pulls them into the profile",
+                items.join(", ")
+            ),
+        })
+        .collect()
+}
+
 /// MCP servers, commands, skills and agents of `profile` (as loaded, before any
 /// remote restrictions) compared with each planned target: names only.
 fn inventory_rows(
@@ -1618,6 +1677,17 @@ fn cmd_status(ctx: &Ctx, src: Option<&str>, s: &StatusArgs) -> Result<i32> {
                 &BTreeSet::new(),
             )?;
             rows.extend(instruction_rows(ctx, &plan)?.into_iter().map(|(r, _)| r));
+            rows.extend(
+                tool_only_items(ctx, &profile, &plan, &targets)?
+                    .into_iter()
+                    .map(|t| StatusRow {
+                        item: t.item(),
+                        detail: Some(t.detail()),
+                        target: t.target,
+                        path: Some(t.path),
+                        state: crate::sync::State::ToolOnly,
+                    }),
+            );
             rows.extend(inventory_rows(env, &loaded, &plan, &targets));
             let has_text = profile.instructions.is_some() || !profile.rules.is_empty();
             for a in &targets {
@@ -1682,8 +1752,19 @@ fn cmd_status(ctx: &Ctx, src: Option<&str>, s: &StatusArgs) -> Result<i32> {
             }
         }
     }
-    let drift = rows.iter().any(|r| r.state.is_drift());
+    let drift = rows
+        .iter()
+        .any(|r| r.state.is_drift() || (s.strict && r.state.is_tool_only()));
     print_status(&rows, env, s.json)?;
+    if !s.json && rows.iter().any(|r| r.state == crate::sync::State::ToolOnly) {
+        println!(
+            "\n{}",
+            paint(
+                DIM,
+                "Tool only: a rule file, or text outside kitbag's block, that the profile doesn't have. 'kitbag sync PROFILE --from <target> --adopt' pulls it into the profile; '--exit-code --strict' counts it as drift."
+            )
+        );
+    }
     if !s.json
         && rows.iter().any(|r| {
             matches!(
@@ -1733,6 +1814,9 @@ fn cmd_sync(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, s: &SyncArgs) -
     let (mut profile, mut plan) = plan_apply(ctx, &resolved, loaded.clone(), &targets, a, &none)?;
     let mut profile_changes = Vec::new();
     let mut pulled_notes = Vec::new();
+    // Rule files just adopted from the tool: the profile's copy replaces them
+    // there (same rule, as kitbag writes it), so they aren't held back.
+    let mut adopted: Vec<PathBuf> = Vec::new();
     if let Some(from) = &s.from {
         let Some(source_target) = targets
             .iter()
@@ -1748,16 +1832,95 @@ fn cmd_sync(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, s: &SyncArgs) -
             .filter(|(r, _)| r.target == source_target.id() && r.state.is_conflict())
             .map(|(_, i)| i)
             .collect();
-        if edited.is_empty() {
+        let (tool_only, taken_out): (Vec<crate::sync::ToolOnly>, Vec<_>) =
+            tool_only_items(ctx, &profile, &plan, &[source_target])?
+                .into_iter()
+                .partition(|t| {
+                    !matches!(
+                        t.what,
+                        crate::sync::ToolOnlyKind::Rule {
+                            was_applied: true,
+                            ..
+                        }
+                    )
+                });
+        // A rule in a sub-directory (`team/x.md`) would be written back flat
+        // (`team-x.md`), leaving the tool with two files of the same name.
+        let rules_dir: Option<PathBuf> = source_target
+            .locations(env)
+            .into_iter()
+            .find(|(k, _)| *k == "rules")
+            .map(|(_, d)| d);
+        let (tool_only, nested): (Vec<crate::sync::ToolOnly>, Vec<_>) =
+            tool_only.into_iter().partition(|t| match &t.what {
+                crate::sync::ToolOnlyKind::Rule { .. } => {
+                    match (t.path.parent(), rules_dir.as_deref()) {
+                        (Some(parent), Some(dir)) => crate::sync::same_file(parent, dir),
+                        _ => true,
+                    }
+                }
+                crate::sync::ToolOnlyKind::Text { .. } => true,
+            });
+        if s.adopt {
+            for t in &nested {
+                pulled_notes.push(adapters::Note {
+                    level: adapters::Level::Warn,
+                    target: from.clone(),
+                    message: format!(
+                        "{} ({}) was not adopted: it is in a sub-directory, and kitbag would write it back flat next to it. Move it up into the rules directory first",
+                        t.item(),
+                        tildify(&t.path, &env.home)
+                    ),
+                });
+            }
+            for t in &taken_out {
+                pulled_notes.push(adapters::Note {
+                    level: adapters::Level::Info,
+                    target: from.clone(),
+                    message: format!(
+                        "{} ({}) was not adopted: an earlier apply wrote it from this profile, and it has been taken out of the profile since. Delete the file, or add the rule back to the profile by hand",
+                        t.item(),
+                        tildify(&t.path, &env.home)
+                    ),
+                });
+            }
+        }
+        if s.adopt {
+            adopted = tool_only.iter().map(|t| t.path.clone()).collect();
+        } else if !tool_only.is_empty() {
+            let items: Vec<String> = tool_only
+                .iter()
+                .map(|t| format!("{} ({})", t.item(), tildify(&t.path, &env.home)))
+                .collect();
             pulled_notes.push(adapters::Note {
                 level: adapters::Level::Info,
                 target: from.clone(),
-                message: "no edits to pull back: its managed instructions match the last apply"
-                    .into(),
+                message: format!(
+                    "not pulled back, as they were never in the profile: {}. Add --adopt to pull them in too",
+                    items.join(", ")
+                ),
+            });
+        }
+        let adopt: &[crate::sync::ToolOnly] = if s.adopt { &tool_only } else { &[] };
+        if edited.is_empty() && adopt.is_empty() {
+            pulled_notes.push(adapters::Note {
+                level: adapters::Level::Info,
+                target: from.clone(),
+                message: if s.adopt {
+                    "nothing to pull back: its managed instructions match the last apply, and it has nothing the profile doesn't"
+                } else {
+                    "no edits to pull back: its managed instructions match the last apply"
+                }
+                .into(),
             });
         } else {
-            let pb =
-                crate::sync::pull_back(&loaded, &resolved.dir, &edited, &slugify(&loaded.name))?;
+            let pb = crate::sync::pull_back(
+                &loaded,
+                &resolved.dir,
+                &edited,
+                adopt,
+                &slugify(&loaded.name),
+            )?;
             pulled_notes.extend(pb.notes);
             profile_changes = pb.changes;
             (profile, plan) = plan_apply(ctx, &resolved, pb.profile, &targets, a, &none)?;
@@ -1768,7 +1931,11 @@ fn cmd_sync(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, s: &SyncArgs) -
     if !s.overwrite {
         let hold: BTreeSet<(PathBuf, Option<String>)> = instruction_rows(ctx, &plan)?
             .into_iter()
-            .filter(|(r, _)| r.state.is_conflict())
+            .filter(|(r, i)| {
+                r.state.is_conflict()
+                    && !(i.block.is_none()
+                        && adopted.iter().any(|p| crate::sync::same_file(p, &i.path)))
+            })
             .map(|(_, i)| (i.path, i.block))
             .collect();
         if !hold.is_empty() {
@@ -1776,16 +1943,80 @@ fn cmd_sync(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, s: &SyncArgs) -
         }
     }
     plan.notes.extend(pulled_notes);
+    let last = crate::sync::last_applied(&ctx.state_dir)?;
     for i in &plan.held_back {
-        plan.notes.push(adapters::Note {
-            level: adapters::Level::Warn,
-            target: i.target.clone(),
-            message: format!(
+        let never_applied = !last
+            .get(&(i.target.clone(), i.path.clone(), i.block.clone()))
+            .is_some_and(|r| r.matches(env));
+        // A block's markers show kitbag wrote it, whatever the records say.
+        let message = if never_applied && i.block.is_none() && i.current.is_some() {
+            format!(
+                "{} in {} was not synced: the tool already has its own, different copy there, and kitbag has no record of writing it. Compare the two; pull the tool's copy into the profile with --from {}, or replace it with --overwrite (backed up; 'kitbag undo' restores it)",
+                held_label(&i.item),
+                tildify(&i.path, &env.home),
+                i.target
+            )
+        } else {
+            format!(
                 "{} in {} was not synced: it was edited in the tool since the last apply. Pull the edit into the profile with --from {}, or replace it with --overwrite (backed up; 'kitbag undo' restores it)",
                 held_label(&i.item),
                 tildify(&i.path, &env.home),
                 i.target
-            ),
+            )
+        };
+        plan.notes.push(adapters::Note {
+            level: adapters::Level::Warn,
+            target: i.target.clone(),
+            message,
+        });
+    }
+    // An adopted rule file is written back in kitbag's format; say what that
+    // drops (frontmatter keys kitbag doesn't carry, for one).
+    for i in plan
+        .items
+        .iter()
+        .filter(|i| i.block.is_none() && adopted.iter().any(|p| crate::sync::same_file(p, &i.path)))
+    {
+        let (Some(cur), Some(new)) = (i.current.as_deref(), i.planned.as_deref()) else {
+            continue;
+        };
+        if crate::sync::hash(cur) == crate::sync::hash(new) {
+            continue;
+        }
+        let (cur, new) = (
+            crate::frontmatter::parse(cur),
+            crate::frontmatter::parse(new),
+        );
+        let mut lost: Vec<String> = cur
+            .data
+            .keys()
+            .filter(|k| !new.data.contains_key(*k))
+            .map(|k| format!("'{k}' from the frontmatter"))
+            .collect();
+        if cur.body.trim() != new.body.trim() {
+            lost.push("its text as written (kitbag's copy differs)".to_string());
+        }
+        plan.notes.push(adapters::Note {
+            level: if lost.is_empty() {
+                adapters::Level::Info
+            } else {
+                adapters::Level::Warn
+            },
+            target: i.target.clone(),
+            message: if lost.is_empty() {
+                format!(
+                    "{} in {} is rewritten in kitbag's format (backed up; 'kitbag undo' restores it)",
+                    i.item,
+                    tildify(&i.path, &env.home)
+                )
+            } else {
+                format!(
+                    "{} in {} is rewritten in kitbag's format, which drops: {} (backed up; 'kitbag undo' restores it)",
+                    i.item,
+                    tildify(&i.path, &env.home),
+                    visible_line(&lost.join(", "))
+                )
+            },
         });
     }
     let held = !plan.held_back.is_empty();
@@ -2119,6 +2350,52 @@ fn cmd_doctor(
                     for r in policy::risky(target, &allowed) {
                         println!("  {} {}", paint(YELLOW, "risky"), visible_line(&r));
                     }
+                }
+                // Not a problem: one-off rules and notes are allowed to live
+                // in a tool, but they don't reach the other tools.
+                let found = select_targets(&t.to, env, "to").and_then(|targets| {
+                    let (profile, plan) = plan_apply(
+                        ctx,
+                        &resolved,
+                        p.clone(),
+                        &targets,
+                        &ApplyArgs::default(),
+                        &BTreeSet::new(),
+                    )?;
+                    tool_only_items(ctx, &profile, &plan, &targets)
+                });
+                match found {
+                    Ok(found) => {
+                        let mut targets: Vec<&str> = Vec::new();
+                        for f in &found {
+                            println!(
+                                "  {} {} {} {}",
+                                paint(YELLOW, "tool only"),
+                                f.target,
+                                visible_line(&f.item()),
+                                paint(DIM, tildify(&f.path, &env.home))
+                            );
+                            if !targets.contains(&f.target.as_str()) {
+                                targets.push(&f.target);
+                            }
+                        }
+                        for t in targets {
+                            println!(
+                                "      {}",
+                                paint(
+                                    DIM,
+                                    format!(
+                                        "not in the profile, so the other tools don't get {t}'s; 'kitbag sync PROFILE --from {t} --adopt' pulls them in"
+                                    )
+                                )
+                            );
+                        }
+                    }
+                    Err(e) => println!(
+                        "  {} could not check for rules and text only in a tool: {}",
+                        paint(YELLOW, "warn"),
+                        visible(&format!("{e:#}"))
+                    ),
                 }
             }
         }

@@ -388,6 +388,11 @@ pub enum State {
     /// An MCP server, command or skill in the tool but not in the profile
     /// (apply is additive, so sync leaves it; not counted as drift).
     Removed,
+    /// A rule file, or text outside kitbag's block in an instructions file,
+    /// that exists only in the tool: a one-off that never made it back to the
+    /// profile. Not counted as drift unless `status --strict`; `sync --from
+    /// <target> --adopt` pulls it into the profile.
+    ToolOnly,
 }
 
 impl State {
@@ -402,12 +407,22 @@ impl State {
             State::Added => "added",
             State::Changed => "changed",
             State::Removed => "removed",
+            State::ToolOnly => "tool only",
         }
     }
 
     /// Does this differ from the profile (or, without one, from the last apply)?
     pub fn is_drift(self) -> bool {
-        !matches!(self, State::InSync | State::Unsupported | State::Removed)
+        !matches!(
+            self,
+            State::InSync | State::Unsupported | State::Removed | State::ToolOnly
+        )
+    }
+
+    /// Is this in the tool but not in the profile (counted as drift only by
+    /// `status --strict`)?
+    pub fn is_tool_only(self) -> bool {
+        matches!(self, State::Removed | State::ToolOnly)
     }
 
     /// Would syncing this overwrite an edit made in the tool?
@@ -458,6 +473,149 @@ pub fn classify_since_apply(current: Option<&str>, applied: Option<&str>) -> Sta
     }
 }
 
+/// Something in a tool that the profile doesn't have and kitbag didn't write.
+#[derive(Debug, Clone)]
+pub struct ToolOnly {
+    pub target: String,
+    /// The rule file, or the instructions file holding the text.
+    pub path: PathBuf,
+    pub what: ToolOnlyKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum ToolOnlyKind {
+    /// A rule file of its own, as capture read it (redacted).
+    Rule {
+        rule: Rule,
+        /// An earlier apply of this profile wrote it; the rule has since been
+        /// taken out of the profile.
+        was_applied: bool,
+    },
+    /// Paragraphs outside kitbag's blocks that the profile's instructions
+    /// don't hold (as on disk, not redacted).
+    Text { paragraphs: Vec<String> },
+}
+
+impl ToolOnly {
+    /// `rule hotfix`, `unmanaged text`.
+    pub fn item(&self) -> String {
+        match &self.what {
+            ToolOnlyKind::Rule { rule, .. } => format!("rule {}", rule.name),
+            ToolOnlyKind::Text { .. } => "unmanaged text".to_string(),
+        }
+    }
+
+    pub fn detail(&self) -> String {
+        match &self.what {
+            ToolOnlyKind::Rule {
+                was_applied: true, ..
+            } => "applied from this profile before, then taken out of it; apply leaves the file"
+                .to_string(),
+            ToolOnlyKind::Rule { .. } => {
+                "rule file only in this tool, not in the profile".to_string()
+            }
+            ToolOnlyKind::Text { paragraphs } => format!(
+                "{} paragraph(s) outside kitbag's block, not in the profile's instructions",
+                paragraphs.len()
+            ),
+        }
+    }
+}
+
+/// The same file, comparing real paths where they resolve.
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    a == b
+        || match (a.canonicalize(), b.canonicalize()) {
+            (Ok(x), Ok(y)) => x == y,
+            _ => false,
+        }
+}
+
+/// What `targets` hold that `profile` doesn't, at `env`'s scope: rule files
+/// of their own that aren't the profile's (and weren't written by an apply of
+/// another profile), and, in the instructions files where `plan` manages the
+/// profile's block, paragraphs outside kitbag's blocks that the profile's
+/// instructions don't hold. `captured` is each target's capture, by id
+/// (`None` when it failed). `plan` is the plan of `profile` for `targets`.
+pub fn tool_only(
+    state_dir: &Path,
+    env: &Env,
+    profile: &Profile,
+    plan: &Plan,
+    captured: &[(&str, Option<&Captured>)],
+) -> Result<Vec<ToolOnly>> {
+    let last = last_applied(state_dir)?;
+    let block_id = crate::model::slugify(&profile.name);
+    let mut out = Vec::new();
+    for (id, cap) in captured {
+        if !plan.targets.iter().any(|t| t == id) {
+            continue;
+        }
+        if let Some(cap) = cap {
+            for (name, path) in &cap.rule_files {
+                if profile.rules.iter().any(|r| &r.name == name)
+                    || plan
+                        .items
+                        .iter()
+                        .any(|i| i.target == *id && same_file(&i.path, path))
+                {
+                    continue;
+                }
+                let Some(rule) = cap.profile.rules.iter().find(|r| &r.name == name) else {
+                    continue;
+                };
+                // Written by an apply that still stands: whose was it?
+                let record = last.values().find(|r| {
+                    r.target == *id
+                        && r.block.is_none()
+                        && r.hash.is_some()
+                        && r.matches(env)
+                        && same_file(&r.path, path)
+                });
+                let was_applied = match record {
+                    Some(r) if r.profile != profile.name => continue,
+                    Some(_) => true,
+                    None => false,
+                };
+                out.push(ToolOnly {
+                    target: id.to_string(),
+                    path: path.clone(),
+                    what: ToolOnlyKind::Rule {
+                        rule: rule.clone(),
+                        was_applied,
+                    },
+                });
+            }
+        }
+        let Some(instructions) = profile.instructions.as_deref() else {
+            continue;
+        };
+        let mut seen: Vec<&Path> = Vec::new();
+        for i in &plan.items {
+            if i.target != *id
+                || i.block.as_deref() != Some(block_id.as_str())
+                || seen.contains(&i.path.as_path())
+            {
+                continue;
+            }
+            seen.push(&i.path);
+            let Some(text) = item_text(read_opt(&i.path)?.as_deref(), None) else {
+                continue;
+            };
+            let paragraphs =
+                block::paragraphs_missing_from(&block::split(&text).outside, instructions);
+            if !paragraphs.is_empty() {
+                out.push(ToolOnly {
+                    target: id.to_string(),
+                    path: i.path.clone(),
+                    what: ToolOnlyKind::Text { paragraphs },
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// A profile updated with edits pulled back from a tool.
 #[derive(Debug)]
 pub struct PullBack {
@@ -469,12 +627,17 @@ pub struct PullBack {
 
 /// Pull the edited `items` of one target back into `profile` (in `dir`):
 /// its managed instructions block becomes `instructions.md`, folded rules
-/// and rule files become `rules/*.md`. Everything pulled back is redacted the
-/// way `capture` does it, and the result must pass the same leak scan.
+/// and rule files become `rules/*.md`. The `adopt`ed tool-only rules become
+/// `rules/*.md` too, and tool-only text is added to the end of
+/// `instructions.md` (the tool's file keeps it where it is: apply doesn't
+/// repeat in a block what the file already holds). Everything pulled back is
+/// redacted the way `capture` does it, and the result must pass the same leak
+/// scan.
 pub fn pull_back(
     profile: &Profile,
     dir: &Path,
     items: &[&Item],
+    adopt: &[ToolOnly],
     block_id: &str,
 ) -> Result<PullBack> {
     let mut next = profile.clone();
@@ -494,8 +657,17 @@ pub fn pull_back(
         };
         match i.block.as_deref() {
             Some(b) if b == block_id => {
+                // Apply leaves out of the block what the file already has
+                // outside it; keep those paragraphs in the profile.
+                let outside = item_text(read_opt(&i.path)?.as_deref(), None)
+                    .map(|t| block::split(&t).outside)
+                    .unwrap_or_default();
+                let text = match profile.instructions.as_deref() {
+                    Some(old) => block::with_omitted_paragraphs(text, old, &outside),
+                    None => text.to_string(),
+                };
                 cap.profile.instructions = None;
-                add_instructions(&mut cap, &i.target, text, &i.path);
+                add_instructions(&mut cap, &i.target, &text, &i.path);
                 next.instructions = cap.profile.instructions.take();
             }
             Some(b) if b == rules_block => {
@@ -540,6 +712,61 @@ pub fn pull_back(
                         None => next.rules.push(r),
                     }
                 }
+            }
+        }
+    }
+    for t in adopt {
+        match &t.what {
+            ToolOnlyKind::Rule { rule, .. } => {
+                // Applying a redacted rule back would replace the tool's file,
+                // secret and all, with the redacted copy.
+                if crate::secrets::has_redaction_marker(&rule.body)
+                    || rule
+                        .description
+                        .as_deref()
+                        .is_some_and(crate::secrets::has_redaction_marker)
+                {
+                    cap.warn(
+                        &t.target,
+                        format!(
+                            "rule '{}' ({}) looks like it holds a secret, so it was not adopted; move it into the profile by hand",
+                            rule.name,
+                            t.path.display()
+                        ),
+                    );
+                    continue;
+                }
+                if next.rules.iter().any(|r| r.name == rule.name) {
+                    continue;
+                }
+                next.rules.push(rule.clone());
+            }
+            ToolOnlyKind::Text { paragraphs } => {
+                // As for rules: other tools would get the redacted copy.
+                let (clean, secret): (Vec<&String>, Vec<&String>) = paragraphs
+                    .iter()
+                    .partition(|p| crate::secrets::redact_text(p).1.is_empty());
+                if !secret.is_empty() {
+                    cap.warn(
+                        &t.target,
+                        format!(
+                            "{} paragraph(s) of {} look like they hold a secret, so they were not adopted; move them into the profile by hand",
+                            secret.len(),
+                            t.path.display()
+                        ),
+                    );
+                }
+                if clean.is_empty() {
+                    continue;
+                }
+                let text = clean
+                    .iter()
+                    .map(|p| p.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                cap.profile.instructions = next.instructions.take();
+                add_instructions(&mut cap, &t.target, &text, &t.path);
+                next.instructions = cap.profile.instructions.take();
             }
         }
     }
