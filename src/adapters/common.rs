@@ -454,7 +454,7 @@ pub fn write_instructions(
 }
 
 /// Is this managed item one to leave as it is in the tool ([`ApplyOptions::hold`])?
-fn held(work: &Work, opts: &ApplyOptions, path: &Path, block: Option<&str>) -> bool {
+pub fn held(work: &Work, opts: &ApplyOptions, path: &Path, block: Option<&str>) -> bool {
     if opts.hold.is_empty() {
         return false;
     }

@@ -1,5 +1,5 @@
 //! Continue (the open-source coding assistant for VS Code and JetBrains): MCP
-//! servers, instructions and (in a project) rules.
+//! servers, instructions, commands (as prompts) and (in a project) rules.
 //!
 //! * MCP, user scope: `mcpServers` in `~/.continue/config.yaml` (Windows:
 //!   `%USERPROFILE%\.continue\config.yaml`), a list of `- name: ...` entries.
@@ -30,6 +30,13 @@
 //!   `description`, `globs` and `alwaysApply` frontmatter. Continue's docs
 //!   don't describe a rules folder in `~/.continue`, so at user scope rules
 //!   are not written.
+//! * Commands, user scope: the `prompts` list of `config.yaml`, entries of
+//!   `name`, `description` and `prompt` (the inline form the reference shows;
+//!   `invokable` is only documented for prompt files). Continue's docs name
+//!   no prompts folder and no argument placeholder, so nothing is written at
+//!   project scope and the body is written as it is. `uses:` entries are left.
+//! * Drift: the `kitbag-instructions` entry is tracked as an item of
+//!   `config.yaml` (see [`crate::sync::yaml_entry_block`]), so `status` sees it.
 //! * `config.json` (deprecated) is not read or written: Continue loads
 //!   `config.yaml` instead of it when both exist, so kitbag never creates a
 //!   `config.yaml` next to a `config.json` that has no `config.yaml`.
@@ -47,16 +54,17 @@ use anyhow::Result;
 use serde_json::{Map, Value, json};
 
 use super::common::{
-    Resolver, add_instructions, add_rule, capture_instructions, import_server, merge_server_def,
-    note_dropped_server_keys, read_text_item, record_server_write, remove_skipped_server,
-    server_from_json, servers_for, skipped_servers, str_of, write_instructions, write_rule,
+    Resolver, add_command, add_instructions, add_rule, capture_instructions, held, import_server,
+    merge_server_def, note_dropped_server_keys, read_text_item, record_server_write,
+    remove_skipped_server, server_from_json, servers_for, skipped_servers, str_of,
+    write_instructions, write_rule,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::block;
 use crate::edit::json::parse_value;
 use crate::edit::yaml::{YamlDoc, parse_map};
 use crate::frontmatter;
-use crate::model::{McpServer, Profile, Rule, RuleMode, Transport, is_valid_name};
+use crate::model::{Command, McpServer, Profile, Rule, RuleMode, Transport, is_valid_name};
 use crate::plan_fs::{join_rel, walk_files};
 use crate::profile_io::rule_from_markdown;
 use crate::secrets::{
@@ -66,6 +74,7 @@ use crate::secrets::{
 const ID: &str = "continue";
 const SECTION: &str = "mcpServers";
 const RULES: &str = "rules";
+const PROMPTS: &str = "prompts";
 /// Name of the `rules` entry of `config.yaml` kitbag writes instructions to.
 const INSTRUCTIONS_ENTRY: &str = "kitbag-instructions";
 /// File of the project's `.continue/rules/` the instructions block goes to.
@@ -197,15 +206,7 @@ fn is_yaml(rel: &str) -> bool {
 
 /// The other things Continue keeps under a project's `.continue/` or in
 /// `config.yaml` that kitbag doesn't carry.
-const OTHER_KEYS: &[&str] = &[
-    "models",
-    "context",
-    "prompts",
-    "docs",
-    "data",
-    "assistants",
-    "blocks",
-];
+const OTHER_KEYS: &[&str] = &["models", "context", "docs", "data", "assistants", "blocks"];
 
 impl Adapter for ContinueIde {
     fn id(&self) -> &'static str {
@@ -225,6 +226,7 @@ impl Adapter for ContinueIde {
             let s = match f {
                 Feature::Mcp | Feature::Instructions => Support::Native,
                 Feature::Rules if scope == Scope::Project => Support::Native,
+                Feature::Commands if scope == Scope::User => Support::Native,
                 _ => Support::None,
             };
             (f, s)
@@ -288,8 +290,13 @@ impl Adapter for ContinueIde {
                 cap.info(
                     ID,
                     format!(
-                        "Continue {} in .continue/ not captured: kitbag doesn't carry them yet",
-                        other.join(", ")
+                        "Continue {} in .continue/ not captured: kitbag doesn't carry them yet{}",
+                        other.join(", "),
+                        if other.iter().any(|n| n == "prompts") {
+                            " (Continue's docs name no prompts folder; prompts are read from config.yaml)"
+                        } else {
+                            ""
+                        }
                     ),
                 );
             }
@@ -345,6 +352,12 @@ impl Adapter for ContinueIde {
             work.info(
                 ID,
                 "Continue's docs describe rule files only in a project's .continue/rules; apply with --project to write the profile's rules (instructions are written to config.yaml)",
+            );
+        }
+        if env.scope == Scope::Project && !profile.commands.is_empty() {
+            work.info(
+                ID,
+                "Continue's docs name no prompts folder, so the profile's commands are written only as `prompts` in ~/.continue/config.yaml (apply without --project)",
             );
         }
         if profile.settings.contains_key(ID) {
@@ -432,6 +445,7 @@ fn capture_config(cap: &mut Captured, env: &Env, config: &Path) -> Result<()> {
             ),
         );
     }
+    capture_prompts(cap, config, doc.get(PROMPTS));
     let present: Vec<&str> = OTHER_KEYS
         .iter()
         .copied()
@@ -447,6 +461,106 @@ fn capture_config(cap: &mut Captured, env: &Env, config: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Capture the `prompts` of `config.yaml` that are written out in it (`name`,
+/// `description`, `prompt`) as commands. Hub blocks and files (`uses:`) are
+/// counted and left.
+fn capture_prompts(cap: &mut Captured, config: &Path, list: Option<&Value>) {
+    let items = match list {
+        None | Some(Value::Null) => return,
+        Some(Value::Array(a)) => a,
+        Some(_) => {
+            cap.warn(
+                ID,
+                format!(
+                    "ignored '{PROMPTS}' in {}: expected a list",
+                    config.display()
+                ),
+            );
+            return;
+        }
+    };
+    let mut uses = 0;
+    for item in items {
+        let Some(def) = item.as_object() else {
+            cap.warn(
+                ID,
+                format!(
+                    "skipped an entry of '{PROMPTS}' in {}: expected a mapping",
+                    config.display()
+                ),
+            );
+            continue;
+        };
+        if def.contains_key("uses") {
+            uses += 1;
+            continue;
+        }
+        let (Some(display), Some(body)) = (
+            def.get("name").and_then(Value::as_str),
+            def.get("prompt").and_then(Value::as_str),
+        ) else {
+            cap.warn(
+                ID,
+                format!(
+                    "skipped a prompt of {} with no name or no prompt text",
+                    config.display()
+                ),
+            );
+            continue;
+        };
+        let name = kitbag_name(display);
+        if !is_valid_name(&name) {
+            cap.warn(
+                ID,
+                format!("skipped prompt '{display}': its name can't be used as a command name"),
+            );
+            continue;
+        }
+        if name != display {
+            cap.info(ID, format!("prompt '{display}' is captured as '{name}'"));
+        }
+        if cap.profile.commands.iter().any(|c| c.name == name) {
+            cap.warn(
+                ID,
+                format!("skipped prompt '{display}': another prompt has the name '{name}'"),
+            );
+            continue;
+        }
+        let ignored: Vec<&str> = def
+            .keys()
+            .map(String::as_str)
+            .filter(|k| !["name", "description", "prompt", "invokable"].contains(k))
+            .collect();
+        if !ignored.is_empty() {
+            cap.info(
+                ID,
+                format!(
+                    "prompt '{display}': Continue-specific keys not captured: {}",
+                    ignored.join(", ")
+                ),
+            );
+        }
+        add_command(
+            cap,
+            Command {
+                name,
+                description: str_of(def.get("description")),
+                body: body.trim().to_string(),
+                ..Default::default()
+            },
+            ID,
+        );
+    }
+    if uses > 0 {
+        cap.info(
+            ID,
+            format!(
+                "{uses} prompt(s) in config.yaml that use a Hub block or a file (`uses:`) were not captured, and are left alone on apply"
+            ),
+        );
+    }
 }
 
 /// Capture the servers of a list (`mcpServers` of a YAML file).
@@ -910,8 +1024,17 @@ fn apply_user(
         .is_some_and(|i| !i.trim().is_empty());
     let file = crate::ui::tildify(config, &work.home);
     let existing = work.fs.read(config)?;
+    // Tracked so that `kitbag status` sees the entry drift like any other
+    // managed instructions item.
+    work.track(
+        ID,
+        config,
+        Some(&instructions_block()),
+        "instructions".into(),
+    );
     if servers.is_empty()
         && skipped.is_empty()
+        && profile.commands.is_empty()
         && !has_instructions
         && existing
             .as_deref()
@@ -939,6 +1062,7 @@ fn apply_user(
     for (section, needed, what) in [
         (SECTION, need_servers, "MCP servers"),
         (RULES, need_rules, "instructions"),
+        (PROMPTS, !profile.commands.is_empty(), "prompts"),
     ] {
         if !needed {
             continue;
@@ -954,7 +1078,8 @@ fn apply_user(
         }
     }
     merge_servers(work, &mut doc, config, &servers, &skipped, env, opts)?;
-    apply_user_instructions(profile, opts, work, &mut doc, &file)?;
+    apply_user_instructions(profile, opts, work, &mut doc, config, &file)?;
+    apply_user_prompts(profile, opts, work, &mut doc, &file)?;
     if doc.changed() {
         if created {
             work.info(
@@ -969,14 +1094,23 @@ fn apply_user(
     Ok(())
 }
 
+/// The tracking id of the `kitbag-instructions` entry of `rules`.
+fn instructions_block() -> String {
+    crate::sync::yaml_entry_block(RULES, INSTRUCTIONS_ENTRY, "rule")
+}
+
 /// The `kitbag-instructions` entry of `rules` in `config.yaml`.
 fn apply_user_instructions(
     profile: &Profile,
     opts: &ApplyOptions,
     work: &mut Work,
     doc: &mut YamlDoc,
+    config: &Path,
     file: &str,
 ) -> Result<()> {
+    if held(work, opts, config, Some(&instructions_block())) {
+        return Ok(());
+    }
     let items = doc.list(RULES);
     let ours = items
         .iter()
@@ -1039,6 +1173,99 @@ fn apply_user_instructions(
             }
             doc.set_item(RULES, "name", INSTRUCTIONS_ENTRY, &def)?;
         }
+    }
+    Ok(())
+}
+
+/// The profile's commands as `prompts` of `config.yaml`: `name`,
+/// `description` and `prompt`, the form Continue's reference shows. An entry
+/// of the same name is replaced (its other keys kept), the others are left
+/// alone, and so are the ones that use a Hub block or a file (`uses:`).
+fn apply_user_prompts(
+    profile: &Profile,
+    opts: &ApplyOptions,
+    work: &mut Work,
+    doc: &mut YamlDoc,
+    file: &str,
+) -> Result<()> {
+    for c in &profile.commands {
+        let items = doc.list(PROMPTS);
+        let cur = find_server(&items, &c.name);
+        let shown = cur
+            .and_then(|m| m.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or(&c.name)
+            .to_string();
+        let body = c.body.trim();
+        let description = c.description.as_deref().filter(|d| !d.trim().is_empty());
+        let same = cur.is_some_and(|m| {
+            m.get("prompt").and_then(Value::as_str).map(str::trim) == Some(body)
+                && m.get("description").and_then(Value::as_str) == description
+        });
+        if same {
+            continue;
+        }
+        if cur.is_some() && !opts.overwrite {
+            work.warn(
+                ID,
+                format!(
+                    "kept existing prompt '{shown}' in {file} because --no-overwrite was given"
+                ),
+            );
+            continue;
+        }
+        if crate::secrets::has_redaction_marker(body) {
+            if cur.is_some() {
+                work.warn(
+                    ID,
+                    format!(
+                        "command '{}' holds a [REDACTED] marker from capture, so the prompt '{shown}' in {file} was left as it is",
+                        c.name
+                    ),
+                );
+                continue;
+            }
+            work.warn(
+                ID,
+                format!(
+                    "command '{}' holds a [REDACTED] marker from capture; written to {file} as it is",
+                    c.name
+                ),
+            );
+        }
+        if body.contains("$ARGUMENTS") || (1..=9).any(|n| body.contains(&format!("${n}"))) {
+            work.info(
+                ID,
+                format!(
+                    "command '{}' uses $ARGUMENTS or $N placeholders, which Continue's docs don't describe for prompts; written as is",
+                    c.name
+                ),
+            );
+        }
+        if c.argument_hint.is_some() || !c.extra.is_empty() {
+            work.info(
+                ID,
+                format!(
+                    "command '{}': the argument hint and other frontmatter keys have no counterpart in a Continue prompt and were not written",
+                    c.name
+                ),
+            );
+        }
+        // Keep the keys of the entry that kitbag doesn't manage.
+        let mut def = Map::new();
+        def.insert("name".into(), Value::String(shown.clone()));
+        if let Some(d) = description {
+            def.insert("description".into(), Value::String(d.to_string()));
+        }
+        def.insert("prompt".into(), Value::String(body.to_string()));
+        for (k, v) in cur.into_iter().flatten() {
+            if !["name", "description", "prompt"].contains(&k.as_str()) {
+                def.insert(k.clone(), v.clone());
+            }
+        }
+        doc.set_item(PROMPTS, "name", &shown, &Value::Object(def))?;
+        work.changed_items
+            .push((ID.to_string(), format!("command {}", c.name)));
     }
     Ok(())
 }
