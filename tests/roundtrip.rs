@@ -122,6 +122,13 @@ fn claude_code_to_antigravity_user() {
     // Unset env vars are written as ${VAR} placeholders and read back as such.
     assert_eq!(b.mcp_servers, a.mcp_servers);
     assert_eq!(b.instructions, a.instructions);
+    assert!(!a.rules.is_empty() && !a.skills.is_empty());
+    assert_eq!(b.rules, a.rules);
+    assert_eq!(b.skills.len(), a.skills.len());
+    for (x, y) in a.skills.iter().zip(&b.skills) {
+        assert_eq!(x.name, y.name);
+        assert_eq!(x.files.len(), y.files.len());
+    }
 }
 
 #[test]

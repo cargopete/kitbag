@@ -514,12 +514,17 @@ fn antigravity_apply_user() {
     assert!(p.missing_env.contains("LINEAR_API_KEY"));
     let md = planned(&p, &sb.home().join(".gemini/GEMINI.md")).unwrap();
     assert!(md.contains("<!-- kitbag:begin team -->") && md.contains("Use British English."));
-    assert!(!md.contains("kitbag:rule"), "rules are not supported yet");
+    // Rules get files of their own, not a folded block.
+    assert!(!md.contains("kitbag:rule"), "{md}");
+    assert_eq!(
+        planned(&p, &sb.home().join(".gemini/config/rules/ts.md")).unwrap(),
+        "---\ntrigger: glob\ndescription: TypeScript\nglobs: \"src/**/*.ts\"\n---\n\nStrict mode.\n"
+    );
     assert!(p.notes.iter().any(|n| n.target == "antigravity"
         && n.message.contains("not supported")
-        && n.message.contains("1 rules")
-        && n.message.contains("1 commands")));
-    assert_eq!(p.changes.len(), 2, "{:?}", p.changes);
+        && n.message.contains("1 commands")
+        && !n.message.contains("rules")));
+    assert_eq!(p.changes.len(), 3, "{:?}", p.changes);
 }
 
 #[test]
@@ -680,6 +685,348 @@ fn antigravity_codex_and_cursor_share_agents_md() {
         "{text}"
     );
     assert!(plan(&prof, &["antigravity"], &env).changes.is_empty());
+}
+
+// --- antigravity rules and skills
+
+fn write(path: &std::path::Path, text: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+fn rule(name: &str, description: Option<&str>, globs: &[&str], always: Option<bool>) -> Rule {
+    Rule {
+        name: name.into(),
+        description: description.map(String::from),
+        globs: globs.iter().map(|g| g.to_string()).collect(),
+        always_apply: always,
+        body: format!("Body of {name}."),
+    }
+}
+
+#[test]
+fn antigravity_rule_triggers() {
+    let sb = Sandbox::empty();
+    let mut prof = Profile::new("team");
+    prof.rules = vec![
+        rule("always", None, &[], None),
+        rule("scoped", Some("Go"), &["*.go", "cmd/**"], None),
+        rule("decide", Some("DB migrations"), &[], Some(false)),
+        rule("quiet", None, &[], Some(false)),
+    ];
+    let p = plan(&prof, &["antigravity"], &sb.env(Scope::Project));
+    let dir = sb.project().join(".agents/rules");
+    assert_eq!(
+        planned(&p, &dir.join("always.md")).unwrap(),
+        "---\ntrigger: always_on\n---\n\nBody of always.\n"
+    );
+    assert_eq!(
+        planned(&p, &dir.join("scoped.md")).unwrap(),
+        "---\ntrigger: glob\ndescription: Go\nglobs: \"*.go, cmd/**\"\n---\n\nBody of scoped.\n"
+    );
+    assert_eq!(
+        planned(&p, &dir.join("decide.md")).unwrap(),
+        "---\ntrigger: model_decision\ndescription: DB migrations\n---\n\nBody of decide.\n"
+    );
+    assert_eq!(
+        planned(&p, &dir.join("quiet.md")).unwrap(),
+        "---\ntrigger: manual\n---\n\nBody of quiet.\n"
+    );
+    assert!(
+        p.notes
+            .iter()
+            .any(|n| n.message.contains("rule 'quiet'") && n.message.contains("trigger: manual"))
+    );
+    // Nothing else is written for rules: no folded block.
+    assert!(!p.changes.iter().any(|c| c.path.ends_with("AGENTS.md")));
+}
+
+#[test]
+fn antigravity_capture_reads_rule_files_and_skills() {
+    for scope in [Scope::User, Scope::Project] {
+        let sb = Sandbox::empty();
+        let base = match scope {
+            Scope::User => sb.home().join(".gemini/config"),
+            Scope::Project => sb.project().join(".agents"),
+        };
+        write(
+            &base.join("rules/go.md"),
+            "---\ntrigger: glob\nglobs: \"*.go, cmd/**\"\ndescription: Go\n---\n\nUse gofmt.\n",
+        );
+        write(
+            &base.join("rules/style.md"),
+            "---\ntrigger: always_on\n---\n\nBe terse.\n",
+        );
+        write(
+            &base.join("rules/db.md"),
+            "---\ntrigger: model_decision\ndescription: Migrations\n---\n\nReversible only.\n",
+        );
+        write(
+            &base.join("rules/notes.md"),
+            "Plain text, no frontmatter.\n",
+        );
+        write(
+            &base.join("rules/odd.md"),
+            "---\ntrigger: sometimes\n---\n\nx\n",
+        );
+        write(
+            &base.join("rules/sub/deep.md"),
+            "---\ntrigger: always_on\n---\n\nx\n",
+        );
+        write(&base.join("rules/readme.txt"), "not a rule\n");
+        write(
+            &base.join("skills/pdf/SKILL.md"),
+            "---\nname: pdf\ndescription: PDFs\n---\n\nRun the script.\n",
+        );
+        write(&base.join("skills/pdf/scripts/run.sh"), "echo hi\n");
+        let r = capture(&["antigravity"], &sb.env(scope));
+        let names: Vec<&str> = r.profile.rules.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["db", "go", "style"], "{scope}: {:?}", r.notes);
+        let go = r.profile.rules.iter().find(|r| r.name == "go").unwrap();
+        assert_eq!(go.globs, vec!["*.go", "cmd/**"]);
+        assert_eq!(go.description.as_deref(), Some("Go"));
+        assert_eq!(go.body, "Use gofmt.");
+        let db = r.profile.rules.iter().find(|r| r.name == "db").unwrap();
+        assert_eq!(db.always_apply, Some(false));
+        let style = r.profile.rules.iter().find(|r| r.name == "style").unwrap();
+        assert!(style.globs.is_empty() && style.always_apply.is_none());
+        // Files without a valid trigger are dropped by Antigravity, and say so here.
+        for f in ["notes.md", "odd.md"] {
+            assert!(
+                r.notes
+                    .iter()
+                    .any(|n| n.message.contains(f) && n.message.contains("discards")),
+                "{f}: {:?}",
+                r.notes
+            );
+        }
+        assert_eq!(r.profile.skills.len(), 1);
+        let pdf = &r.profile.skills[0];
+        assert_eq!(pdf.name, "pdf");
+        assert!(pdf.files.iter().any(|f| f.path == "scripts/run.sh"));
+    }
+}
+
+#[test]
+fn antigravity_capture_keeps_the_file_of_a_rule_also_folded_into_gemini_md() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::User);
+    let mut prof = sample();
+    prof.rules.push(rule("only-folded", None, &[], None));
+    apply(&sb, &prof, &["gemini-cli"], &env);
+    // The folded `ts` rule also has a file of its own, with a different trigger.
+    write(
+        &sb.home().join(".gemini/config/rules/ts.md"),
+        "---\ntrigger: always_on\n---\n\nStrict mode, always.\n",
+    );
+    let r = capture(&["antigravity"], &env);
+    assert_eq!(r.profile.rules.len(), 1, "{:?}", r.profile.rules);
+    let ts = &r.profile.rules[0];
+    assert_eq!(ts.name, "ts");
+    assert!(ts.globs.is_empty() && ts.body == "Strict mode, always.");
+    assert_eq!(
+        r.profile.instructions.as_deref(),
+        Some("Use British English.")
+    );
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n.message.contains("were not captured (only-folded)")),
+        "{:?}",
+        r.notes
+    );
+}
+
+#[test]
+fn antigravity_apply_rules_and_skills_is_additive_idempotent_and_undoable() {
+    for scope in [Scope::User, Scope::Project] {
+        let sb = Sandbox::empty();
+        let env = sb.env(scope);
+        let base = match scope {
+            Scope::User => sb.home().join(".gemini/config"),
+            Scope::Project => sb.project().join(".agents"),
+        };
+        // The user's own rule and skill, and a file in a skill kitbag also writes.
+        write(
+            &base.join("rules/mine.md"),
+            "---\ntrigger: always_on\n---\n\nMine.\n",
+        );
+        write(
+            &base.join("skills/mine/SKILL.md"),
+            "---\nname: mine\ndescription: mine\n---\nMine.\n",
+        );
+        let mut prof = sample();
+        prof.skills.push(skill(
+            "db-migrate",
+            "---\nname: db-migrate\ndescription: Migrations\n---\nWrite one.\n",
+        ));
+        prof.skills.push(skill("bare", "No frontmatter.\n"));
+        let p = apply(&sb, &prof, &["antigravity"], &env);
+        assert!(base.join("rules/ts.md").is_file());
+        assert!(base.join("skills/db-migrate/SKILL.md").is_file());
+        let bare = std::fs::read_to_string(base.join("skills/bare/SKILL.md")).unwrap();
+        assert!(
+            bare.starts_with("---\nname: bare\ndescription: bare skill\n---"),
+            "{bare}"
+        );
+        assert!(
+            !p.notes
+                .iter()
+                .any(|n| n.message.contains("not supported") && n.message.contains("skills")),
+            "{:?}",
+            p.notes
+        );
+        // Second apply: up to date.
+        let again = plan(&prof, &["antigravity"], &env);
+        assert!(again.changes.is_empty(), "{scope}: {:?}", again.changes);
+        // A profile with no rules or skills leaves the existing ones alone.
+        let empty = Profile::new("team");
+        let none = plan(&empty, &["antigravity"], &env);
+        assert!(
+            none.changes
+                .iter()
+                .all(|c| !c.path.starts_with(base.join("rules"))
+                    && !c.path.starts_with(base.join("skills"))),
+            "{:?}",
+            none.changes
+        );
+        // Undo removes what kitbag wrote and nothing else.
+        Store::new(sb.state()).undo(None, false).unwrap();
+        assert!(!base.join("rules/ts.md").exists());
+        assert!(!base.join("skills/db-migrate").exists());
+        assert!(!base.join("skills/bare").exists());
+        assert_eq!(
+            sb.read(&format!(
+                "{}/{}",
+                if scope == Scope::User {
+                    "home/.gemini/config"
+                } else {
+                    "project/.agents"
+                },
+                "rules/mine.md"
+            )),
+            "---\ntrigger: always_on\n---\n\nMine.\n"
+        );
+        assert!(base.join("skills/mine/SKILL.md").is_file());
+    }
+}
+
+#[test]
+fn antigravity_rules_and_skills_survive_a_round_trip_through_a_profile() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::User);
+    let mut prof = Profile::new("team");
+    prof.rules = vec![
+        rule("always", None, &[], None),
+        rule("scoped", Some("Go"), &["*.go", "cmd/**"], None),
+        rule("decide", Some("DB migrations"), &[], Some(false)),
+    ];
+    prof.skills.push(skill(
+        "db-migrate",
+        "---\nname: db-migrate\ndescription: Migrations\n---\nWrite one.\n",
+    ));
+    apply(&sb, &prof, &["antigravity"], &env);
+    let back = capture(&["antigravity"], &env).profile;
+    let mut want = prof.rules.clone();
+    want.sort_by(|a, b| a.name.cmp(&b.name));
+    assert_eq!(back.rules, want);
+    assert_eq!(back.skills.len(), 1);
+    assert_eq!(back.skills[0].description.as_deref(), Some("Migrations"));
+}
+
+/// At user scope Antigravity shares `~/.gemini/` with Gemini CLI: rules go to
+/// `config/rules/` and to the folded block, skills to two directories, and
+/// neither tool's files are touched by the other.
+#[test]
+fn antigravity_rules_and_skills_coexist_with_gemini_cli() {
+    let mut prof = sample();
+    prof.skills.push(skill(
+        "db-migrate",
+        "---\nname: db-migrate\ndescription: Migrations\n---\nWrite one.\n",
+    ));
+    for order in [["gemini-cli", "antigravity"], ["antigravity", "gemini-cli"]] {
+        let sb = Sandbox::empty();
+        let env = sb.env(Scope::User);
+        let gemini_md = sb.home().join(".gemini/GEMINI.md");
+        write(&gemini_md, "My own notes.\n");
+        let p = apply(&sb, &prof, &order, &env);
+        let text = std::fs::read_to_string(&gemini_md).unwrap();
+        assert!(text.starts_with("My own notes."), "{text}");
+        assert_eq!(text.matches("kitbag:begin team -->").count(), 1, "{text}");
+        assert_eq!(text.matches("kitbag:begin team:rules").count(), 1, "{text}");
+        assert!(sb.home().join(".gemini/config/rules/ts.md").is_file());
+        assert!(
+            sb.home()
+                .join(".gemini/config/skills/db-migrate/SKILL.md")
+                .is_file()
+        );
+        assert!(
+            sb.home()
+                .join(".gemini/skills/db-migrate/SKILL.md")
+                .is_file()
+        );
+        // The folded block is not duplicated into a rules file, and the
+        // rules file doesn't leak into GEMINI.md.
+        assert!(!text.contains("trigger:"), "{text}");
+        let twice = |p: &kitbag::engine::Plan| {
+            p.notes.iter().any(|n| {
+                n.target == "antigravity" && n.message.contains("reads Gemini CLI's rules block")
+            })
+        };
+        assert!(twice(&p), "{order:?}: {:?}", p.notes);
+        let again = plan(&prof, &order, &env);
+        assert!(again.changes.is_empty(), "{order:?}: {:?}", again.changes);
+        // Capturing both gives one rule of each name: the file's version wins.
+        let r = capture(&["antigravity", "gemini-cli"], &env);
+        assert_eq!(r.profile.rules.len(), 1, "{:?}", r.profile.rules);
+        assert_eq!(r.profile.skills.len(), 1);
+        Store::new(sb.state()).undo(None, false).unwrap();
+        assert_eq!(sb.read("home/.gemini/GEMINI.md"), "My own notes.\n");
+        assert!(!sb.home().join(".gemini/config").exists());
+        assert!(!sb.home().join(".gemini/skills").exists());
+    }
+    // Antigravity alone says nothing about Gemini CLI.
+    let sb = Sandbox::empty();
+    let p = plan(&prof, &["antigravity"], &sb.env(Scope::User));
+    assert!(!p.notes.iter().any(|n| n.message.contains("Gemini CLI")));
+}
+
+/// `.agents/skills/` is Codex's project skills directory too: the same file,
+/// written once. `AGENTS.md` is shared with Codex and Cursor.
+#[test]
+fn antigravity_skills_share_agents_skills_dir_with_codex_in_a_project() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::Project);
+    let mut prof = sample();
+    prof.skills.push(skill("bare", "No frontmatter.\n"));
+    let p = apply(&sb, &prof, &["codex", "cursor", "antigravity"], &env);
+    let md = sb.project().join(".agents/skills/bare/SKILL.md");
+    assert_eq!(p.changes.iter().filter(|c| c.path == md).count(), 1);
+    assert!(md.is_file());
+    for ids in [&["antigravity"][..], &["codex"], &["codex", "antigravity"]] {
+        let again = plan(&prof, ids, &env);
+        assert!(again.changes.is_empty(), "{ids:?}: {:?}", again.changes);
+    }
+    // Codex folds rules into AGENTS.md; Antigravity has files of its own.
+    assert!(sb.project().join(".agents/rules/ts.md").is_file());
+    let text = sb.read("project/AGENTS.md");
+    assert_eq!(text.matches("<!-- kitbag:begin team -->").count(), 1);
+    // Undo with Codex's skill in place: the shared file goes with the apply that wrote it.
+    Store::new(sb.state()).undo(None, false).unwrap();
+    assert!(!sb.project().join(".agents").exists());
+}
+
+#[test]
+fn antigravity_warns_about_large_rules_and_comma_globs() {
+    let sb = Sandbox::empty();
+    let mut prof = Profile::new("team");
+    let mut big = rule("big", None, &[], None);
+    big.body = "x ".repeat(13_000);
+    prof.rules = vec![big, rule("comma", None, &["{a,b}/*.rs"], None)];
+    let p = plan(&prof, &["antigravity"], &sb.env(Scope::Project));
+    let said = |needle: &str| p.notes.iter().any(|n| n.message.contains(needle));
+    assert!(said("rule 'big' is"), "{:?}", p.notes);
+    assert!(said("rule 'comma': Antigravity splits globs at commas"));
 }
 
 // ---------------------------------------------------------------- opencode

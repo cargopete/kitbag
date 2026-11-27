@@ -1,4 +1,5 @@
-//! Google Antigravity (app, IDE and CLI): MCP servers and instructions.
+//! Google Antigravity (app, IDE and CLI): MCP servers, instructions, rules and
+//! skills.
 //!
 //! * MCP: `~/.gemini/config/mcp_config.json` (user) or
 //!   `.agents/mcp_config.json` (workspace), under `mcpServers`. Local servers
@@ -14,26 +15,53 @@
 //!   block that both read, not two copies. In a workspace it reads
 //!   `{AGENTS,GEMINI}.md` and `.agents/{AGENTS,GEMINI}.md`; kitbag writes
 //!   `AGENTS.md`, shared with Codex and Cursor.
-//! * Rules (`.agents/rules/`, `~/.gemini/config/rules/`), skills and workflows
-//!   are not supported yet.
+//! * Rules: `~/.gemini/config/rules/*.md` (user) and `.agents/rules/*.md`
+//!   (workspace), directly in that directory. Each file needs YAML frontmatter
+//!   with a `trigger` (`always_on`, `glob`, `model_decision` or `manual`), or
+//!   Antigravity silently discards it; `glob` takes `globs`, one string of
+//!   comma-separated patterns, and `model_decision` needs a `description`. A
+//!   file over 24,000 bytes is truncated. Gemini CLI folds its rules into
+//!   `~/.gemini/GEMINI.md`, which Antigravity reads too, so with both targets
+//!   at user scope a rule is seen twice (always on, from the block, and
+//!   by its own trigger, from the file); kitbag says so in the plan.
+//! * Skills: `~/.gemini/config/skills/<name>/SKILL.md` (user) and
+//!   `.agents/skills/<name>/SKILL.md` (workspace, shared with Codex, which
+//!   writes the same files). `name` defaults to the folder name and
+//!   `description` is required. The CLI also reads `~/.gemini/skills/`, which
+//!   is Gemini CLI's directory, so with both targets the CLI sees a skill
+//!   from each; the app reads only `~/.gemini/config/skills/`.
+//! * Workflows (`.agents/workflows/<name>.md`) are deprecated by Google in
+//!   favour of skills, and its docs give two global directories
+//!   (`~/.gemini/config/global_workflows/` and `.../workflows/`), so kitbag
+//!   doesn't carry them. Agents, hooks and plugins aren't carried either.
 //!
-//! Docs: <https://antigravity.google/docs/mcp>, <https://antigravity.google/docs/rules>.
+//! Docs: <https://antigravity.google/docs/mcp>, <https://antigravity.google/docs/rules>,
+//! <https://antigravity.google/docs/skills>,
+//! <https://antigravity.google/docs/migration/workflows-to-skills/>.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::Result;
 use serde_json::{Map, Value, json};
 
 use super::common::{
-    Resolver, capture_instructions, import_server, merge_json_servers, server_entries,
-    server_from_json, servers_for, str_of, write_instructions,
+    Resolver, add_rule, capture_instructions, capture_skills_dir, claim_name, import_server,
+    merge_json_servers, name_from_rel, read_text_item, server_entries, server_from_json,
+    servers_for, skill_with_required_frontmatter, str_of, write_instructions, write_rule,
+    write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
-use crate::model::{Profile, Transport};
+use crate::frontmatter::{self, glob_list, opt};
+use crate::model::{Profile, Rule, RuleMode, Transport, is_valid_name};
+use crate::plan_fs::{join_rel, walk_files};
+use crate::profile_io::rule_from_markdown;
 
 const ID: &str = "antigravity";
 const TOOL: &str = "Antigravity";
+/// Antigravity truncates a rule file over this many bytes.
+const RULE_MAX_BYTES: usize = 24_000;
 /// Server keys kitbag writes; anything else (`disabledTools`, `timeoutSeconds`,
 /// `oauth` ...) is preserved. `url` is listed so an old `url` entry gives way
 /// to `serverUrl` instead of sitting next to it.
@@ -56,6 +84,59 @@ struct Paths {
     instructions: PathBuf,
     /// Every instructions file Antigravity reads at this scope, for capture.
     read: Vec<PathBuf>,
+    rules: PathBuf,
+    skills: PathBuf,
+}
+
+/// A rule as an Antigravity rule file. `globs` is one string of
+/// comma-separated patterns; `model_decision` needs a description, so an
+/// on-demand rule without one becomes `manual` (loaded by @-mention only).
+pub fn antigravity_rule(r: &Rule) -> String {
+    let (trigger, globs) = match r.mode() {
+        RuleMode::Always => ("always_on", Value::Null),
+        RuleMode::Globs => ("glob", Value::String(r.globs.join(", "))),
+        RuleMode::OnDemand if r.description.is_some() => ("model_decision", Value::Null),
+        RuleMode::OnDemand => ("manual", Value::Null),
+    };
+    frontmatter::render(
+        &[
+            ("trigger", json!(trigger)),
+            ("description", opt(&r.description)),
+            ("globs", globs),
+        ],
+        &r.body,
+    )
+}
+
+/// An Antigravity rule file -> profile rule, or why it isn't one. A file
+/// without a valid `trigger` is discarded by Antigravity, and so by capture.
+pub fn rule_from_antigravity(name: &str, text: &str) -> Result<Rule, String> {
+    let doc = frontmatter::parse(text);
+    let d = &doc.data;
+    let mut r = rule_from_markdown(name, text);
+    r.globs = Vec::new();
+    r.always_apply = None;
+    match d.get("trigger").and_then(Value::as_str) {
+        Some("always_on") => {}
+        Some("glob") => {
+            r.globs = ["globs", "glob"]
+                .iter()
+                .map(|k| glob_list(d.get(*k)))
+                .find(|g| !g.is_empty())
+                .unwrap_or_default();
+            if r.globs.is_empty() {
+                return Err("trigger: glob without globs, which Antigravity discards".into());
+            }
+        }
+        Some("model_decision" | "manual") => r.always_apply = Some(false),
+        Some(other) => {
+            return Err(format!(
+                "unknown trigger '{other}', which Antigravity discards"
+            ));
+        }
+        None => return Err("no trigger in its frontmatter, so Antigravity discards it".into()),
+    }
+    Ok(r)
 }
 
 fn paths(env: &Env) -> Paths {
@@ -65,6 +146,8 @@ fn paths(env: &Env) -> Paths {
             let c = g.join("config");
             Paths {
                 mcp: c.join("mcp_config.json"),
+                rules: c.join("rules"),
+                skills: c.join("skills"),
                 instructions: g.join("GEMINI.md"),
                 read: vec![
                     g.join("GEMINI.md"),
@@ -79,6 +162,8 @@ fn paths(env: &Env) -> Paths {
             let a = p.join(".agents");
             Paths {
                 mcp: a.join("mcp_config.json"),
+                rules: a.join("rules"),
+                skills: a.join("skills"),
                 instructions: p.join("AGENTS.md"),
                 read: vec![
                     p.join("AGENTS.md"),
@@ -108,7 +193,10 @@ impl Adapter for Antigravity {
         Feature::ALL.map(|f| {
             (
                 f,
-                if matches!(f, Feature::Mcp | Feature::Instructions) {
+                if matches!(
+                    f,
+                    Feature::Mcp | Feature::Instructions | Feature::Rules | Feature::Skills
+                ) {
                     Support::Native
                 } else {
                     Support::None
@@ -119,7 +207,12 @@ impl Adapter for Antigravity {
 
     fn locations(&self, env: &Env) -> Vec<(&'static str, PathBuf)> {
         let p = paths(env);
-        vec![("mcp", p.mcp), ("instructions", p.instructions)]
+        vec![
+            ("mcp", p.mcp),
+            ("instructions", p.instructions),
+            ("rules", p.rules),
+            ("skills", p.skills),
+        ]
     }
 
     fn detect(&self, env: &Env) -> bool {
@@ -153,13 +246,53 @@ impl Adapter for Antigravity {
                 import_server(&mut cap, ID, name, s, false);
             }
         }
+        // Antigravity's own rule files first, so a rule that is also folded
+        // into a shared instructions file keeps its file's trigger.
+        if !cap.escapes(&p.rules, ID) {
+            let mut seen = BTreeMap::new();
+            for rel in walk_files(&p.rules, 500)? {
+                // Only `rules/*.md` directly in the directory is documented.
+                if rel.contains('/') || !rel.ends_with(".md") {
+                    continue;
+                }
+                let path = join_rel(&p.rules, &rel);
+                let name = name_from_rel(&rel, ".md");
+                claim_name(&mut seen, &p.rules, &rel, &name)?;
+                let Some(text) = read_text_item(&mut cap, &path, ID) else {
+                    continue;
+                };
+                if !is_valid_name(&name) {
+                    cap.warn(
+                        ID,
+                        format!("skipped {}: unsupported file name", path.display()),
+                    );
+                    continue;
+                }
+                match rule_from_antigravity(&name, &text) {
+                    Ok(r) => {
+                        cap.sources.push(path.clone());
+                        cap.rule_files.push((name, path));
+                        add_rule(&mut cap, r, ID);
+                    }
+                    Err(why) => cap.warn(ID, format!("skipped {}: {why}", path.display())),
+                }
+            }
+        }
+        let own = cap.profile.rules.len();
         for path in &p.read {
             capture_instructions(&mut cap, path, ID)?;
         }
         // Rules folded into a shared file by another target (Gemini CLI's
         // GEMINI.md, Codex's AGENTS.md) come back out of capture_instructions.
-        if !cap.profile.rules.is_empty() {
-            let names: Vec<String> = cap.profile.rules.drain(..).map(|r| r.name).collect();
+        // One that is also a file here was kept above, as the file's version.
+        if cap.profile.rules.len() > own {
+            let names: Vec<String> = cap
+                .profile
+                .rules
+                .split_off(own)
+                .into_iter()
+                .map(|r| r.name)
+                .collect();
             cap.info(
                 ID,
                 format!(
@@ -168,6 +301,7 @@ impl Adapter for Antigravity {
                 ),
             );
         }
+        capture_skills_dir(&mut cap, &p.skills, ID)?;
         Ok(cap)
     }
 
@@ -260,6 +394,62 @@ impl Adapter for Antigravity {
         // Same file and block id as Gemini CLI at user scope: applying both
         // plans the same block twice, which leaves one copy.
         write_instructions(work, &p.instructions, profile, opts, false, ID)?;
+        for r in &profile.rules {
+            let text = antigravity_rule(r);
+            let path = p.rules.join(format!("{}.md", r.name));
+            if r.mode() == RuleMode::OnDemand && r.description.is_none() {
+                work.info(
+                    ID,
+                    format!(
+                        "rule '{}' is on-demand with no description; Antigravity can only load it when you @-mention it (and not in the CLI), so it is written with trigger: manual",
+                        r.name
+                    ),
+                );
+            }
+            if r.mode() == RuleMode::Globs && r.globs.iter().any(|g| g.contains(',')) {
+                work.warn(
+                    ID,
+                    format!(
+                        "rule '{}': Antigravity splits globs at commas, so a pattern with a comma in it ({}) won't match as written",
+                        r.name,
+                        r.globs.join(" ")
+                    ),
+                );
+            }
+            if text.len() > RULE_MAX_BYTES {
+                work.warn(
+                    ID,
+                    format!(
+                        "rule '{}' is {} bytes; Antigravity reads only the first {RULE_MAX_BYTES} bytes of a rule file",
+                        r.name,
+                        text.len()
+                    ),
+                );
+            }
+            write_rule(work, &path, text.as_bytes(), opts, ID, &r.name)?;
+        }
+        if env.scope == Scope::User
+            && !profile.rules.is_empty()
+            && work.targets.iter().any(|t| t == "gemini-cli")
+        {
+            work.info(
+                ID,
+                "Antigravity reads Gemini CLI's rules block in ~/.gemini/GEMINI.md as well as its own rules/ files, so in this setup it sees each rule twice: always on from the block, and with its own trigger from the file",
+            );
+        }
+        for s in &profile.skills {
+            let s = skill_with_required_frontmatter(s);
+            write_skill(work, &p.skills.join(&s.name), &s, opts, ID)?;
+        }
+        if env.scope == Scope::User
+            && !profile.skills.is_empty()
+            && work.targets.iter().any(|t| t == "gemini-cli")
+        {
+            work.info(
+                ID,
+                "skills go to ~/.gemini/config/skills/ for Antigravity and ~/.gemini/skills/ for Gemini CLI; the Antigravity CLI reads both directories, the app and IDE only the first",
+            );
+        }
         if profile.settings.contains_key(ID) {
             work.info(
                 ID,

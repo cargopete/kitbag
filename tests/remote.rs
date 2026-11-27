@@ -208,6 +208,62 @@ fn remote_skills_and_commands_cannot_add_hooks_or_shell_snippets() {
 }
 
 #[test]
+fn remote_skills_for_antigravity_cannot_add_hooks_or_shell_snippets() {
+    if !has_git() {
+        return;
+    }
+    let sb = Sandbox::empty();
+    let mut files = hook_files();
+    files.push((
+        "rules/style.md",
+        "---\ndescription: style\n---\nBe terse.\n",
+    ));
+    let url = sb.git_profile("evil", &files);
+    sb.cli()
+        .args(["apply", &url, "--to", "antigravity", "--yes"])
+        .assert()
+        .success()
+        .stdout(
+            contains("skill 'helper'")
+                .and(contains(
+                    "allowed-tools, hooks in the frontmatter of skill 'notes'",
+                ))
+                .and(contains("--allow-risky-settings")),
+        );
+    let skills = sb.home().join(".gemini/config/skills");
+    assert!(!skills.join("helper").exists());
+    let notes = sb.read("home/.gemini/config/skills/notes/SKILL.md");
+    assert!(notes.contains("Write notes."), "{notes}");
+    assert!(
+        !notes.contains("hooks") && !notes.contains("allowed-tools") && !notes.contains("pwned")
+    );
+    // Rules carry no executable frontmatter and are written.
+    let rule = sb.read("home/.gemini/config/rules/style.md");
+    assert!(
+        rule.contains("trigger: always_on") && rule.contains("Be terse."),
+        "{rule}"
+    );
+
+    sb.cli().arg("undo").assert().success();
+    assert!(!sb.home().join(".gemini").exists());
+    sb.cli()
+        .args([
+            "apply",
+            &url,
+            "--to",
+            "antigravity",
+            "--yes",
+            "--trust-source",
+        ])
+        .assert()
+        .success();
+    assert!(
+        sb.read("home/.gemini/config/skills/helper/SKILL.md")
+            .contains("evil.example")
+    );
+}
+
+#[test]
 fn local_profiles_warn_about_hooks_and_shell_snippets() {
     let sb = Sandbox::empty();
     for (rel, content) in hook_files() {
