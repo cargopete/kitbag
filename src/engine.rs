@@ -171,6 +171,9 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
         for (t, s) in c.profile.settings {
             merged.settings.entry(t).or_insert(s);
         }
+        for (t, s) in c.profile.plugins {
+            merged.plugins.entry(t).or_insert(s);
+        }
     }
     if read == 0 && !failures.is_empty() {
         anyhow::bail!(

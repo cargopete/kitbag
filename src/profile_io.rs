@@ -94,6 +94,8 @@ struct Manifest {
     settings: BTreeMap<String, Map<String, Value>>,
     #[serde(default)]
     hooks: Vec<Hook>,
+    #[serde(default)]
+    plugins: BTreeMap<String, crate::plugins::PluginSet>,
 }
 
 /// Parse and validate a `kitbag.toml` manifest into a profile without file-based parts.
@@ -158,6 +160,9 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
         settings.insert(id, table);
     }
     issues.extend(crate::hooks::validate(&m.hooks, None));
+    let (plugin_issues, plugin_warnings) = crate::plugins::validate(&mut m.plugins);
+    issues.extend(plugin_issues);
+    warnings.extend(plugin_warnings);
     if !issues.is_empty() {
         return Err(ProfileError::new(
             format!("{} is not a valid kitbag profile", file.display()),
@@ -170,6 +175,7 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
         mcp_servers: m.mcp_servers,
         settings,
         hooks: m.hooks,
+        plugins: m.plugins,
         warnings,
         ..Profile::default()
     })
@@ -755,6 +761,46 @@ pub fn manifest_toml(p: &Profile) -> String {
             hooks.push(json_to_table(v.as_object().expect("object")));
         }
         doc["hooks"] = Item::ArrayOfTables(hooks);
+    }
+    if p.plugins.values().any(|s| !s.is_empty()) {
+        let implicit = || {
+            let mut t = Table::new();
+            t.set_implicit(true);
+            t
+        };
+        let mut plugins = implicit();
+        for (target, set) in p.plugins.iter().filter(|(_, s)| !s.is_empty()) {
+            let mut t = implicit();
+            let mut section = |key: &str, items: Vec<(&String, Value)>| {
+                if items.is_empty() {
+                    return;
+                }
+                let mut table = implicit();
+                for (name, v) in items {
+                    table.insert(
+                        name,
+                        Item::Table(json_to_table(v.as_object().expect("object"))),
+                    );
+                }
+                t.insert(key, Item::Table(table));
+            };
+            section(
+                "marketplaces",
+                set.marketplaces
+                    .iter()
+                    .map(|(n, m)| (n, serde_json::to_value(m).expect("serializable")))
+                    .collect(),
+            );
+            section(
+                "enabled",
+                set.enabled
+                    .iter()
+                    .map(|(n, e)| (n, serde_json::to_value(e).expect("serializable")))
+                    .collect(),
+            );
+            plugins.insert(target, Item::Table(t));
+        }
+        doc["plugins"] = Item::Table(plugins);
     }
     doc.to_string()
 }

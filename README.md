@@ -125,7 +125,7 @@ Where things go:
 
 | Target | User scope | Project scope |
 |---|---|---|
-| Claude Code | `~/.claude.json` (`mcpServers`), `~/.claude/{CLAUDE.md, rules/, commands/, skills/, agents/, settings.json}`; honours `CLAUDE_CONFIG_DIR` | `.mcp.json`, `CLAUDE.md` (or `.claude/CLAUDE.md`), `.claude/{rules,commands,skills,agents}/`, `.claude/settings.json`; capture also reads local-scope servers from `~/.claude.json` |
+| Claude Code | `~/.claude.json` (`mcpServers`), `~/.claude/{CLAUDE.md, rules/, commands/, skills/, agents/, settings.json}` (plugins, by reference: `enabledPlugins` and `extraKnownMarketplaces` in `settings.json`; `plugins/installed_plugins.json` is read for versions); honours `CLAUDE_CONFIG_DIR` | `.mcp.json`, `CLAUDE.md` (or `.claude/CLAUDE.md`), `.claude/{rules,commands,skills,agents}/`, `.claude/settings.json` (also `enabledPlugins` and `extraKnownMarketplaces`); capture also reads local-scope servers from `~/.claude.json` |
 | Cursor | `~/.cursor/mcp.json`, `~/.cursor/commands/`, `~/.cursor/skills/`, `~/.cursor/agents/*.md` | `.cursor/mcp.json`, `.cursor/rules/*.mdc`, `AGENTS.md`, `.cursor/commands/`, `.cursor/skills/`, `.cursor/agents/*.md`; capture also reads legacy `.cursorrules` |
 | Codex CLI | `$CODEX_HOME/config.toml` (default `~/.codex`), `$CODEX_HOME/AGENTS.md`, `$CODEX_HOME/prompts/`, `~/.agents/skills/`, `$CODEX_HOME/agents/*.toml` | `.codex/config.toml` (trusted projects only), `AGENTS.md`, `.agents/skills/`, `.codex/agents/*.toml` |
 | Gemini CLI | `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`, `~/.gemini/commands/*.toml`, `~/.gemini/skills/`, `~/.gemini/agents/*.md` | `.gemini/settings.json`, `GEMINI.md`, `.gemini/commands/`, `.gemini/skills/`, `.gemini/agents/*.md` |
@@ -636,6 +636,71 @@ kitbag: `${VAR}` stays in the command for the shell to expand, so no hook file h
 kitbag resolved. Shell scripts need LF line endings to run; on Windows keep `hooks/*.sh` as LF
 (`* text eol=lf` in the profile's `.gitattributes`).
 
+### Claude Code plugins, by reference: `[plugins.claude-code]`
+
+A Claude Code plugin is someone else's code (it can bundle hooks, MCP servers, commands, agents
+and skills), so kitbag never copies one. It carries only what Claude Code itself stores to find
+and enable it: the marketplaces Claude Code knows (`extraKnownMarketplaces`) and the plugins it
+has enabled (`enabledPlugins`), in a per-target section of `kitbag.toml`. Only `claude-code` has
+such a section so far; Antigravity's and opencode's plugins, Gemini CLI's extensions and Claude
+Desktop's plugins are other systems and are not carried (#12), and kitbag never translates an id
+from one tool to another. A `[plugins.<other tool>]` section is ignored with a warning.
+
+```toml
+[plugins.claude-code.marketplaces.acme-tools]     # the name Claude Code registers it under
+source = { source = "github", repo = "acme/tools", ref = "v1.2.0" }   # Claude Code's own source object
+autoUpdate = false                                # optional, Claude Code's own key
+# disabled_on = ["claude-code"]                   # or targets = [...]; as for an MCP server
+
+[plugins.claude-code.enabled."formatter@acme-tools"]   # <name>@<marketplace>, as in enabledPlugins
+version = "1.2.0"                                 # optional: what installed_plugins.json recorded
+```
+
+A `source` is one of Claude Code's documented kinds: `github` (`repo`, optional `ref` and `path`),
+`git` (`url`, optional `ref` and `path`), `url` (`url`) and `file` / `directory` (`path`; a path
+in your home directory is stored as `~/...` and expanded on the machine you apply to). `ref` is
+the pin: Claude Code has no setting to pin an individual plugin, so `version` is only a record,
+shown in the plan and not enforced. Docs checked 2026-11-27:
+[install](https://code.claude.com/docs/en/plugins/install),
+[loading](https://code.claude.com/docs/en/plugins/loading),
+[organization settings](https://code.claude.com/docs/en/plugins/org).
+
+**Capture** reads `enabledPlugins` and `extraKnownMarketplaces` from `~/.claude/settings.json`
+(`CLAUDE_CONFIG_DIR` honoured), or from `.claude/settings.json` with `--project`
+(`settings.local.json` is not read). Plugins set to `true` are kept; `false` ones, ids that
+don't come from a marketplace (`@inline`, `@skills-dir`, `@synced`, the last coming from your
+claude.ai account) and marketplaces that kitbag can't carry are listed and left out: an inline
+`settings` marketplace, one with a `source` kitbag doesn't know, one with request `headers` (they
+can hold credentials) and a URL with credentials in it. At user scope the version of a plugin's
+user-scope install is read from `plugins/installed_plugins.json` (its layout is only described in
+the docs as "`scope`, `installPath` and `version`", so an entry that isn't in that form is simply
+not versioned); an install there that `settings.json` doesn't enable is counted and left out. Nothing under `plugins/` (the cache, marketplace checkouts) is read into the
+profile, and `enabledPlugins` / `extraKnownMarketplaces` are not in the `settings` allow-list
+either. `capture --force` keeps the `targets` / `disabled_on` of the plugins it captures again.
+
+**Apply** adds the profile's `extraKnownMarketplaces` entries and `enabledPlugins` keys to the
+same settings file (user or project scope), and nothing else; it never downloads, installs or
+runs a plugin, and never writes under `~/.claude/plugins`. What Claude Code does next is its
+own: at user scope it fetches the declared marketplaces and the enabled plugins that aren't
+cached yet the next time it starts (or run `claude plugin install <name>@<marketplace>` now).
+At project scope an enabled plugin is **not** installed by the settings file: each person runs
+`claude plugin install <name>@<marketplace> --scope project` once per clone, and the project's
+marketplaces are registered only after the folder is trusted. The plan says which of the two
+applies, and lists every marketplace (with its source) and plugin it adds. An entry already in
+the file is left alone; a marketplace that differs is replaced (its `source` whole, other keys of
+the entry stay), a plugin set to `false` is set to `true`, and `--no-overwrite` keeps both
+and warns. A second apply is "Up to date", and `kitbag undo` restores the settings file as it
+was, so plugins you installed some other way stay. Apply is additive: removing a plugin from the
+profile, or disabling it with `disabled_on`, doesn't uninstall or disable it in Claude Code
+(`claude plugin disable`). Plugins in `settings.local.json` are never written.
+
+**From a git source**, plugins and marketplaces are withheld unless you pass `--trust-source`
+(plugins can bundle hooks, MCP servers and commands, the same class of trust as hooks): the plan
+lists each marketplace with its source and each plugin, and nothing is written for them. `kitbag
+inspect` lists them under what runs commands. Not carried yet: `CLAUDE_CODE_PLUGIN_CACHE_DIR`
+(the plugins directory is read at `~/.claude/plugins`), the `additionalMarketplaces` alias of
+`extraKnownMarketplaces`, managed settings, Claude Desktop's plugins and their `commands/`.
+
 ### Plugins: `rules/` at the root, no `kitbag.toml`
 
 `apply`, `diff`, `status`, `sync` and `doctor` also take a plugin directory, or a git URL to
@@ -666,7 +731,8 @@ root `plugin.json`, if one is there; otherwise it is the directory's name (for a
 sub-directory's or the repository's) as a slug, like `My Plugin` -> `my-plugin`. A plugin has
 no instructions, MCP servers or settings (an `instructions.md` in it is not read, with a
 warning); `commands/` and `skills/` are read as in a profile, and `agents/` is not read,
-since a plugin's agents are Claude Code subagents (plugins are not carried yet).
+since a plugin's agents are Claude Code subagents (this is kitbag's own plugin directory; Claude
+Code's plugins are carried by reference, see the section above).
 A plugin from a git URL is a git source, with the same rules as a git profile. `sync --from`
 doesn't work on a plugin, since that writes the edits into a profile. `kitbag undo` takes the
 plugin's rules out again (its own rule files and managed block, nothing you wrote), even
@@ -1519,8 +1585,8 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   `.agent.md` wins over a `.md`, and an agent over a chat mode. Agents VS Code keeps in its
   own profile storage aren't read. Copilot's own MCP and folder trust prompts are left alone.
 - Apply is additive and doesn't delete entries that were removed from the profile (see above).
-- **Not carried yet:** output styles (`output-styles/`)
-  and plugins; hooks only for Claude Code, and only with `--include hooks` (see
+- **Not carried yet:** output styles (`output-styles/`);
+  hooks only for Claude Code, and only with `--include hooks` (see
   [Hooks](#hooks-hooks-in-kitbagtoml-and-hooks)). Capture lists what it found of these and
   leaves them out. It also drops
   `outputStyle` when it names a custom style (built-ins such as `Explanatory` are kept),

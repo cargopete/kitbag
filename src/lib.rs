@@ -18,6 +18,7 @@ pub mod hooks;
 pub mod mcp_tokens;
 pub mod model;
 pub mod plan_fs;
+pub mod plugins;
 pub mod policy;
 pub mod portable;
 pub mod profile_io;
