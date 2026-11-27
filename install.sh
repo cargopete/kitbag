@@ -4,7 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/cargopete/kitbag/main/install.sh | sh
 #
 # Environment:
-#   KITBAG_VERSION      release tag to install (default: latest), e.g. v0.1.7
+#   KITBAG_VERSION      release tag to install (default: latest), e.g. v0.1.8
 #   KITBAG_INSTALL_DIR  where to put the binary (default: ~/.local/bin)
 set -eu
 

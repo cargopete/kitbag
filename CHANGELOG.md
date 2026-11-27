@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-11-27
+
 ### Added
 
 - New target `zed` for Zed, for MCP servers and instructions, at user and project scope. MCP servers go to `context_servers` in Zed's `settings.json` (`~/.config/zed` on macOS and Linux, `$XDG_CONFIG_HOME/zed` on Linux when set, `%APPDATA%\Zed` on Windows) and in a project's `.zed/settings.json`, edited in place so comments, trailing commas and your other settings stay: `command`, `args` and `env` for local servers, `url` and `headers` for remote ones, `enabled: false` for servers the profile disables (capture reads it back), and keys of your own on an entry (`timeout`, `oauth` ...) kept. Zed documents no env-reference syntax, so `${VAR}` is resolved when applied and the file is written 0600, or kept as a placeholder with `--secrets never`; a secret written to a project's `.zed/settings.json` is warned about. `cwd` is dropped with a warning and SSE servers are skipped with a note; the plan says Zed starts a project's servers only in a trusted worktree, which kitbag leaves to Zed. Servers from a Zed extension and the older object-form `command` are not captured, with a note. Instructions go to Zed's personal `AGENTS.md` in the config directory, and in a project to the first of `.rules`, `.cursorrules`, `.windsurfrules`, `.clinerules`, `.github/copilot-instructions.md`, `AGENT.md` and `AGENTS.md` that exists, because Zed reads only that one (else to `AGENTS.md`, shared with Codex, Cursor, Antigravity, opencode, Grok Build and Windsurf, so applying several leaves one managed block; `.github/copilot-instructions.md` is shared with Copilot the same way); capture reads that file and names the ones Zed ignores. The Rules Library (stored in Zed's database), rules, commands, skills, agents and settings are not carried (#21).
@@ -230,7 +232,8 @@ All notable changes to this project are documented here. The format follows
 - `capture` with several tools (`--from all`, `detected` or a list) reports a tool whose config can't be read and captures the rest; it fails only if nothing could be read. A single `--from` still fails loudly.
 - `install.sh` and `install.ps1` download `kitbag-<target>.sha256`, the checksum name the release workflow uploads (found in the v0.1.0-rc.1 dry run).
 
-[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/cargopete/kitbag/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/cargopete/kitbag/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/cargopete/kitbag/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/cargopete/kitbag/compare/v0.1.4...v0.1.5
