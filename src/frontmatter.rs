@@ -202,6 +202,72 @@ fn render_entry(out: &mut String, key: &str, v: &Value) {
     }
 }
 
+/// Byte range of the YAML text between the `---` lines of `text` (which must
+/// start with the opening line), and where the closing line starts.
+fn header_span(text: &str) -> Option<(usize, usize)> {
+    let start = if text.starts_with("---\n") {
+        4
+    } else if text.starts_with("---\r\n") {
+        5
+    } else {
+        return None;
+    };
+    let mut offset = start;
+    for line in text[start..].split_inclusive('\n') {
+        if line.trim_end() == "---" {
+            return Some((start, offset));
+        }
+        offset += line.len();
+    }
+    None
+}
+
+/// `text` without the top-level frontmatter `keys` (and the lines of their
+/// values), everything else byte for byte; `None` when it has none of them.
+pub fn remove_keys(text: &str, keys: &[&str]) -> Option<String> {
+    let (bom, body) = match text.strip_prefix('\u{feff}') {
+        Some(rest) => ("\u{feff}", rest),
+        None => ("", text),
+    };
+    let (start, end) = header_span(body)?;
+    let mut out = String::new();
+    let mut dropping = false;
+    let mut removed = false;
+    for line in body[start..end].split_inclusive('\n') {
+        let top_level = !line.starts_with([' ', '\t', '\r', '\n']) && !line.starts_with("- ");
+        if top_level {
+            let key = line.split(':').next().unwrap_or("").trim();
+            dropping = line.contains(':') && keys.contains(&key);
+        }
+        if dropping {
+            removed = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    removed.then(|| format!("{bom}{}{out}{}", &body[..start], &body[end..]))
+}
+
+/// `text` with `entries` added at the end of its frontmatter, which is
+/// created if it has none. Nothing changes without entries.
+pub fn add_entries(text: &str, entries: &[(&str, Value)]) -> String {
+    let mut head = String::new();
+    for (k, v) in entries {
+        render_entry(&mut head, k, v);
+    }
+    if head.is_empty() {
+        return text.to_string();
+    }
+    let (bom, body) = match text.strip_prefix('\u{feff}') {
+        Some(rest) => ("\u{feff}", rest),
+        None => ("", text),
+    };
+    match header_span(body) {
+        Some((_, end)) => format!("{bom}{}{head}{}", &body[..end], &body[end..]),
+        None => format!("{bom}---\n{head}---\n\n{body}"),
+    }
+}
+
 /// Convenience for optional string entries.
 pub fn opt(s: &Option<String>) -> Value {
     s.as_ref().map_or(Value::Null, |s| Value::String(s.clone()))
@@ -259,6 +325,25 @@ mod tests {
         let back = parse(&out);
         assert_eq!(back.data["description"], json!("Review: staged"));
         assert_eq!(back.data["hint"], json!("[focus]"));
+    }
+
+    #[test]
+    fn removes_and_adds_keys_without_touching_the_rest() {
+        let text = "---\nname: x\ntargets:\n  - a\n  - b\n# note\ndisabled_on: [c]\nmodel: m\n---\n\nBody\n";
+        let out = remove_keys(text, &["targets", "disabled_on"]).unwrap();
+        assert_eq!(out, "---\nname: x\n# note\nmodel: m\n---\n\nBody\n");
+        assert_eq!(remove_keys(&out, &["targets"]), None);
+        assert_eq!(remove_keys("Body\n", &["targets"]), None);
+        let back = add_entries(&out, &[("targets", json!(["a"]))]);
+        assert_eq!(
+            back,
+            "---\nname: x\n# note\nmodel: m\ntargets:\n  - a\n---\n\nBody\n"
+        );
+        assert_eq!(
+            add_entries("Body\n", &[("disabled_on", json!(["c"]))]),
+            "---\ndisabled_on:\n  - c\n---\n\nBody\n"
+        );
+        assert_eq!(add_entries("Body\n", &[]), "Body\n");
     }
 
     #[test]

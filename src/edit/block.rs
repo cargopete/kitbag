@@ -362,6 +362,7 @@ pub fn unfold_rules(text: &str) -> (String, Vec<Rule>) {
                     .unwrap_or_default(),
                 always_apply: meta.get("alwaysApply").and_then(Value::as_bool),
                 body: lines.join("\n").trim().to_string(),
+                ..Default::default()
             });
         } else {
             remaining.push_str(inner);
@@ -537,6 +538,7 @@ mod tests {
                 globs: vec!["src/**/*.ts".into()],
                 always_apply: None,
                 body: "Strict mode.\n\nNo any.".into(),
+                ..Default::default()
             },
             Rule {
                 name: "style".into(),

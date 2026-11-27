@@ -52,6 +52,200 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// Why a thing with this `targets` allow-list and `disabled_on` deny-list is
+/// not applied to `target`, or `None` when it is.
+pub fn targeting_skip_reason(
+    targets: &Option<Vec<String>>,
+    disabled_on: &[String],
+    target: &str,
+) -> Option<&'static str> {
+    if let Some(only) = targets
+        && !only.iter().any(|t| t == target)
+    {
+        return Some("not in its 'targets'");
+    }
+    disabled_on
+        .iter()
+        .any(|t| t == target)
+        .then_some("listed in 'disabled_on'")
+}
+
+/// Move the older `only` / `except` names into `targets` / `disabled_on`.
+/// Returns (errors, warnings); `noun` is what is being targeted ("server").
+pub fn take_legacy_targeting(
+    targets: &mut Option<Vec<String>>,
+    disabled_on: &mut Vec<String>,
+    only: Option<Vec<String>>,
+    except: Option<Vec<String>>,
+    noun: &str,
+) -> (Vec<String>, Vec<String>) {
+    let (mut errors, mut warnings) = (Vec::new(), Vec::new());
+    if let Some(only) = only {
+        if targets.is_some() {
+            errors.push(
+                "both 'only' and 'targets' are set; 'only' is the older name of 'targets', keep one"
+                    .into(),
+            );
+        } else if only.is_empty() {
+            warnings.push(format!(
+                "'only' is empty, which means no restriction: the {noun} applies to every tool; remove it, or list tools in 'targets'"
+            ));
+        } else {
+            *targets = Some(only);
+        }
+    }
+    if let Some(except) = except {
+        if !disabled_on.is_empty() {
+            errors.push(
+                "both 'except' and 'disabled_on' are set; 'except' is the older name of 'disabled_on', keep one"
+                    .into(),
+            );
+        } else {
+            *disabled_on = except;
+        }
+    }
+    (errors, warnings)
+}
+
+/// Problems with `targets` / `disabled_on`, as (errors, warnings); see
+/// [`McpServer::targeting_issues`].
+pub fn targeting_issues(
+    targets: &Option<Vec<String>>,
+    disabled_on: &[String],
+    valid: &[&str],
+    noun: &str,
+) -> (Vec<String>, Vec<String>) {
+    let (mut errors, mut warnings) = (Vec::new(), Vec::new());
+    if targets.is_some() && !disabled_on.is_empty() {
+        errors.push(
+            "set either 'targets' (only these tools) or 'disabled_on' (all but these), not both ('only' / 'except' are their older names)"
+                .into(),
+        );
+    }
+    if targets.as_ref().is_some_and(Vec::is_empty) {
+        errors.push(format!(
+            "'targets' is empty, so the {noun} would apply nowhere; list at least one target, or remove the {noun}"
+        ));
+    }
+    let lists = [
+        ("targets", targets.as_deref().unwrap_or_default()),
+        ("disabled_on", disabled_on),
+    ];
+    for (field, ids) in lists {
+        for id in ids {
+            if !valid.contains(&id.as_str()) {
+                warnings.push(format!(
+                    "unknown target '{id}' in '{field}' is ignored (from a newer kitbag, or a typo?); valid targets: {}",
+                    valid.join(", ")
+                ));
+            }
+        }
+    }
+    (errors, warnings)
+}
+
+/// Per-tool targeting of a rule, command, skill or agent: the same
+/// `targets` / `disabled_on` as an MCP server has, kept in the item's
+/// frontmatter.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Targeting {
+    /// Only apply to these target ids (an allow-list).
+    pub targets: Option<Vec<String>>,
+    /// Never apply to these target ids (a deny-list).
+    pub disabled_on: Vec<String>,
+}
+
+/// The frontmatter keys that hold [`Targeting`], newest names first.
+pub const TARGETING_KEYS: [&str; 4] = ["targets", "disabled_on", "only", "except"];
+
+impl Targeting {
+    pub fn is_empty(&self) -> bool {
+        self.targets.is_none() && self.disabled_on.is_empty()
+    }
+
+    /// Why this item is not applied to `target`, or `None` when it is.
+    pub fn skip_reason(&self, target: &str) -> Option<&'static str> {
+        targeting_skip_reason(&self.targets, &self.disabled_on, target)
+    }
+
+    pub fn applies_to(&self, target: &str) -> bool {
+        self.skip_reason(target).is_none()
+    }
+
+    /// Take the targeting keys out of frontmatter `data`. `targets` and
+    /// `disabled_on` are always kitbag's; the older `only` / `except` only
+    /// when they hold a list of names (another tool's key of that name stays).
+    /// Returns the targeting and (errors, warnings), with aliases and
+    /// duplicates dealt with as for MCP servers.
+    pub fn take_from(
+        data: &mut Map<String, Value>,
+        valid: &[&str],
+        canonical: impl Fn(&str) -> String,
+        noun: &str,
+    ) -> (Targeting, Vec<String>, Vec<String>) {
+        let mut errors = Vec::new();
+        let mut list = |key: &str, only_if_list: bool| -> Option<Vec<String>> {
+            let v = data.get(key)?;
+            let names = match v {
+                Value::String(s) => Some(
+                    s.split(',')
+                        .map(|n| n.trim().to_string())
+                        .filter(|n| !n.is_empty())
+                        .collect::<Vec<_>>(),
+                ),
+                Value::Array(a) if a.iter().all(Value::is_string) => Some(
+                    a.iter()
+                        .filter_map(|n| n.as_str().map(|n| n.trim().to_string()))
+                        .filter(|n| !n.is_empty())
+                        .collect(),
+                ),
+                _ => None,
+            };
+            if names.is_none() && !only_if_list {
+                errors.push(format!("'{key}' must be a list of tool names"));
+            }
+            if names.is_some() || !only_if_list {
+                data.remove(key);
+            }
+            names
+        };
+        let mut targets = list("targets", false);
+        let mut disabled_on = list("disabled_on", false).unwrap_or_default();
+        let only = list("only", true);
+        let except = list("except", true);
+        let (e, mut warnings) =
+            take_legacy_targeting(&mut targets, &mut disabled_on, only, except, noun);
+        errors.extend(e);
+        for ids in targets.iter_mut().chain(std::iter::once(&mut disabled_on)) {
+            let mut seen = std::collections::BTreeSet::new();
+            ids.retain_mut(|id| {
+                *id = canonical(id);
+                seen.insert(id.clone())
+            });
+        }
+        let t = Targeting {
+            targets,
+            disabled_on,
+        };
+        let (e, w) = targeting_issues(&t.targets, &t.disabled_on, valid, noun);
+        errors.extend(e);
+        warnings.extend(w);
+        (t, errors, warnings)
+    }
+
+    /// The frontmatter entries that spell this targeting (none when empty).
+    pub fn entries(&self) -> Vec<(&'static str, Value)> {
+        let mut out = Vec::new();
+        if let Some(t) = &self.targets {
+            out.push(("targets", Value::from(t.clone())));
+        }
+        if !self.disabled_on.is_empty() {
+            out.push(("disabled_on", Value::from(self.disabled_on.clone())));
+        }
+        out
+    }
+}
+
 /// A portable MCP server definition.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -106,48 +300,20 @@ impl McpServer {
 
     /// Why this server is not applied to `target`, or `None` when it is.
     pub fn skip_reason(&self, target: &str) -> Option<&'static str> {
-        if let Some(only) = &self.targets
-            && !only.iter().any(|t| t == target)
-        {
-            return Some("not in its 'targets'");
-        }
-        self.disabled_on
-            .iter()
-            .any(|t| t == target)
-            .then_some("listed in 'disabled_on'")
+        targeting_skip_reason(&self.targets, &self.disabled_on, target)
     }
 
     /// Move the older `only` / `except` fields into `targets` / `disabled_on`.
     /// Returns (errors, warnings). An empty `only` keeps its old meaning, no
     /// restriction, with a warning; setting a field under both names is an error.
     pub fn take_legacy_targeting(&mut self) -> (Vec<String>, Vec<String>) {
-        let (mut errors, mut warnings) = (Vec::new(), Vec::new());
-        if let Some(only) = self.only.take() {
-            if self.targets.is_some() {
-                errors.push(
-                    "both 'only' and 'targets' are set; 'only' is the older name of 'targets', keep one"
-                        .into(),
-                );
-            } else if only.is_empty() {
-                warnings.push(
-                    "'only' is empty, which means no restriction: the server applies to every tool; remove it, or list tools in 'targets'"
-                        .into(),
-                );
-            } else {
-                self.targets = Some(only);
-            }
-        }
-        if let Some(except) = self.except.take() {
-            if !self.disabled_on.is_empty() {
-                errors.push(
-                    "both 'except' and 'disabled_on' are set; 'except' is the older name of 'disabled_on', keep one"
-                        .into(),
-                );
-            } else {
-                self.disabled_on = except;
-            }
-        }
-        (errors, warnings)
+        take_legacy_targeting(
+            &mut self.targets,
+            &mut self.disabled_on,
+            self.only.take(),
+            self.except.take(),
+            "server",
+        )
     }
 
     /// Problems with `targets` / `disabled_on`, given the valid target ids, as
@@ -155,34 +321,7 @@ impl McpServer {
     /// naming a tool from a newer kitbag still loads; the name matches no
     /// target here, so it is in effect ignored.
     pub fn targeting_issues(&self, valid: &[&str]) -> (Vec<String>, Vec<String>) {
-        let (mut errors, mut warnings) = (Vec::new(), Vec::new());
-        if self.targets.is_some() && !self.disabled_on.is_empty() {
-            errors.push(
-                "set either 'targets' (only these tools) or 'disabled_on' (all but these), not both ('only' / 'except' are their older names)"
-                    .into(),
-            );
-        }
-        if self.targets.as_ref().is_some_and(Vec::is_empty) {
-            errors.push(
-                "'targets' is empty, so the server would apply nowhere; list at least one target, or remove the server"
-                    .into(),
-            );
-        }
-        let lists = [
-            ("targets", self.targets.as_deref().unwrap_or_default()),
-            ("disabled_on", self.disabled_on.as_slice()),
-        ];
-        for (field, ids) in lists {
-            for id in ids {
-                if !valid.contains(&id.as_str()) {
-                    warnings.push(format!(
-                        "unknown target '{id}' in '{field}' is ignored (from a newer kitbag, or a typo?); valid targets: {}",
-                        valid.join(", ")
-                    ));
-                }
-            }
-        }
-        (errors, warnings)
+        targeting_issues(&self.targets, &self.disabled_on, valid, "server")
     }
 
     /// Every string value in the definition, with a human-readable location.
@@ -280,6 +419,7 @@ pub struct Rule {
     /// means "on demand" (the agent decides based on the description).
     pub always_apply: Option<bool>,
     pub body: String,
+    pub targeting: Targeting,
 }
 
 /// When a rule is loaded.
@@ -312,11 +452,12 @@ pub struct Command {
     pub extra: Map<String, Value>,
     /// Markdown prompt. `$ARGUMENTS` is the full argument string, `$1`..`$9` positionals.
     pub body: String,
+    pub targeting: Targeting,
 }
 
 /// A custom agent (Copilot's `.agent.md`, once called a chat mode): a
 /// persona with its own instructions, tools and model.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Agent {
     pub name: String,
     pub description: Option<String>,
@@ -325,6 +466,7 @@ pub struct Agent {
     pub extra: Map<String, Value>,
     /// Markdown instructions for the agent.
     pub body: String,
+    pub targeting: Targeting,
 }
 
 /// A hook: a shell command a tool runs on an event (before a tool call, when
@@ -363,11 +505,14 @@ pub struct SkillFile {
 }
 
 /// An agent skill: a directory with `SKILL.md` and optional supporting files.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Skill {
     pub name: String,
     pub description: Option<String>,
     pub files: Vec<SkillFile>,
+    /// Read from `SKILL.md`'s frontmatter when the profile is loaded, and
+    /// taken out of the file's content here; written back by [`crate::profile_io`].
+    pub targeting: Targeting,
 }
 
 impl Skill {
@@ -425,6 +570,65 @@ impl Profile {
         self.skills.sort_by(|a, b| a.name.cmp(&b.name));
         self.agents.sort_by(|a, b| a.name.cmp(&b.name));
         self.hook_files.sort_by(|a, b| a.path.cmp(&b.path));
+    }
+}
+
+/// One rule, command, skill or agent a profile keeps off a target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedItem {
+    /// `rule`, `command`, `skill` or `agent`.
+    pub kind: &'static str,
+    pub name: String,
+    pub why: &'static str,
+}
+
+impl SkippedItem {
+    /// `rule <name>`, as items are named in plans and records.
+    pub fn label(&self) -> String {
+        format!("{} {}", self.kind, self.name)
+    }
+}
+
+impl Profile {
+    /// The rules, commands, skills and agents not applied to `target`.
+    pub fn skipped_items(&self, target: &str) -> Vec<SkippedItem> {
+        let mut out = Vec::new();
+        let mut add = |kind: &'static str, name: &str, t: &Targeting| {
+            if let Some(why) = t.skip_reason(target) {
+                out.push(SkippedItem {
+                    kind,
+                    name: name.to_string(),
+                    why,
+                });
+            }
+        };
+        for r in &self.rules {
+            add("rule", &r.name, &r.targeting);
+        }
+        for c in &self.commands {
+            add("command", &c.name, &c.targeting);
+        }
+        for s in &self.skills {
+            add("skill", &s.name, &s.targeting);
+        }
+        for a in &self.agents {
+            add("agent", &a.name, &a.targeting);
+        }
+        out
+    }
+
+    /// This profile without the items not applied to `target`; `None` when
+    /// there are none, so the caller can keep using the profile itself.
+    pub fn for_target(&self, target: &str) -> Option<Profile> {
+        if self.skipped_items(target).is_empty() {
+            return None;
+        }
+        let mut p = self.clone();
+        p.rules.retain(|r| r.targeting.applies_to(target));
+        p.commands.retain(|c| c.targeting.applies_to(target));
+        p.skills.retain(|s| s.targeting.applies_to(target));
+        p.agents.retain(|a| a.targeting.applies_to(target));
+        Some(p)
     }
 }
 
@@ -659,6 +863,44 @@ mod tests {
     }
 
     #[test]
+    fn item_targeting_reuses_the_server_rules() {
+        let t = Targeting {
+            targets: Some(vec!["codex".into()]),
+            ..Default::default()
+        };
+        assert_eq!(t.skip_reason("cursor"), Some("not in its 'targets'"));
+        assert!(t.applies_to("codex"));
+        let t = Targeting {
+            disabled_on: vec!["codex".into()],
+            ..Default::default()
+        };
+        assert_eq!(t.skip_reason("codex"), Some("listed in 'disabled_on'"));
+        assert!(Targeting::default().applies_to("codex"));
+        assert_eq!(
+            t.entries(),
+            vec![("disabled_on", serde_json::json!(["codex"]))]
+        );
+        assert!(Targeting::default().entries().is_empty());
+
+        let mut p = Profile::new("x");
+        p.rules.push(Rule {
+            name: "r".into(),
+            targeting: t.clone(),
+            ..Default::default()
+        });
+        p.commands.push(Command {
+            name: "c".into(),
+            ..Default::default()
+        });
+        assert!(p.for_target("cursor").is_none());
+        let skipped = p.skipped_items("codex");
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].label(), "rule r");
+        let only = p.for_target("codex").unwrap();
+        assert!(only.rules.is_empty() && only.commands.len() == 1);
+    }
+
+    #[test]
     fn names_and_slugs() {
         assert!(is_valid_name("pdf-tools"));
         assert!(is_valid_name("a.b_c"));
@@ -708,6 +950,7 @@ mod tests {
                 file("Lib/b.sh"),
                 file("aux.txt"),
             ],
+            ..Default::default()
         });
         let issues = portable_name_issues(&p);
         assert_eq!(issues.len(), 4, "{issues:#?}");

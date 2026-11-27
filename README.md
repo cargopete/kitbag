@@ -183,7 +183,7 @@ url = "https://mcp.linear.app/mcp"
 headers = { Authorization = "Bearer ${LINEAR_API_KEY}" }
 # transport = "sse"           # stdio | http | sse (only needed for legacy SSE)
 # targets = ["claude-code"]   # only these tools (see "Per-tool MCP servers")
-# disabled_on = ["cursor"]    # or every tool except these
+# disabled_on = ["cursor"]    # or every tool except these (also for rules, commands, skills, agents)
 # disabled = true             # keep the definition; Codex and Grok Build write enabled = false, Antigravity and opencode disabled = true, others skip it
 
 [settings.claude-code]        # per-tool settings, allow-listed keys only
@@ -242,6 +242,38 @@ is an addition like any other. `capture --force` into an existing profile keeps 
 and `disabled_on` of the servers it captures again, and keeps the profile's servers it found in
 no tool (disabled everywhere, or for a tool not installed on this machine), with a note naming
 them; `--prune` drops those instead.
+
+**Per-tool rules, commands, skills and agents.** The same `targets` / `disabled_on` (and the
+older `only` / `except`, with the same rules and warnings) work on a rule, command, skill or
+agent. They are frontmatter keys in the item's markdown file: `rules/<name>.md`,
+`commands/<name>.md`, `agents/<name>.md` and the `SKILL.md` of a skill. The list is YAML, or
+comma-separated names in a string. kitbag reads them when it loads the profile and does not
+pass them on: the files it writes into a tool carry no `targets` / `disabled_on`. Items without
+them are written as before.
+
+```markdown
+---
+description: Deploy to staging
+disabled_on: [codex]       # every tool but Codex; or: targets: [claude-code]
+allowed-tools: Bash(make deploy:*)
+---
+
+Run `make deploy` ...
+```
+
+An item not enabled for a tool is not written to it, and the plan says so (`command 'deploy'
+skipped on codex: disabled in profile (listed in 'disabled_on')`). A rule that a tool takes
+folded into its instructions file (Codex, Gemini CLI, ...) is left out of that block. If kitbag
+wrote the item's file to a tool earlier and the profile now disables it there, apply removes it,
+with a backup, so `kitbag undo` puts it back, under the same conditions as for MCP servers:
+`applied-files.json` in the state directory must show that an apply of the same profile (the
+same name and source) wrote that file, and it must be unchanged since (a skill: every file the
+apply wrote, with its folder removed once empty, and files you added to it left). An item you
+added by hand, one another profile wrote, or one you edited stays, and the plan says why. From a
+git source the removal is listed in the plan like any change. `kitbag status` shows an item
+disabled for a tool that is still in it (`apply removes it` or `apply leaves it`).
+`capture --force` keeps the `targets` / `disabled_on` of the items it captures again, and keeps
+the profile's items with them that it found in no tool; `--prune` drops those.
 
 **Env references.** `${NAME}` takes its value from the environment. `${NAME:-fallback}`
 falls back to a non-secret default (it is written to disk wherever the variable is unset, so
@@ -624,7 +656,7 @@ after the plugin directory is gone.
 Apply is additive: removing a server from the profile does not remove it from tools you
 already applied to. Use `kitbag undo`, or remove it in the tool. (Disabling a server for a
 tool with `targets` / `disabled_on` does remove it there, if kitbag added it; see
-"Per-tool MCP servers".)
+"Per-tool MCP servers" and "Per-tool rules, commands, skills and agents".)
 
 ## Keeping instructions in sync
 
@@ -857,7 +889,7 @@ wrapping of their own.
 | Command | What it does |
 |---|---|
 | `kitbag init [DIR]` | Write a commented starter profile |
-| `kitbag capture [--from IDS] [-o DIR] [--dry-run] [--force] [--prune] [--include hooks]` | Read the current setup into a profile (secrets redacted). Writes only into a new or empty directory. `--force` replaces an existing profile's files and leaves anything else in the directory alone; the profile's MCP servers found in no tool are kept unless `--prune`. With several tools, one whose config can't be read is reported and the rest are captured |
+| `kitbag capture [--from IDS] [-o DIR] [--dry-run] [--force] [--prune] [--include hooks]` | Read the current setup into a profile (secrets redacted). Writes only into a new or empty directory. `--force` replaces an existing profile's files and leaves anything else in the directory alone; the profile's MCP servers (and rules, commands, skills and agents with `targets` / `disabled_on`) found in no tool are kept unless `--prune`. With several tools, one whose config can't be read is reported and the rest are captured |
 | `kitbag diff <SOURCE> [--to IDS] [--exit-code]` | Show exactly what `apply` would change; never writes |
 | `kitbag apply <SOURCE> [--to IDS] [--yes] [--dry-run] [--apply-hooks]` | Plan, confirm, write with backups; hooks only with `--apply-hooks` (and, from a git source, `--trust-source`) |
 | `kitbag inspect <SOURCE> [--to IDS] [--json]` | What a profile or plugin holds, what in it runs commands, reads env vars, installs executables or connects to the network, and (for the tools in `--to`, default `detected`) which files `apply` would write; never writes or starts anything |

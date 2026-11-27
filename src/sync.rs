@@ -10,6 +10,10 @@
 //! MCP server entries kitbag writes are recorded the same way, in
 //! `applied-servers.json`: a server disabled for a tool in the profile is only
 //! removed from it when kitbag put it there and it is unchanged since.
+//!
+//! The same goes for the rule, command, skill and agent files an apply writes
+//! (`applied-files.json`): one the profile disables for a tool is only removed
+//! from it when this profile wrote that file and it is unchanged since.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -30,6 +34,7 @@ use crate::txn::{Status, Store, sha256, write_atomic};
 
 const FILE: &str = "applied.json";
 const SERVERS_FILE: &str = "applied-servers.json";
+const FILES_FILE: &str = "applied-files.json";
 /// Records kept per item; older ones only matter after several undos.
 const KEEP_PER_ITEM: usize = 10;
 
@@ -141,6 +146,7 @@ pub fn record(
     tx: Option<&str>,
 ) -> Result<()> {
     record_servers(state_dir, plan, env, profile, tx)?;
+    record_files(state_dir, plan, env, profile, tx)?;
     if plan.items.is_empty() {
         return Ok(());
     }
@@ -363,6 +369,157 @@ fn record_servers(
     fs::create_dir_all(state_dir).with_context(|| format!("creating {}", state_dir.display()))?;
     let json = serde_json::to_string_pretty(&kept)? + "\n";
     write_atomic(&state_dir.join(SERVERS_FILE), json.as_bytes(), Some(0o600))
+}
+
+/// A rule, command, skill or agent an apply wrote to a tool, or removed from it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileRecord {
+    pub target: String,
+    /// The real file, or for a skill its directory.
+    pub path: PathBuf,
+    /// `rule <name>`, `command <name>`, `skill <name>` or `agent <name>`.
+    pub item: String,
+    /// `user` or `project`.
+    pub scope: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<PathBuf>,
+    /// Name of the profile that was applied.
+    pub profile: String,
+    /// Where that profile came from (see [`crate::source::Resolved::source`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// [`hash`] of the file as written ([`files_hash`] for a skill); `None`
+    /// when the apply removed it.
+    pub hash: Option<String>,
+    /// For a skill: the hash of each file's content, by path under `path`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub files: BTreeMap<String, String>,
+    /// The transaction that wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx: Option<String>,
+    pub at_ms: u128,
+}
+
+/// A hash of a file's bytes, for the files of a skill.
+pub fn content_hash(bytes: &[u8]) -> String {
+    sha256(Some(bytes)).unwrap_or_default()
+}
+
+/// One hash for the files of a skill (path -> [`content_hash`]).
+pub fn files_hash(files: &BTreeMap<String, String>) -> String {
+    let all: String = files.iter().map(|(p, h)| format!("{p}\0{h}\n")).collect();
+    content_hash(all.as_bytes())
+}
+
+fn files_backup(state_dir: &Path) -> PathBuf {
+    state_dir.join(format!("{FILES_FILE}.bak"))
+}
+
+/// The file records, and a warning when the file can't be parsed (it is then
+/// treated as empty, so nothing is removed, and the next apply that writes
+/// one copies it to `.bak` and replaces it).
+fn load_files(state_dir: &Path) -> Result<(Vec<FileRecord>, Option<String>)> {
+    let path = state_dir.join(FILES_FILE);
+    match fs::read_to_string(&path) {
+        Ok(t) => Ok(match serde_json::from_str(&t) {
+            Ok(v) => (v, None),
+            Err(e) => (
+                Vec::new(),
+                Some(format!(
+                    "could not read {} ({e}), so no rule, command, skill or agent is removed for being disabled in the profile; the next apply starts the file afresh and keeps the old one as {}",
+                    path.display(),
+                    files_backup(state_dir).display()
+                )),
+            ),
+        }),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok((Vec::new(), None)),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// For every (target, file, item) at `env`'s scope (and project), the record
+/// of the latest apply that still stands (not undone), and a warning if the
+/// records can't be read.
+pub fn applied_files(state_dir: &Path, env: &Env) -> Result<(Vec<FileRecord>, Option<String>)> {
+    let undone: Vec<String> = Store::new(state_dir)
+        .list()?
+        .into_iter()
+        .filter(|t| t.status != Status::Applied)
+        .map(|t| t.id)
+        .collect();
+    let mut latest: BTreeMap<(String, PathBuf, String), FileRecord> = BTreeMap::new();
+    let (records, warning) = load_files(state_dir)?;
+    for r in records {
+        let matches = r.scope == env.scope.to_string()
+            && (env.scope == Scope::User || r.project.as_deref() == Some(env.project.as_path()));
+        if !matches || r.tx.as_ref().is_none_or(|t| undone.contains(t)) {
+            continue;
+        }
+        latest.insert((r.target.clone(), r.path.clone(), r.item.clone()), r);
+    }
+    Ok((latest.into_values().collect(), warning))
+}
+
+/// Remember the rule, command, skill and agent files `plan` wrote or removed,
+/// once written as `tx`.
+fn record_files(
+    state_dir: &Path,
+    plan: &Plan,
+    env: &Env,
+    profile: &str,
+    tx: Option<&str>,
+) -> Result<()> {
+    let Some(tx) = tx else {
+        return Ok(());
+    };
+    if plan.file_writes.is_empty() {
+        return Ok(());
+    }
+    let now = now_ms();
+    let (mut all, unreadable) = load_files(state_dir)?;
+    if unreadable.is_some() {
+        let path = state_dir.join(FILES_FILE);
+        let data = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        write_atomic(&files_backup(state_dir), &data, Some(0o600))?;
+    }
+    for w in &plan.file_writes {
+        all.push(FileRecord {
+            target: w.target.clone(),
+            path: w.path.clone(),
+            item: w.item.clone(),
+            scope: env.scope.to_string(),
+            project: (env.scope == Scope::Project).then(|| env.project.clone()),
+            profile: profile.to_string(),
+            source: plan.source.clone(),
+            hash: w.hash.clone(),
+            files: w.files.clone(),
+            tx: Some(tx.to_string()),
+            at_ms: now,
+        });
+    }
+    // Keep the newest few per item.
+    let mut seen: BTreeMap<(String, PathBuf, String, String, Option<PathBuf>), usize> =
+        BTreeMap::new();
+    let mut kept: Vec<FileRecord> = all
+        .into_iter()
+        .rev()
+        .filter(|r| {
+            let key = (
+                r.target.clone(),
+                r.path.clone(),
+                r.item.clone(),
+                r.scope.clone(),
+                r.project.clone(),
+            );
+            let n = seen.entry(key).or_default();
+            *n += 1;
+            *n <= KEEP_PER_ITEM
+        })
+        .collect();
+    kept.reverse();
+    fs::create_dir_all(state_dir).with_context(|| format!("creating {}", state_dir.display()))?;
+    let json = serde_json::to_string_pretty(&kept)? + "\n";
+    write_atomic(&state_dir.join(FILES_FILE), json.as_bytes(), Some(0o600))
 }
 
 /// How one item compares across the tool, the last apply and the profile.

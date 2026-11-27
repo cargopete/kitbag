@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::adapters::{
-    Adapter, ApplyOptions, Env, Feature, HookWrite, Level, Note, Scope, ServerWrite, Support, Work,
+    Adapter, ApplyOptions, Env, Feature, FileWrite, HookWrite, Level, Note, Scope, ServerWrite,
+    Support, Work,
 };
-use crate::model::Profile;
+use crate::model::{Profile, SkippedItem};
 use crate::plan_fs::{FileChange, PlanFs};
 use crate::policy;
 use crate::secrets::{Redaction, env_var_name, reference};
@@ -279,6 +280,14 @@ pub struct Plan {
     /// Hook entries the plan writes, with the real settings and script files
     /// (recorded after a write, see [`crate::hooks::record`]).
     pub hook_writes: Vec<HookWrite>,
+    /// Rule, command, skill and agent files the plan writes or removes, with
+    /// the real path (recorded after a write, see [`crate::sync::record`]).
+    pub file_writes: Vec<FileWrite>,
+    /// (target, `rule <name>` ...) of items the plan removes from a tool,
+    /// because the profile now disables them there (`targets` / `disabled_on`).
+    pub removed_items: Vec<(String, String)>,
+    /// Skill directories the plan empties, taken out once the write is done.
+    pub prune_dirs: Vec<PathBuf>,
     /// Where the profile comes from ([`ApplyOptions::source`]).
     pub source: Option<String>,
     /// At project scope, the project directory (as given, and canonical):
@@ -312,13 +321,11 @@ pub fn plan(
     // `~/...` paths in the profile point into this machine's home directory.
     let expanded = crate::portable::expand_profile(profile, env);
     let profile = &expanded;
+    let original = profile;
     // Project configs may come from someone else's repository: never let a
     // symlink in it redirect a write outside the project.
     let mut work = Work {
-        fs: match env.scope {
-            Scope::Project => PlanFs::rooted(&env.project, true),
-            Scope::User => PlanFs::rooted(&env.home, false),
-        },
+        fs: plan_fs(env),
         profile: profile.name.clone(),
         home: env.home.clone(),
         targets: targets
@@ -338,6 +345,25 @@ pub fn plan(
             );
             skipped.push(a.id().to_string());
             continue;
+        }
+        // Rules, commands, skills and agents the profile keeps off this tool
+        // are planned as if they weren't in it, and removed if kitbag put them there.
+        let skipped = profile.skipped_items(a.id());
+        let for_target = profile.for_target(a.id());
+        let profile = for_target.as_ref().unwrap_or(profile);
+        for s in &skipped {
+            if a.supports(env.scope, item_feature(s)) != Support::None {
+                work.info(
+                    a.id(),
+                    format!(
+                        "{} '{}' skipped on {}: disabled in profile ({})",
+                        s.kind,
+                        s.name,
+                        a.id(),
+                        s.why
+                    ),
+                );
+            }
         }
         let mut unsupported = Vec::new();
         let items = [
@@ -377,8 +403,20 @@ pub fn plan(
             );
         }
         a.apply(profile, env, opts, &mut work)?;
+        remove_disabled_items(&mut work, *a, env, opts, original, &skipped)?;
         applied.push(a.id().to_string());
     }
+    let file_writes: Vec<FileWrite> = work
+        .file_writes
+        .iter()
+        .map(|w| FileWrite {
+            path: work
+                .fs
+                .real_path(&w.path)
+                .unwrap_or_else(|_| w.path.clone()),
+            ..w.clone()
+        })
+        .collect();
     let servers = review_servers(profile, &work.changed_servers);
     let removed_servers = review_servers(profile, &work.removed_servers);
     let withheld_removals = review_servers(profile, &work.withheld_removals);
@@ -519,6 +557,9 @@ pub fn plan(
         withheld_removals,
         server_writes,
         hook_writes,
+        file_writes,
+        removed_items: work.removed_items,
+        prune_dirs: work.prune_dirs,
         source: opts.source.clone(),
         confine_to: (env.scope == Scope::Project).then(|| {
             let root = env
@@ -527,6 +568,221 @@ pub fn plan(
                 .unwrap_or_else(|_| env.project.clone());
             (env.project.clone(), root)
         }),
+    })
+}
+
+fn plan_fs(env: &Env) -> PlanFs {
+    match env.scope {
+        Scope::Project => PlanFs::rooted(&env.project, true),
+        Scope::User => PlanFs::rooted(&env.home, false),
+    }
+}
+
+fn item_feature(s: &SkippedItem) -> Feature {
+    match s.kind {
+        "rule" => Feature::Rules,
+        "command" => Feature::Commands,
+        "skill" => Feature::Skills,
+        _ => Feature::Agents,
+    }
+}
+
+/// Remove from `a`'s tool the rules, commands, skills and agents the profile
+/// disables there, but only those an earlier apply of this same profile (and
+/// source) wrote and that are unchanged since. Anything else (added by hand,
+/// by another profile, or edited) stays, and the plan says why.
+fn remove_disabled_items(
+    work: &mut Work,
+    a: &dyn Adapter,
+    env: &Env,
+    opts: &ApplyOptions,
+    profile: &Profile,
+    skipped: &[SkippedItem],
+) -> Result<()> {
+    let id = a.id();
+    for s in skipped {
+        if a.supports(env.scope, item_feature(s)) == Support::None {
+            continue;
+        }
+        let label = s.label();
+        let what = format!("{} '{}'", s.kind, s.name);
+        let disabled = format!("{what} is disabled for {id} in the profile");
+        let records: Vec<&crate::sync::FileRecord> = opts
+            .applied_files
+            .iter()
+            .filter(|r| r.target == id && r.item == label && r.hash.is_some())
+            .collect();
+        if records.is_empty() {
+            if let Some(path) = find_unrecorded(work, a, env, opts, profile, s) {
+                let file = crate::ui::tildify(&path, &work.home);
+                work.warn(
+                    id,
+                    format!(
+                        "{disabled}, but kitbag has no record of adding it to {file}, so it was left in place; remove it by hand if you don't want it"
+                    ),
+                );
+            }
+            continue;
+        }
+        let remote = opts.git_removals.is_some();
+        for r in records {
+            // The files of the item that are there now, as (path under r.path, bytes).
+            let mut present: Vec<(String, Vec<u8>)> = Vec::new();
+            if r.files.is_empty() {
+                if let Some(b) = work.fs.read_bytes(&r.path)? {
+                    present.push((String::new(), b));
+                }
+            } else {
+                for rel in r.files.keys() {
+                    if let Some(b) = work
+                        .fs
+                        .read_bytes(&crate::plan_fs::join_rel(&r.path, rel))?
+                    {
+                        present.push((rel.clone(), b));
+                    }
+                }
+            }
+            if present.is_empty() {
+                continue;
+            }
+            let file = crate::ui::tildify(&r.path, &work.home);
+            let unchanged = if r.files.is_empty() {
+                let text = String::from_utf8_lossy(&present[0].1).into_owned();
+                r.hash.as_deref() == Some(crate::sync::hash(&text).as_str())
+            } else {
+                present
+                    .iter()
+                    .all(|(rel, b)| r.files.get(rel) == Some(&crate::sync::content_hash(b)))
+            };
+            let keep = if r.profile != work.profile {
+                Some(format!(
+                    "{disabled}, but profile '{}' added it to {file}, so it was left in place",
+                    r.profile
+                ))
+            } else if r.source.is_none() && remote {
+                Some(format!(
+                    "{disabled}, but kitbag's record of adding it to {file} doesn't say where the profile came from, and this one is from a git source, so it was left in place; remove it by hand if you don't want it"
+                ))
+            } else if r.source.is_some() && r.source != opts.source {
+                Some(format!(
+                    "{disabled}, but a profile '{}' from {} added it to {file}, so it was left in place",
+                    r.profile,
+                    r.source.as_deref().unwrap_or_default()
+                ))
+            } else if !unchanged {
+                Some(format!(
+                    "{disabled}, but it was edited in {file} since kitbag added it, so it was left in place; remove it by hand if you don't want it"
+                ))
+            } else if !opts.overwrite {
+                Some(format!(
+                    "kept {what} in {file}, disabled for {id} in the profile, because --no-overwrite was given"
+                ))
+            } else {
+                None
+            };
+            if let Some(msg) = keep {
+                work.warn(id, msg);
+                continue;
+            }
+            for (rel, _) in &present {
+                let path = if rel.is_empty() {
+                    r.path.clone()
+                } else {
+                    crate::plan_fs::join_rel(&r.path, rel)
+                };
+                work.fs.remove(&path)?;
+                if !rel.is_empty() {
+                    // Directories the skill leaves empty, deepest first.
+                    let mut dir = path.parent();
+                    while let Some(d) = dir.filter(|d| d.starts_with(&r.path)) {
+                        if !work.prune_dirs.contains(&d.to_path_buf()) {
+                            work.prune_dirs.push(d.to_path_buf());
+                        }
+                        dir = d.parent();
+                    }
+                }
+            }
+            work.info(
+                id,
+                format!(
+                    "{what} removed from {file}: disabled for {id} in the profile (kitbag added it there before)"
+                ),
+            );
+            work.file_writes.push(FileWrite {
+                target: id.to_string(),
+                path: r.path.clone(),
+                item: label.clone(),
+                hash: None,
+                files: Default::default(),
+            });
+            work.removed_items.push((id.to_string(), label.clone()));
+        }
+    }
+    work.prune_dirs
+        .sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+    Ok(())
+}
+
+/// Where `a`'s tool already has a file for the disabled item `s` that kitbag
+/// has no record of writing, if the profile's own copy would differ from it
+/// (found by planning that one item into a scratch copy of the file system).
+fn find_unrecorded(
+    work: &Work,
+    a: &dyn Adapter,
+    env: &Env,
+    opts: &ApplyOptions,
+    profile: &Profile,
+    s: &SkippedItem,
+) -> Option<PathBuf> {
+    let mut one = Profile::new(profile.name.clone());
+    match s.kind {
+        "rule" => one
+            .rules
+            .extend(profile.rules.iter().find(|r| r.name == s.name).cloned()),
+        "command" => one
+            .commands
+            .extend(profile.commands.iter().find(|c| c.name == s.name).cloned()),
+        "skill" => one
+            .skills
+            .extend(profile.skills.iter().find(|k| k.name == s.name).cloned()),
+        _ => one
+            .agents
+            .extend(profile.agents.iter().find(|g| g.name == s.name).cloned()),
+    }
+    let mut scratch = Work {
+        fs: plan_fs(env),
+        profile: profile.name.clone(),
+        home: env.home.clone(),
+        targets: work.targets.clone(),
+        ..Work::default()
+    };
+    a.apply(&one, env, opts, &mut scratch).ok()?;
+    let label = s.label();
+    if s.kind == "rule"
+        && let Some(t) = scratch
+            .tracked
+            .iter()
+            .find(|t| t.block.is_none() && t.item == label)
+    {
+        let real = scratch.fs.real_path(&t.path).ok()?;
+        return real.is_file().then_some(real);
+    }
+    scratch.fs.changes().into_iter().find_map(|c| {
+        if c.before.is_none() || c.after.is_none() {
+            return None;
+        }
+        if s.kind == "skill" {
+            c.path
+                .ancestors()
+                .find(|d| d.file_name().is_some_and(|n| n == s.name.as_str()))
+                .map(Path::to_path_buf)
+        } else {
+            let stem = format!("{}.", s.name);
+            c.path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(&stem))
+                .then_some(c.path)
+        }
     })
 }
 
@@ -628,17 +884,20 @@ pub fn commit_from(
     }
     let store = Store::new(state_dir);
     let private = plan.private.clone();
-    store
-        .commit_from(
-            &plan.changes,
-            description,
-            &plan.targets,
-            &WriteOptions {
-                private,
-                executable: plan.executable.clone(),
-                confine_to: plan.confine_to.clone(),
-            },
-            git,
-        )
-        .map(Some)
+    let tx = store.commit_from(
+        &plan.changes,
+        description,
+        &plan.targets,
+        &WriteOptions {
+            private,
+            executable: plan.executable.clone(),
+            confine_to: plan.confine_to.clone(),
+        },
+        git,
+    )?;
+    // Directories a removed skill left empty (undo puts its files back).
+    for d in &plan.prune_dirs {
+        let _ = std::fs::remove_dir(d);
+    }
+    Ok(Some(tx))
 }

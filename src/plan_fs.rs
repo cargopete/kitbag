@@ -536,6 +536,28 @@ impl PlanFs {
         Ok(())
     }
 
+    /// Plan the removal of `path`. A file that isn't there stays as it is.
+    pub fn remove(&mut self, path: &Path) -> Result<()> {
+        let real = self.real_path(path)?;
+        if let Some(s) = self.staged.get_mut(&real) {
+            s.after = None;
+            return Ok(());
+        }
+        if real.is_dir() {
+            bail!("{} is a directory, expected a file", path.display());
+        }
+        if let Some(before) = read_opt(&real)? {
+            self.staged.insert(
+                real,
+                Staged {
+                    before: Some(before),
+                    after: None,
+                },
+            );
+        }
+        Ok(())
+    }
+
     /// Mark a file written by this plan as executable (Unix; ignored elsewhere).
     pub fn mark_executable(&mut self, path: &Path) -> Result<()> {
         let real = self.real_path(path)?;

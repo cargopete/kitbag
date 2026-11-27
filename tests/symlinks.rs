@@ -239,6 +239,7 @@ fn copilot_agents_are_not_read_or_written_through_a_link_out_of_the_project() {
         description: Some("Reviews".into()),
         extra: Default::default(),
         body: "Review.".into(),
+        ..Default::default()
     });
     let env = sb.env(Scope::Project);
     let engine_opts = opts(&p);
