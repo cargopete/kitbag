@@ -241,6 +241,9 @@ pub struct Work {
     pub server_writes: Vec<ServerWrite>,
     /// Hook entries the plan writes, for the state records.
     pub hook_writes: Vec<HookWrite>,
+    /// (target, [`crate::hooks::describe`]) of profile hooks the adapter
+    /// refused to write (redaction marker, missing script, no event ...).
+    pub hook_skipped: Vec<(String, String)>,
     /// Instruction blocks and rule files kitbag manages, written or not, for
     /// drift detection (`kitbag status`).
     pub tracked: Vec<Tracked>,

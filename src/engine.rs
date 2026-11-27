@@ -291,6 +291,9 @@ pub struct Plan {
     /// Hook entries the plan writes, with the real settings and script files
     /// (recorded after a write, see [`crate::hooks::record`]).
     pub hook_writes: Vec<HookWrite>,
+    /// (target, hook as [`crate::hooks::describe`] spells it) of the profile's
+    /// hooks that a target refused to write; `status` reports them.
+    pub hook_skipped: Vec<(String, String)>,
     /// Rule, command, skill and agent files the plan writes or removes, with
     /// the real path (recorded after a write, see [`crate::sync::record`]).
     pub file_writes: Vec<FileWrite>,
@@ -575,6 +578,7 @@ pub fn plan(
         withheld_removals,
         server_writes,
         hook_writes,
+        hook_skipped: work.hook_skipped,
         file_writes,
         removed_items: work.removed_items,
         prune_dirs: work.prune_dirs,

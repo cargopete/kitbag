@@ -341,6 +341,10 @@ const NO_HOOKS: &[(&str, &str)] = &[
         "windsurf",
         "Windsurf's hook file location and event names are not verified yet (its docs now point to Devin Desktop's .devin/hooks.v1.json)",
     ),
+    (
+        "zed",
+        "kitbag knows of no hook file for Zed (not verified against its docs)",
+    ),
 ];
 
 /// The hook format of the target `id`.
@@ -1209,14 +1213,21 @@ pub(super) fn apply(
                     file.display()
                 ),
             );
+            work.hook_skipped.extend(
+                profile
+                    .hooks
+                    .iter()
+                    .map(|h| (id.to_string(), hooks::describe(h))),
+            );
             return Ok(());
         }
     };
     let mut changed = false;
     let mut written = 0;
+    let mut landed: Vec<usize> = Vec::new();
     let mut matchers = false;
     let mut writes: Vec<HookWrite> = Vec::new();
-    for h in &profile.hooks {
+    for (n, h) in profile.hooks.iter().enumerate() {
         let what = describe(h);
         let Some(event) = fmt.native_event(&h.event) else {
             work.warn(
@@ -1407,6 +1418,7 @@ pub(super) fn apply(
             }
         }
         written += 1;
+        landed.push(n);
         if wrote || rels.iter().any(|r| script_changed.contains(r)) {
             changed |= wrote;
             writes.push(HookWrite {
@@ -1445,6 +1457,14 @@ pub(super) fn apply(
         work.fs.write(file, doc.render())?;
     }
     work.hook_writes.extend(writes);
+    work.hook_skipped.extend(
+        profile
+            .hooks
+            .iter()
+            .enumerate()
+            .filter(|(n, _)| !landed.contains(n))
+            .map(|(_, h)| (id.to_string(), hooks::describe(h))),
+    );
     Ok(())
 }
 

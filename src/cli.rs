@@ -2171,6 +2171,19 @@ fn hook_rows(
                     ),
                     None,
                 )),
+                Some(_)
+                    if plan
+                        .hook_skipped
+                        .iter()
+                        .any(|(t, d)| t == id && *d == crate::hooks::describe(h)) =>
+                {
+                    rows.push(row(
+                        item,
+                        State::NotApplied,
+                        Some("apply refuses to write it; see the warning 'hook not applied' in 'kitbag diff'".to_string()),
+                        None,
+                    ));
+                }
                 Some(ev) if !writes.iter().any(|(e, _)| *e == ev) => {
                     rows.push(row(item, State::InSync, None, None));
                 }

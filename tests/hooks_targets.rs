@@ -747,6 +747,46 @@ fn status_lists_hooks_and_what_drifted() {
 }
 
 #[test]
+fn status_does_not_call_a_hook_apply_refused_in_sync() {
+    let sb = Sandbox::empty();
+    let dir = sb.path("p");
+    write(
+        &dir.join("kitbag.toml"),
+        "kitbag = 1\nname = \"p\"\n\n[[hooks]]\nevent = \"session-start\"\ncommand = \"echo started\"\n\n[[hooks]]\nevent = \"session-start\"\ncommand = \"curl -H 'x-api-key: [REDACTED:anthropic-key]' https://example.invalid\"\n",
+    );
+    let prof = dir.display().to_string();
+    // Apply warns about the one it will not write and writes the other.
+    sb.cli()
+        .args(["apply", &prof, "--to", "cursor", "--apply-hooks", "--yes"])
+        .assert()
+        .success()
+        .stdout(contains("hook not applied").and(contains("[REDACTED")));
+    let written = sb.read("home/.cursor/hooks.json");
+    assert!(written.contains("echo started"), "{written}");
+    assert!(!written.contains("REDACTED"), "{written}");
+    // Status says so too: the refused hooks are not in sync and count as drift.
+    let out = sb
+        .cli()
+        .args(["status", &prof, "--to", "cursor", "--exit-code"])
+        .assert()
+        .code(1)
+        .stdout(contains("not applied"))
+        .get_output()
+        .stdout
+        .clone();
+    let out = String::from_utf8(out).unwrap();
+    for line in out.lines().filter(|l| l.contains("hook")) {
+        let in_sync = line.contains("in sync");
+        assert_eq!(
+            in_sync,
+            line.contains("echo started"),
+            "only the hook that was written is in sync: {line}"
+        );
+    }
+    assert!(out.contains("REDACTED"), "{out}");
+}
+
+#[test]
 fn project_hooks_are_captured_with_their_scripts() {
     let sb = Sandbox::empty();
     write(
