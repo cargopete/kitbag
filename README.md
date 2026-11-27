@@ -130,7 +130,7 @@ Where things go:
 | Codex CLI | `$CODEX_HOME/config.toml` (default `~/.codex`), `$CODEX_HOME/AGENTS.md`, `$CODEX_HOME/prompts/`, `~/.agents/skills/`, `$CODEX_HOME/agents/*.toml` | `.codex/config.toml` (trusted projects only), `AGENTS.md`, `.agents/skills/`, `.codex/agents/*.toml` |
 | Gemini CLI | `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`, `~/.gemini/commands/*.toml`, `~/.gemini/skills/`, `~/.gemini/agents/*.md` | `.gemini/settings.json`, `GEMINI.md`, `.gemini/commands/`, `.gemini/skills/`, `.gemini/agents/*.md` |
 | Claude Desktop | `claude_desktop_config.json` in `~/Library/Application Support/Claude` (macOS), `%APPDATA%\Claude` (Windows), `~/.config/Claude` (Linux) | n/a |
-| Antigravity | `~/.gemini/config/mcp_config.json`, `~/.gemini/GEMINI.md` (the same file and managed block as Gemini CLI); capture also reads `~/.gemini/AGENTS.md` and `~/.gemini/config/{AGENTS,GEMINI}.md`; `~/.gemini/config/rules/*.md`, `~/.gemini/config/skills/` (also where commands go, as skills), `~/.gemini/config/agents/<name>.md` | `.agents/mcp_config.json`, `AGENTS.md` (shared with Codex and Cursor); capture also reads `GEMINI.md` and `.agents/{AGENTS,GEMINI}.md`; `.agents/rules/*.md`, `.agents/skills/` (the same directory as Codex's project skills; commands go there too, as skills), `.agents/agents/<name>.md` |
+| Antigravity | `~/.gemini/config/mcp_config.json`, `~/.gemini/GEMINI.md` (the same file and managed block as Gemini CLI); capture also reads `~/.gemini/AGENTS.md` and `~/.gemini/config/{AGENTS,GEMINI}.md`; `~/.gemini/config/rules/*.md`, `~/.gemini/config/skills/` (also where commands go, as skills), `~/.gemini/config/agents/<name>.md` (plugins, by reference: the `entries` of `~/.gemini/config/plugins.json`) | `.agents/mcp_config.json`, `AGENTS.md` (shared with Codex and Cursor); capture also reads `GEMINI.md` and `.agents/{AGENTS,GEMINI}.md`; `.agents/rules/*.md`, `.agents/skills/` (the same directory as Codex's project skills; commands go there too, as skills), `.agents/agents/<name>.md` (plugins, by reference: the `entries` of `.agents/plugins.json`) |
 | opencode | `~/.config/opencode/opencode.json` or `opencode.jsonc` (`mcp.servers`), `~/.config/opencode/{AGENTS.md, commands/*.md, skills/<name>/, agents/*.md}` (plugins, by reference: the npm packages in the config's `plugins` array); honours `XDG_CONFIG_HOME` | `opencode.json(c)` or `.opencode/opencode.json(c)` (the first that exists, else `opencode.json`), `AGENTS.md` (shared with Codex, Cursor and Antigravity), `.opencode/{commands,skills,agents}/`; capture reads every config file there is |
 | Grok Build | `$GROK_HOME/config.toml` (`[mcp_servers.<name>]`, default `~/.grok`), `$GROK_HOME/{AGENTS.md, rules/*.md, commands/*.md, skills/}` | `.grok/config.toml`, `AGENTS.md` (shared with Codex, Cursor, Antigravity and opencode), `.grok/{rules,commands,skills}/`; Grok reads project files only in folders you have trusted |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` (`mcpServers`), `~/.codeium/windsurf/memories/global_rules.md`, `~/.codeium/windsurf/global_workflows/<name>.md` | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode and Grok Build); capture also reads the legacy `.windsurfrules`; `.windsurf/rules/<name>.md`, `.windsurf/workflows/<name>.md`, `.windsurf/skills/<name>/`; Windsurf's docs describe no project MCP file, so MCP servers are not written at project scope |
@@ -739,9 +739,10 @@ kitbag resolved. Shell scripts need LF line endings to run; on Windows keep `hoo
 A Claude Code plugin is someone else's code (it can bundle hooks, MCP servers, commands, agents
 and skills), so kitbag never copies one. It carries only what Claude Code itself stores to find
 and enable it: the marketplaces Claude Code knows (`extraKnownMarketplaces`) and the plugins it
-has enabled (`enabledPlugins`), in a per-target section of `kitbag.toml`. `claude-code` and
-[`opencode`](#opencode-plugins-by-reference-pluginsopencode) have such a section; the other tools'
-plugin systems are not carried (see [Plugins not carried](#plugins-not-carried-antigravity-gemini-cli-claude-desktop)),
+has enabled (`enabledPlugins`), in a per-target section of `kitbag.toml`. `claude-code`,
+[`opencode`](#opencode-plugins-by-reference-pluginsopencode) and
+[`antigravity`](#antigravity-plugin-folders-by-reference-pluginsantigravity) have such a section;
+the other tools' plugin systems are not carried (see [Plugins not carried](#plugins-not-carried-gemini-cli-claude-desktop-and-antigravitys-installs)),
 and kitbag never translates an id from one tool to another. A `[plugins.<other tool>]` section is
 ignored with a warning.
 
@@ -837,29 +838,121 @@ plan lists each one, and `inspect` lists them under what runs commands. Docs che
 [migrating from v1](https://opencode.ai/docs/migrate-v1/). Whether opencode 2 still reads the
 singular `plugin` key isn't said there, so a file kitbag creates uses `plugins`.
 
-### Plugins not carried: Antigravity, Gemini CLI, Claude Desktop
+### Antigravity plugin folders, by reference: `[plugins.antigravity]`
 
-Checked against each tool's official docs on 2026-11-27; none documents a way to list a plugin
-by reference that kitbag could write without copying plugin code, so none is carried (#12).
+An Antigravity plugin is a folder with a `plugin.json`. `agy plugin install` (from its
+marketplace, a GitHub URL or a local path) unpacks one into `~/.gemini/config/plugins/<name>/`
+(or a workspace's `.agents/plugins/`), and that is the install: the docs name no file that
+records where it came from. What they do document, on the
+[customization discovery](https://antigravity.google/docs/customization-discovery/) page, is the
+`plugins.json` discovery manifest: in `~/.gemini/config/` for all your projects or in a
+project's `.agents/`, with `entries` that each take a `path` (a folder to scan one level deep, or
+a single plugin's folder) and optional `include_only` and `exclude` lists. That is a by-reference
+mechanism, and it is the one kitbag writes: the id is the folder's path, and nothing else.
 
-- **Antigravity**: a plugin is a folder (with a `plugin.json`) unpacked into
-  `~/.gemini/config/plugins/<name>/`, or put in a workspace's `.agents/plugins/`, by
-  `agy plugin install` (from a marketplace, a GitHub URL or a local path) and turned on or off
-  with `agy plugin enable|disable`. The docs name no `plugins.json`, no setting that lists
-  plugins or marketplaces and no file that records enablement (UNVERIFIED: any such file), so
-  the folder is the install and there is nothing to write by reference.
+```toml
+[plugins.antigravity.enabled."~/team/plugins/formatter"]   # a plugin folder (or a folder of them) on this machine
+include_only = ["strict"]                         # optional: Antigravity's own entry fields
+exclude = ["slow"]
+# disabled_on = ["antigravity"]                   # or targets = [...]; as for an MCP server
+
+[plugins.antigravity.enabled."tools/plugins/fmt"]  # in a project profile: a path inside the project
+```
+
+Antigravity doesn't expand `~`, so kitbag stores a path in your home directory as `~/...` and
+writes it out in full on the machine you apply to. There are no marketplaces to list (the docs
+give no setting for them) and no `version`.
+
+**Capture** reads `entries` from `~/.gemini/config/plugins.json`, or `.agents/plugins.json` with
+`--project`. At user scope a relative path (which Antigravity reads from `~/.gemini/config/`) is
+stored in full; at project scope only a path inside the project is kept. Left out, with a note:
+an entry without a `path` or with an `include_only` / `exclude` that isn't a list of names, a
+path starting with `~` (Antigravity never loads it), `inherits` (other manifests on that
+machine), the top-level `exclude`, and, at project scope, a path outside the project. The
+plugins that `agy plugin install` put in `plugins/` are counted and left out: they are the
+plugin code, and there is nothing to say where they came from, so install them again with `agy
+plugin install` on the other machine. Nothing in `plugins/` is ever read into a profile.
+
+**Apply** adds the missing folders to `entries` of the same manifest, and writes nothing else.
+It never installs, fetches, copies or enables a plugin, and never touches `plugins/`: the
+folder has to be on the machine already (the plan warns when it isn't), and Antigravity keeps
+its own enabled / disabled state (`agy plugin enable|disable`). A folder that is already listed,
+however its path is written (absolute, with a trailing slash, relative to `~/.gemini/config/`), is left alone; one
+whose `include_only` / `exclude` differ from the profile's is updated (not with
+`--no-overwrite`, which keeps it and warns), and the other keys of an entry stay. A relative
+path is written only at project scope and only if it stays inside the project, because it means
+something else in each scope and a project's manifest is committed (Antigravity's changelog says
+it skips a workspace entry that points elsewhere); anything else is listed in the plan as not
+written. A second apply is "Up to date", and `kitbag undo` restores the manifest as it was.
+Apply is additive: removing a folder from the profile doesn't remove it from the manifest.
+**From a git source** the folders are withheld unless you pass `--trust-source` (a plugin can
+bundle hooks and MCP servers that run on your machine): the plan lists each one, and `inspect`
+lists them under what runs commands. Not covered: where Antigravity keeps a plugin's enabled
+state (its changelog says `config.json` in `~/.gemini/config/`, but no page documents the keys,
+so kitbag doesn't guess them), and a plugin whose manifest says `"disabled": true` starts
+disabled the first time Antigravity loads it. Docs checked 2026-11-27:
+[customization discovery](https://antigravity.google/docs/customization-discovery/),
+[plugins](https://antigravity.google/docs/plugins),
+[build plugins](https://antigravity.google/docs/build-plugins/),
+[settings](https://antigravity.google/docs/settings/),
+[changelog](https://antigravity.google/docs/changelog/).
+
+### Plugins not carried: Gemini CLI, Claude Desktop, and Antigravity's installs
+
+Checked against each tool's official docs on 2026-11-27; none of these documents a way to list
+a plugin by reference that kitbag could write without copying plugin code or running an install.
+
+- **Antigravity's installed plugins** (the folders in `~/.gemini/config/plugins/` made by `agy
+  plugin install`, from its marketplaces `antigravity-plugins-official` and
+  `antigravity-plugins-partners`, a GitHub URL or a local path): the folder is the install and
+  holds the plugin code, `agy plugin list --json` reports their `source` and `enabled`
+  state but no file that holds it is documented (the changelog says `config.json`, with no keys),
+  and no setting lists marketplaces. Only the local folders in `plugins.json` are carried, above.
   ([plugins](https://antigravity.google/docs/plugins), [build plugins](https://antigravity.google/docs/build-plugins/))
-- **Gemini CLI**: `gemini extensions install` copies an extension into
-  `~/.gemini/extensions/<name>/`; the docs name no file that records its source or whether it is
-  enabled (UNVERIFIED: `extension-enablement.json`).
-  ([extensions](https://geminicli.com/docs/extensions/reference/))
-- **Claude Desktop**: the only filesystem layout its docs name is the organization plugins
-  directory (`/Library/Application Support/Claude/org-plugins/` on macOS,
-  `C:\Program Files\Claude\org-plugins\` on Windows, none on Linux). An administrator owns
+- **Gemini CLI**: "Gemini CLI loads extensions from `<home>/.gemini/extensions`", and `gemini
+  extensions install` "creates a copy of the extension" there; each extension holds a
+  `gemini-extension.json`. The docs name no file that records an install source or whether it is
+  enabled (extensions are on by default; `--scope user|workspace` turns one off, and the docs
+  don't say where that is kept), and no `settings.json` key lists them, so `extension-enablement.json`
+  stays UNVERIFIED and kitbag doesn't guess it. The one by-reference route is the `gemini
+  extensions link <path>` command, which creates a symbolic link to a development directory;
+  that is a command rather than a documented layout, and a link's target is a directory on that
+  machine, so it isn't carried. The docs also say Gemini CLI was replaced by Antigravity CLI for
+  unpaid-tier and Google One users on June 18th, 2026.
+  ([extensions](https://geminicli.com/docs/extensions/), [reference](https://geminicli.com/docs/extensions/reference/))
+- **Claude Desktop**: the only filesystem layout its docs give for plugins that you could set up
+  is the organization plugins directory (`/Library/Application Support/Claude/org-plugins/` on
+  macOS, `C:\Program Files\Claude\org-plugins\` on Windows, none on Linux). An administrator owns
   it (root or administrators only, on purpose) and it holds the plugins themselves, so kitbag
-  doesn't write there. User plugins are added in the app and kept in its local data directory,
-  whose path the docs don't give; marketplaces are set by managed configuration or in the app.
-  ([extensions](https://claude.com/docs/third-party/claude-desktop/extensions))
+  doesn't write there. A user's own plugins are added in the app and, in the docs of Claude Desktop on third-party platforms, kept under
+  `local-agent-mode-sessions/.../cowork_plugins/` in its data directory (`~/Library/Application
+  Support/Claude-3p/`, `%LOCALAPPDATA%\Claude-3p\`, `~/.config/Claude-3p/`), which holds the
+  plugin code and whose full path the docs elide; they list no file to record one by reference.
+  Marketplaces are set by an administrator (`allowedPluginMarketplaces` and the other policy
+  keys) or in the app. A Code session reads Claude Code's own `~/.claude/` setup, which is
+  carried under `[plugins.claude-code]`.
+  ([extensions](https://claude.com/docs/third-party/claude-desktop/extensions),
+  [data storage](https://claude.com/docs/third-party/claude-desktop/data-storage))
+- **Amp**: plugins are `.ts` / `.js` files or `<name>/index.ts` folders in `.amp/plugins/`,
+  `~/.config/amp/plugins/` (`$XDG_CONFIG_HOME/amp/plugins/`, `%USERPROFILE%\.config\amp\plugins\`
+  on Windows) or the hosted personal and workspace repositories; `amp plugins add <url>` and
+  the share-URL import end with files in one of those places. The docs describe no
+  `settings.json` key or manifest that lists plugins by reference, and no marketplace, so
+  there is only plugin code to copy. ([plugins](https://ampcode.com/docs/markdown/customize/plugins))
+- **Cline**: plugins are SDK code, passed to a session as `extensions` or as `pluginPaths`
+  (absolute paths to `.ts` files), or installed with `cline plugin install` (file URLs, npm, git
+  or local paths), and the docs don't say where that records an install or that a settings
+  file lists them. ([SDK plugins](https://docs.cline.bot/sdk/plugins.md))
+
+**Documented, not carried yet (so #12 stays open)**: Codex lists plugins in `config.toml`
+(`[plugins."<name>@<marketplace>"]` with `enabled`, and `[marketplaces.<name>]` with `source`,
+`source_type` and `ref`; [config reference](https://learn.chatgpt.com/docs/config-file/config-reference)),
+and Copilot CLI reads `enabledPlugins` and `extraKnownMarketplaces` from `~/.copilot/settings.json` and
+the repository's `.github/copilot/settings.json`
+([CLI config directory](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference)).
+Both are by-reference mechanisms like Claude Code's, but kitbag has no `[plugins.codex]` or
+`[plugins.copilot]` section yet. Cursor, Zed, Hermes Agent and the remaining targets were not re-read for this
+section.
 
 ### Plugins: `rules/` at the root, no `kitbag.toml`
 

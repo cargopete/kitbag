@@ -36,8 +36,12 @@
 //!   writes no workflows. Its migration guide (workflows-to-skills) turns a
 //!   workflow into `skills/<name>/SKILL.md` with `name` and `description`
 //!   and the body kept, invoked as `/<name>` as before, and kitbag writes a
-//!   command the same way (as Amp does). Hooks are carried by `hook_files`;
-//!   plugins aren't.
+//!   command the same way (as Amp does). Hooks are carried by `hook_files`.
+//! * Plugins: a plugin is a folder (`plugin.json`) in `~/.gemini/config/plugins/`
+//!   or `.agents/plugins/`, installed by `agy plugin install` (kitbag never
+//!   runs it and never copies plugin files). What the docs let kitbag write by
+//!   reference is the `plugins.json` discovery manifest in `~/.gemini/config/`
+//!   or `.agents/`, whose `entries` list folders to load; see `crate::plugins`.
 //! * Subagents: `~/.gemini/config/agents/<name>.md` (user) and
 //!   `.agents/agents/<name>.md` (workspace); Antigravity also reads
 //!   `<name>/agent.md` in those directories, which capture reads too, and
@@ -102,6 +106,10 @@ struct Paths {
     rules: PathBuf,
     skills: PathBuf,
     agents: PathBuf,
+    /// `plugins.json`, the discovery manifest that lists plugin folders.
+    plugins_manifest: PathBuf,
+    /// Where `agy plugin install` unpacks plugins.
+    plugins_dir: PathBuf,
 }
 
 /// Frontmatter keys Antigravity's subagent docs list besides `name` and `description`.
@@ -226,6 +234,8 @@ fn paths(env: &Env) -> Paths {
                 rules: c.join("rules"),
                 skills: c.join("skills"),
                 agents: c.join("agents"),
+                plugins_manifest: c.join(crate::plugins::ANTIGRAVITY_MANIFEST),
+                plugins_dir: c.join("plugins"),
                 instructions: g.join("GEMINI.md"),
                 read: vec![
                     g.join("GEMINI.md"),
@@ -243,6 +253,8 @@ fn paths(env: &Env) -> Paths {
                 rules: a.join("rules"),
                 skills: a.join("skills"),
                 agents: a.join("agents"),
+                plugins_manifest: a.join(crate::plugins::ANTIGRAVITY_MANIFEST),
+                plugins_dir: a.join("plugins"),
                 instructions: p.join("AGENTS.md"),
                 read: vec![
                     p.join("AGENTS.md"),
@@ -392,6 +404,23 @@ impl Adapter for Antigravity {
         capture_skills_dir(&mut cap, &p.skills, ID)?;
         capture_agent_dir(&mut cap, &p.agents, Some("agent.md"), ID, "a subagent")?;
         super::hook_files::capture_for(&mut cap, env, &super::hook_files::ANTIGRAVITY)?;
+        let manifest = match cap.read_config(&p.plugins_manifest, ID)? {
+            Some(text) => {
+                cap.sources.push(p.plugins_manifest.clone());
+                Some(parse_value(Some(&text), &p.plugins_manifest)?)
+            }
+            None => None,
+        };
+        let shown = match env.scope {
+            Scope::User => "~/.gemini/config/plugins.json",
+            Scope::Project => ".agents/plugins.json",
+        };
+        let folder = if cap.escapes(&p.plugins_dir, ID) {
+            std::path::Path::new("")
+        } else {
+            &p.plugins_dir
+        };
+        crate::plugins::capture_antigravity(&mut cap, env, manifest.as_ref(), shown, folder);
         Ok(cap)
     }
 
@@ -567,6 +596,7 @@ impl Adapter for Antigravity {
             );
         }
         super::hook_files::apply_for(profile, env, opts, work, &super::hook_files::ANTIGRAVITY)?;
+        crate::plugins::apply_antigravity(profile, env, opts, work, &p.plugins_manifest)?;
         Ok(())
     }
 }
