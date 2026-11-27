@@ -530,7 +530,7 @@ pub fn write(dir: &Path, bytes: &[u8]) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Write `bytes` (an encrypted bundle) to `path`, as [`write`] does: through
+/// Write `bytes` (an encrypted bundle) to `path`, as [`write()`] does: through
 /// a temporary file in the same directory renamed into place, so a failure
 /// leaves the old file as it was.
 pub fn write_to(path: &Path, bytes: &[u8]) -> Result<()> {
