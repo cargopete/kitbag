@@ -35,6 +35,7 @@ const ALL: &[&str] = &[
     "amp",
     "cline",
     "roo",
+    "continue",
 ];
 
 #[test]

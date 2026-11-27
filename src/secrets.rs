@@ -117,6 +117,26 @@ pub fn normalize_brace_refs(value: &str) -> String {
         .into_owned()
 }
 
+static CONTINUE_SECRET_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\$\{\{\s*secrets\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}").expect("valid regex")
+});
+
+/// Convert Continue's `${{ secrets.NAME }}` into canonical `${NAME}`.
+pub fn normalize_continue_secrets(value: &str) -> String {
+    CONTINUE_SECRET_RE
+        .replace_all(value, |c: &Captures| reference(&c[1]))
+        .into_owned()
+}
+
+/// Does `value` still hold a `${{ ... }}` template (Continue's `inputs`, ...)
+/// that isn't a `secrets` reference?
+pub fn has_other_continue_template(value: &str) -> bool {
+    static ANY: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\$\{\{[^}]*\}\}").expect("valid regex"));
+    ANY.find_iter(value)
+        .any(|m| !CONTINUE_SECRET_RE.is_match(m.as_str()))
+}
+
 /// How references are written for a target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefStyle {
@@ -128,6 +148,9 @@ pub enum RefStyle {
     EnvColon,
     /// `{env:VAR}`; defaults are resolved now (opencode).
     EnvBrace,
+    /// `${{ secrets.VAR }}`, Continue's own secret syntax; defaults are
+    /// resolved now.
+    ContinueSecret,
     /// Substitute values from the environment now.
     Resolve,
 }
@@ -170,14 +193,18 @@ pub fn render_refs(
                 fb.to_string()
             };
             match style {
-                RefStyle::EnvColon | RefStyle::EnvBrace | RefStyle::DollarPlain => {
-                    match (fallback, set) {
-                        (Some(fb), None) => use_fallback(fb),
-                        _ if style == RefStyle::EnvColon => format!("${{env:{name}}}"),
-                        _ if style == RefStyle::EnvBrace => format!("{{env:{name}}}"),
-                        _ => reference(name),
+                RefStyle::EnvColon
+                | RefStyle::EnvBrace
+                | RefStyle::DollarPlain
+                | RefStyle::ContinueSecret => match (fallback, set) {
+                    (Some(fb), None) => use_fallback(fb),
+                    _ if style == RefStyle::EnvColon => format!("${{env:{name}}}"),
+                    _ if style == RefStyle::EnvBrace => format!("{{env:{name}}}"),
+                    _ if style == RefStyle::ContinueSecret => {
+                        format!("${{{{ secrets.{name} }}}}")
                     }
-                }
+                    _ => reference(name),
+                },
                 _ => match (set, fallback) {
                     (Some(v), _) => {
                         if v.len() >= 4 {

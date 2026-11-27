@@ -48,6 +48,18 @@ struct Layout {
     entries: Vec<(String, usize, usize)>,
 }
 
+/// Where a block list (`section:` and its `- ` items) is in the lines.
+struct ListLayout {
+    key_line: usize,
+    inline_empty: bool,
+    /// Line after the last line of content in the list.
+    end: usize,
+    /// Indentation of the `- ` lines.
+    indent: usize,
+    /// (first line, line after the last content line) of each item.
+    items: Vec<(usize, usize)>,
+}
+
 static ENTRY_KEY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"^(?:"((?:[^"\\]|\\.)*)"|'((?:[^']|'')*)'|([^\s#'"\[\]{},&*!|>%@`-][^#]*?|-[^\s#][^#]*?))\s*:(?:\s|$)"#)
         .expect("valid regex")
@@ -252,6 +264,173 @@ impl YamlDoc {
         Ok(())
     }
 
+    /// The items of the list `section` as they are now (empty if there are none).
+    pub fn list(&self, section: &str) -> Vec<Value> {
+        match self.parsed.get(section) {
+            Some(Value::Array(a)) => a.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Can the block list `section` (`mcpServers:` with `- name: x` items) be
+    /// edited in place? If not, why not.
+    pub fn check_editable_list(&self, section: &str) -> std::result::Result<(), String> {
+        self.list_layout(section).map(|_| ())
+    }
+
+    fn list_layout(&self, section: &str) -> std::result::Result<Option<ListLayout>, String> {
+        // What the lines mean now (earlier edits included).
+        let count = match self.expected.get(section) {
+            None | Some(Value::Null) => 0,
+            Some(Value::Array(a)) => a.len(),
+            Some(_) => return Err(format!("'{section}' is not a list")),
+        };
+        let Some(key_line) = self.lines.iter().position(|l| is_section_key(l, section)) else {
+            return Ok(None);
+        };
+        let rest = value_after_key(&self.lines[key_line]);
+        let inline_empty = match rest.as_str() {
+            "" => false,
+            "[]" | "null" | "~" => true,
+            other => {
+                return Err(format!(
+                    "'{section}' is written as `{other}` on the same line as its name"
+                ));
+            }
+        };
+        let mut end = key_line + 1;
+        let mut indent: Option<usize> = None;
+        let mut items: Vec<(usize, usize)> = Vec::new();
+        for (i, line) in self.lines.iter().enumerate().skip(key_line + 1) {
+            let line = line.trim_end_matches('\r');
+            if is_blank_or_comment(line) {
+                continue;
+            }
+            let lead = leading_spaces(line);
+            let item = is_list_item(line);
+            if lead == 0 && !item {
+                break;
+            }
+            if line.starts_with('\t') {
+                return Err("it is indented with tabs".into());
+            }
+            let ind = *indent.get_or_insert(lead);
+            if lead < ind {
+                return Err("its items are not indented evenly".into());
+            }
+            if lead == ind {
+                if !item {
+                    return Err(format!("line {} is not a `- ` list item", i + 1));
+                }
+                if let Some(last) = items.last_mut() {
+                    last.1 = end;
+                }
+                items.push((i, i + 1));
+            }
+            end = i + 1;
+        }
+        if let Some(last) = items.last_mut() {
+            last.1 = end;
+        }
+        if inline_empty && !items.is_empty() {
+            return Err(format!("'{section}' has items below `{rest}`"));
+        }
+        if items.len() != count {
+            return Err(format!(
+                "'{section}' is not a plain block list of `- ` items (found {} lines starting an item, the file has {count} items)",
+                items.len()
+            ));
+        }
+        Ok(Some(ListLayout {
+            key_line,
+            inline_empty,
+            end,
+            indent: indent.unwrap_or(2),
+            items,
+        }))
+    }
+
+    fn item_index(&self, section: &str, key: &str, name: &str) -> Option<usize> {
+        let Some(Value::Array(items)) = self.expected.get(section) else {
+            return None;
+        };
+        items
+            .iter()
+            .position(|v| v.get(key).and_then(Value::as_str) == Some(name))
+    }
+
+    /// Add or replace the item of list `section` whose `key` field is `name`
+    /// (`def` holds it too). Block scalars are used for multi-line text.
+    pub fn set_item(&mut self, section: &str, key: &str, name: &str, def: &Value) -> Result<()> {
+        let layout = self
+            .list_layout(section)
+            .map_err(|e| self.cannot(section, &e))?;
+        let idx = self.item_index(section, key, name);
+        let indent = layout.as_ref().map_or(2, |l| l.indent);
+        let text = render_list_item(def, indent, 2);
+        match layout {
+            None => {
+                let mut block = vec![format!("{}:", key_text(section))];
+                block.extend(text);
+                let at = self.append_point();
+                self.insert(at, block);
+            }
+            Some(l) => {
+                let mut at = l.end;
+                if l.inline_empty {
+                    self.lines[l.key_line] = replace_value(&self.lines[l.key_line], "");
+                    at = l.key_line + 1;
+                }
+                if let Some(&(start, end)) = idx.and_then(|i| l.items.get(i)) {
+                    self.lines.drain(start..end);
+                    at = start;
+                }
+                self.insert(at, text);
+            }
+        }
+        let entry = self
+            .expected
+            .entry(section.to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if !entry.is_array() {
+            *entry = Value::Array(Vec::new());
+        }
+        if let Value::Array(a) = entry {
+            match idx {
+                Some(i) if i < a.len() => a[i] = def.clone(),
+                _ => a.push(def.clone()),
+            }
+        }
+        self.changed = true;
+        Ok(())
+    }
+
+    /// Remove the item of list `section` whose `key` field is `name`, if there.
+    pub fn remove_item(&mut self, section: &str, key: &str, name: &str) -> Result<()> {
+        let layout = self
+            .list_layout(section)
+            .map_err(|e| self.cannot(section, &e))?;
+        let Some(l) = layout else { return Ok(()) };
+        let Some(idx) = self.item_index(section, key, name) else {
+            return Ok(());
+        };
+        let Some(&(start, end)) = l.items.get(idx) else {
+            return Ok(());
+        };
+        self.lines.drain(start..end);
+        if l.items.len() == 1 {
+            let line = replace_value(&self.lines[l.key_line], " []");
+            self.lines[l.key_line] = line;
+        }
+        if let Some(Value::Array(a)) = self.expected.get_mut(section)
+            && idx < a.len()
+        {
+            a.remove(idx);
+        }
+        self.changed = true;
+        Ok(())
+    }
+
     pub fn changed(&self) -> bool {
         self.changed
     }
@@ -395,15 +574,58 @@ fn replace_value(line: &str, value: &str) -> String {
 /// `name:` and its definition, as lines indented by `indent`.
 fn render_entry(name: &str, def: &Value, indent: usize, step: usize) -> Vec<String> {
     let mut out = vec![format!("{}{}:", " ".repeat(indent), key_text(name))];
-    emit_value(def, indent + step, step, &mut out);
+    emit_value(def, indent + step, step, false, &mut out);
     out
+}
+
+/// A mapping as a `- ` list item at `indent`, multi-line text as block scalars.
+fn render_list_item(def: &Value, indent: usize, step: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Value::Object(m) = def {
+        emit_map(m, indent + 2, step, true, &mut lines);
+    }
+    if let Some(first) = lines.first_mut() {
+        *first = format!("{}- {}", " ".repeat(indent), first.trim_start_matches(' '));
+    }
+    lines
+}
+
+/// Can `s` be written as a literal block scalar (`|` or `|-`) and read back
+/// the same? Only plain text; anything unusual stays a quoted string.
+fn block_scalar_header(s: &str) -> Option<&'static str> {
+    if !s.contains('\n') || s.starts_with([' ', '\n', '\t']) {
+        return None;
+    }
+    let odd = |c: char| {
+        (c.is_control() && c != '\n' && c != '\t')
+            || matches!(c, '\u{85}' | '\u{2028}' | '\u{2029}' | '\u{feff}')
+    };
+    if s.chars().any(odd) || s.ends_with("\n\n") {
+        return None;
+    }
+    Some(if s.ends_with('\n') { "|" } else { "|-" })
 }
 
 /// Add `v` to the key line at the end of `out`: a mapping as indented
 /// `key: value` lines below it, anything else on the key's own line.
-fn emit_value(v: &Value, indent: usize, step: usize, out: &mut Vec<String>) {
+fn emit_value(v: &Value, indent: usize, step: usize, block: bool, out: &mut Vec<String>) {
     match v {
-        Value::Object(m) if !m.is_empty() => emit_map(m, indent, step, out),
+        Value::String(t) if block && block_scalar_header(t).is_some() => {
+            let header = block_scalar_header(t).unwrap_or("|-");
+            if let Some(last) = out.last_mut() {
+                last.push(' ');
+                last.push_str(header);
+            }
+            let pad = " ".repeat(indent);
+            for line in t.trim_end_matches('\n').split('\n') {
+                out.push(if line.is_empty() {
+                    String::new()
+                } else {
+                    format!("{pad}{line}")
+                });
+            }
+        }
+        Value::Object(m) if !m.is_empty() => emit_map(m, indent, step, block, out),
         // A list of mappings (hook entries) as a block list; lists of plain
         // values stay on the key's line.
         Value::Array(a)
@@ -415,7 +637,7 @@ fn emit_value(v: &Value, indent: usize, step: usize, out: &mut Vec<String>) {
             for item in a {
                 let Value::Object(m) = item else { continue };
                 let mut lines = Vec::new();
-                emit_map(m, indent + 2, step, &mut lines);
+                emit_map(m, indent + 2, step, block, &mut lines);
                 if let Some(first) = lines.first_mut() {
                     *first = format!("{pad}- {}", first.trim_start_matches(' '));
                 }
@@ -431,11 +653,17 @@ fn emit_value(v: &Value, indent: usize, step: usize, out: &mut Vec<String>) {
     }
 }
 
-fn emit_map(m: &Map<String, Value>, indent: usize, step: usize, out: &mut Vec<String>) {
+fn emit_map(
+    m: &Map<String, Value>,
+    indent: usize,
+    step: usize,
+    block: bool,
+    out: &mut Vec<String>,
+) {
     let pad = " ".repeat(indent);
     for (k, v) in m {
         out.push(format!("{pad}{}:", key_text(k)));
-        emit_value(v, indent + step, step, out);
+        emit_value(v, indent + step, step, block, out);
     }
 }
 
@@ -670,5 +898,121 @@ mod tests {
         let e = YamlDoc::parse(Some("key: [sk-ant-FAKEsecretvalue\n"), Path::new("c.yaml"))
             .unwrap_err();
         assert!(!format!("{e:#}").contains("FAKEsecret"), "{e:#}");
+    }
+
+    #[test]
+    fn list_items_are_added_replaced_and_removed_in_place() {
+        let text = "# top\nname: x\nmcpServers:\n  # mine\n  - name: a  # keep\n    command: a\n\n  - name: b\n    command: old\n    extra: 1\n  # between\n  - name: c\n    command: c\nprompts:\n  - hi\n";
+        let mut d = doc(text);
+        d.check_editable_list("mcpServers").unwrap();
+        d.set_item(
+            "mcpServers",
+            "name",
+            "b",
+            &json!({"name": "b", "command": "new", "args": ["-x"]}),
+        )
+        .unwrap();
+        d.set_item(
+            "mcpServers",
+            "name",
+            "d",
+            &json!({"name": "d", "url": "https://d.example"}),
+        )
+        .unwrap();
+        d.remove_item("mcpServers", "name", "c").unwrap();
+        assert_eq!(
+            d.render().unwrap(),
+            "# top\nname: x\nmcpServers:\n  # mine\n  - name: a  # keep\n    command: a\n\n  - name: \"b\"\n    command: \"new\"\n    args: [\"-x\"]\n  # between\n  - name: \"d\"\n    url: \"https://d.example\"\nprompts:\n  - hi\n"
+        );
+    }
+
+    #[test]
+    fn a_list_at_the_keys_own_indentation_and_an_empty_one() {
+        let text = "mcpServers:\n- name: a\n  command: a\nother: 1\n";
+        let mut d = doc(text);
+        d.set_item(
+            "mcpServers",
+            "name",
+            "b",
+            &json!({"name": "b", "command": "b"}),
+        )
+        .unwrap();
+        assert_eq!(
+            d.render().unwrap(),
+            "mcpServers:\n- name: a\n  command: a\n- name: \"b\"\n  command: \"b\"\nother: 1\n"
+        );
+        let mut d = doc("mcpServers: []\nk: 1\n");
+        d.set_item(
+            "mcpServers",
+            "name",
+            "a",
+            &json!({"name": "a", "command": "a"}),
+        )
+        .unwrap();
+        assert_eq!(
+            d.render().unwrap(),
+            "mcpServers:\n  - name: \"a\"\n    command: \"a\"\nk: 1\n"
+        );
+        // Removing the last item leaves an empty list, not a null.
+        let mut d = doc("mcpServers:\n  - name: a\n    command: a\nk: 1\n");
+        d.remove_item("mcpServers", "name", "a").unwrap();
+        assert_eq!(d.render().unwrap(), "mcpServers: []\nk: 1\n");
+    }
+
+    #[test]
+    fn multi_line_text_in_a_list_item_is_a_block_scalar() {
+        let mut d = doc("name: x\n");
+        let rule = "# Style\n\n- one\n  - two\n";
+        d.set_item(
+            "rules",
+            "name",
+            "r",
+            &json!({"name": "r", "rule": rule, "m": "a\nb", "t": " lead\nx"}),
+        )
+        .unwrap();
+        let out = d.render().unwrap();
+        assert!(
+            out.contains("    rule: |\n      # Style\n\n      - one\n        - two\n"),
+            "{out}"
+        );
+        // No trailing newline: `|-`; leading space: stays quoted.
+        assert!(out.contains("    m: |-\n      a\n      b\n"), "{out}");
+        assert!(out.contains("    t: \" lead\\nx\""), "{out}");
+    }
+
+    #[test]
+    fn lists_that_cannot_be_edited_are_refused() {
+        for text in [
+            "mcpServers: [{name: a}]\n",
+            "mcpServers:\n\t- name: a\n",
+            "mcpServers:\n  name: a\n",
+            "mcpServers: {a: 1}\n",
+            "mcpServers:\n  - name: a\n   - name: b\n",
+        ] {
+            let d = YamlDoc::parse(Some(text), Path::new("c.yaml"));
+            if let Ok(d) = d {
+                assert!(d.check_editable_list("mcpServers").is_err(), "{text:?}");
+            }
+        }
+        let d = doc("mcpServers:\n  - name: a\n    command: a\n");
+        assert!(d.check_editable_list("mcpServers").is_ok());
+        assert!(d.check_editable_list("rules").is_ok());
+    }
+
+    #[test]
+    fn a_block_scalar_in_a_crlf_file_reads_back_the_same() {
+        let mut d = doc("name: x\r\nrules:\r\n  - plain\r\n");
+        d.set_item(
+            "rules",
+            "name",
+            "r",
+            &json!({"name": "r", "rule": "a\nb\n"}),
+        )
+        .unwrap();
+        let out = d.render().unwrap();
+        assert_eq!(
+            out,
+            "name: x\r\nrules:\r\n  - plain\r\n  - name: \"r\"\r\n    rule: |\r\n      a\r\n      b\r\n"
+        );
     }
 }

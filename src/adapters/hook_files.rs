@@ -484,6 +484,10 @@ const NO_HOOKS: &[(&str, &str)] = &[
         "roo",
         "kitbag knows of no hook file for Roo Code (not verified against its docs)",
     ),
+    (
+        "continue",
+        "kitbag knows of no hook file for Continue (its config.yaml reference lists none)",
+    ),
 ];
 
 /// The hook format of the target `id`.

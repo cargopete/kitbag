@@ -269,7 +269,8 @@ fn list_targets_json() {
             "hermes",
             "amp",
             "cline",
-            "roo"
+            "roo",
+            "continue"
         ]
     );
     assert_eq!(v[2]["support"]["rules"], "folded");
