@@ -1,5 +1,6 @@
-//! Zed: MCP servers in `context_servers` of `settings.json` and instructions in
-//! `AGENTS.md` (user) or the first of Zed's project instruction files.
+//! Zed: MCP servers in `context_servers` of `settings.json`, instructions in
+//! `AGENTS.md` (user) or the first of Zed's project instruction files, and
+//! skills in `~/.agents/skills` and a project's `.agents/skills`.
 
 mod common;
 
@@ -7,7 +8,7 @@ use std::fs;
 
 use common::*;
 use kitbag::adapters::{Os, Scope, SecretsMode};
-use kitbag::model::{McpServer, Profile, Rule, Transport};
+use kitbag::model::{Command, McpServer, Profile, Rule, Skill, SkillFile, Transport};
 use kitbag::profile_io;
 use kitbag::txn::Store;
 use serde_json::json;
@@ -567,4 +568,353 @@ fn apply_to_zed_then_undo_through_the_cli() {
         !zed_cli_dir(&sb).exists(),
         "undo removes what apply created"
     );
+}
+
+// ---------------------------------------------------------------- skills
+
+fn put(sb: &Sandbox, rel: &str, text: &str) {
+    let path = sb.path(rel);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, text).unwrap();
+}
+
+fn skill(name: &str, description: &str) -> Skill {
+    Skill {
+        name: name.into(),
+        files: vec![
+            SkillFile {
+                path: "SKILL.md".into(),
+                content: format!(
+                    "---\nname: {name}\ndescription: {description}\n---\n\nBody of {name}.\n"
+                )
+                .into_bytes(),
+                executable: false,
+            },
+            SkillFile {
+                path: "scripts/run.sh".into(),
+                content: b"echo run\n".to_vec(),
+                executable: true,
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+fn with_skill(name: &str) -> Profile {
+    let mut p = Profile::new("team");
+    p.skills.push(skill(name, &format!("Does {name} things.")));
+    p
+}
+
+fn names(p: &Profile) -> Vec<String> {
+    let mut v: Vec<String> = p.skills.iter().map(|s| s.name.clone()).collect();
+    v.sort();
+    v
+}
+
+fn warned(p: &kitbag::engine::Plan, what: &str) -> bool {
+    p.notes.iter().any(|n| {
+        n.target == "zed" && n.level == kitbag::adapters::Level::Warn && n.message.contains(what)
+    })
+}
+
+#[test]
+fn capture_reads_zed_skill_folders_and_says_what_it_leaves() {
+    let sb = Sandbox::empty();
+    put(
+        &sb,
+        "home/.agents/skills/mine/SKILL.md",
+        "---\nname: mine\ndescription: Mine.\n---\n\nUser skill.\n",
+    );
+    put(&sb, "home/.agents/skills/mine/scripts/run.sh", "echo hi\n");
+    // Folders Zed's docs don't name are not read.
+    put(
+        &sb,
+        "home/.claude/skills/claude-only/SKILL.md",
+        "---\nname: claude-only\ndescription: x\n---\n",
+    );
+    put(
+        &sb,
+        "home/.config/zed/skills/zed-config/SKILL.md",
+        "---\nname: zed-config\ndescription: x\n---\n",
+    );
+    put(
+        &sb,
+        "project/.agents/skills/proj/SKILL.md",
+        "---\nname: proj\ndescription: Project.\n---\n\nProject skill.\n",
+    );
+    put(
+        &sb,
+        "project/.claude/skills/claude-proj/SKILL.md",
+        "---\nname: claude-proj\ndescription: x\n---\n",
+    );
+
+    let user = capture(&["zed"], &sb.env(Scope::User));
+    assert_eq!(names(&user.profile), ["mine"]);
+    let files: Vec<&str> = user.profile.skills[0]
+        .files
+        .iter()
+        .map(|f| f.path.as_str())
+        .collect();
+    assert!(files.contains(&"scripts/run.sh"), "{files:?}");
+    assert!(
+        user.notes
+            .iter()
+            .any(|n| n.message.contains("Rules Library") && n.message.contains("never reads")),
+        "capture names the Rules Library it leaves"
+    );
+    let project = capture(&["zed"], &sb.env(Scope::Project));
+    assert_eq!(names(&project.profile), ["proj"]);
+    assert!(
+        !project
+            .notes
+            .iter()
+            .any(|n| n.message.contains("Rules Library"))
+    );
+}
+
+#[test]
+fn apply_user_writes_skills_to_agents_skills_and_undo_removes_only_those() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::User);
+    put(
+        &sb,
+        "home/.agents/skills/theirs/SKILL.md",
+        "---\nname: theirs\ndescription: Not ours.\n---\n",
+    );
+    let mut prof = with_skill("deploy-notes");
+    prof.rules.push(Rule {
+        name: "ts".into(),
+        body: "Strict.".into(),
+        ..Default::default()
+    });
+    prof.commands.push(Command {
+        name: "release".into(),
+        body: "Ship.".into(),
+        ..Default::default()
+    });
+    let p = apply(&sb, &prof, &["zed"], &env);
+
+    let main = sb.read("home/.agents/skills/deploy-notes/SKILL.md");
+    assert!(
+        main.contains("name: deploy-notes") && main.contains("Body of deploy-notes."),
+        "{main}"
+    );
+    assert_eq!(
+        sb.read("home/.agents/skills/deploy-notes/scripts/run.sh"),
+        "echo run\n"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(sb.path("home/.agents/skills/deploy-notes/scripts/run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_ne!(mode & 0o111, 0, "the executable bit is kept");
+    }
+    // Nowhere else, and rules and commands are said to be skipped.
+    assert!(!sb.path("home/.claude").exists());
+    assert!(!sb.path("home/.config/zed/skills").exists());
+    assert!(!sb.path("home/.config/zed/rules").exists());
+    assert!(!sb.path("home/.config/zed/commands").exists());
+    assert!(said(
+        &p,
+        "not supported by Zed at user scope, skipped: 1 rules, 1 commands"
+    ));
+
+    // A second apply is up to date, and capture reads it back with `theirs`.
+    assert!(plan(&prof, &["zed"], &env).changes.is_empty());
+    assert_eq!(
+        names(&capture(&["zed"], &env).profile),
+        ["deploy-notes", "theirs"]
+    );
+
+    Store::new(sb.state()).undo(None, false).unwrap();
+    assert!(!sb.path("home/.agents/skills/deploy-notes").exists());
+    assert!(
+        sb.path("home/.agents/skills/theirs/SKILL.md").is_file(),
+        "their skill stays"
+    );
+}
+
+#[test]
+fn apply_project_writes_agents_skills_and_notes_the_trust_prompt() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::Project);
+    let prof = with_skill("deploy-notes");
+    let p = apply(&sb, &prof, &["zed"], &env);
+    assert!(
+        sb.path("project/.agents/skills/deploy-notes/SKILL.md")
+            .is_file()
+    );
+    assert!(said(&p, "only in a trusted worktree"));
+    assert!(plan(&prof, &["zed"], &env).changes.is_empty());
+    // Nothing is written to the other tools' skill folders.
+    assert!(!sb.path("project/.claude").exists());
+}
+
+#[test]
+fn apply_keeps_a_differing_skill_with_no_overwrite_and_adds_missing_frontmatter() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::User);
+    put(
+        &sb,
+        "home/.agents/skills/deploy-notes/SKILL.md",
+        "---\nname: deploy-notes\ndescription: Mine.\n---\n\nMy body.\n",
+    );
+    let prof = with_skill("deploy-notes");
+    let mut o = opts(&prof);
+    o.overwrite = false;
+    let p = kitbag::engine::plan(&prof, &targets(&["zed"]), &env, &o).unwrap();
+    assert!(warned(&p, "kept existing skill 'deploy-notes'"));
+    assert!(planned(&p, &sb.path("home/.agents/skills/deploy-notes/SKILL.md")).is_none());
+
+    // A SKILL.md with no frontmatter gets the name and description Zed requires.
+    let mut bare = Profile::new("team");
+    bare.skills.push(Skill {
+        name: "bare".into(),
+        description: Some("A bare one.".into()),
+        files: vec![SkillFile {
+            path: "SKILL.md".into(),
+            content: b"Just text.\n".to_vec(),
+            executable: false,
+        }],
+        ..Default::default()
+    });
+    apply(&sb, &bare, &["zed"], &env);
+    let text = sb.read("home/.agents/skills/bare/SKILL.md");
+    assert!(text.starts_with("---\nname: bare\ndescription:"), "{text}");
+}
+
+#[test]
+fn apply_skips_skill_names_zed_cannot_load_and_warns_about_the_rest() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::User);
+    let mut prof = Profile::new("team");
+    prof.skills.push(skill("Deploy_Notes", "Upper case."));
+    prof.skills.push(skill("double--hyphen", "Two hyphens."));
+    prof.skills.push(skill("-lead", "Leading hyphen."));
+    prof.skills.push(skill("fine-one", &"x".repeat(1100)));
+    let mut mismatch = skill("mismatch", "Name differs.");
+    mismatch.files[0].content = b"---\nname: other\ndescription: Name differs.\n---\n".to_vec();
+    prof.skills.push(mismatch);
+    let p = apply(&sb, &prof, &["zed"], &env);
+    for n in ["Deploy_Notes", "double--hyphen", "-lead"] {
+        assert!(warned(&p, &format!("skill '{n}' skipped")), "{n}");
+        assert!(
+            !sb.path(&format!("home/.agents/skills/{n}")).exists(),
+            "{n}"
+        );
+    }
+    assert!(sb.path("home/.agents/skills/fine-one/SKILL.md").is_file());
+    assert!(warned(&p, "skill 'fine-one': its description is over 1024"));
+    assert!(warned(&p, "the name in its SKILL.md is 'other'"));
+}
+
+#[test]
+fn skills_honour_targets_and_disabled_on() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::User);
+    let mut prof = Profile::new("team");
+    let mut only_cursor = skill("only-cursor", "Cursor only.");
+    only_cursor.targeting.targets = Some(vec!["cursor".into()]);
+    let mut not_zed = skill("not-zed", "Not for Zed.");
+    not_zed.targeting.disabled_on = vec!["zed".into()];
+    prof.skills
+        .extend([only_cursor, not_zed, skill("everywhere", "All.")]);
+    let p = plan(&prof, &["zed"], &env);
+    let has =
+        |n: &str| planned(&p, &sb.path(&format!("home/.agents/skills/{n}/SKILL.md"))).is_some();
+    assert!(has("everywhere") && !has("only-cursor") && !has("not-zed"));
+}
+
+#[test]
+fn zed_and_amp_write_the_same_project_skill_once() {
+    let prof = with_skill("deploy-notes");
+    for order in [["zed", "amp"], ["amp", "zed"]] {
+        let sb = Sandbox::empty();
+        let env = sb.env(Scope::Project);
+        let p = apply(&sb, &prof, &order, &env);
+        let file = sb.project().join(".agents/skills/deploy-notes/SKILL.md");
+        assert_eq!(
+            p.changes.iter().filter(|c| c.path == file).count(),
+            1,
+            "{order:?}"
+        );
+        assert!(plan(&prof, &order, &env).changes.is_empty(), "{order:?}");
+    }
+}
+
+#[test]
+fn skills_survive_zed_to_claude_code_and_back() {
+    let src = Sandbox::empty();
+    let prof = with_skill("deploy-notes");
+    apply(&src, &prof, &["zed"], &src.env(Scope::User));
+    let captured = capture(&["zed"], &src.env(Scope::User)).profile;
+    let dir = src.path("profile");
+    profile_io::save(&captured, &dir, false).unwrap();
+    let loaded = profile_io::load(&dir).unwrap();
+    assert_eq!(names(&loaded), ["deploy-notes"]);
+
+    let dst = Sandbox::empty();
+    apply(&dst, &loaded, &["claude-code"], &dst.env(Scope::User));
+    assert!(
+        dst.path("home/.claude/skills/deploy-notes/SKILL.md")
+            .is_file()
+    );
+    let again = Sandbox::empty();
+    apply(&again, &loaded, &["zed"], &again.env(Scope::User));
+    assert_eq!(
+        capture(&["zed"], &again.env(Scope::User)).profile.skills,
+        captured.skills
+    );
+}
+
+#[test]
+fn apply_skills_to_zed_through_the_cli_then_remove_one_when_disabled() {
+    let sb = Sandbox::empty();
+    sb.cli().args(["init", "prof"]).assert().success();
+    put(
+        &sb,
+        "prof/skills/notes/SKILL.md",
+        "---\nname: notes\ndescription: Takes notes.\n---\n\nNotes body.\n",
+    );
+    sb.cli()
+        .args(["apply", "prof", "--to", "zed", "--yes"])
+        .assert()
+        .success();
+    assert!(
+        sb.read("home/.agents/skills/notes/SKILL.md")
+            .contains("Notes body.")
+    );
+
+    // Disabling it for Zed removes the folder kitbag wrote.
+    put(
+        &sb,
+        "prof/skills/notes/SKILL.md",
+        "---\nname: notes\ndescription: Takes notes.\ndisabled_on: [zed]\n---\n\nNotes body.\n",
+    );
+    sb.cli()
+        .args(["apply", "prof", "--to", "zed", "--yes"])
+        .assert()
+        .success();
+    assert!(!sb.path("home/.agents/skills/notes").exists());
+    sb.cli().arg("undo").assert().success();
+    assert!(sb.path("home/.agents/skills/notes/SKILL.md").is_file());
+    sb.cli().arg("undo").assert().success();
+    assert!(!sb.path("home/.agents/skills/notes").exists());
+}
+
+#[test]
+fn zed_warns_when_amp_would_write_a_different_copy_of_a_shared_project_skill() {
+    let mut prof = with_skill("deploy-notes");
+    prof.skills[0].files[0].content =
+        b"---\nname: deploy-notes\ndescription: Does things.\nmcpServers:\n  x:\n    command: npx\n---\n\nBody.\n"
+            .to_vec();
+    let sb = Sandbox::empty();
+    let both = plan(&prof, &["zed", "amp"], &sb.env(Scope::Project));
+    assert!(warned(&both, "Amp and Zed share .agents/skills"));
+    let alone = plan(&prof, &["zed"], &sb.env(Scope::Project));
+    assert!(!warned(&alone, "Amp and Zed share"));
 }

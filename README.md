@@ -10,7 +10,7 @@ from the AI coding tools you already use. It stores them as a small, git-friendl
 redacted and applies that profile to any other tool in one step. Claude Code, Cursor,
 OpenAI Codex CLI, Gemini CLI, Claude Desktop, Google Antigravity, opencode (the last two
 for MCP servers and instructions), GitHub Copilot (MCP servers, instructions, rules, prompt files and skills)
-xAI's Grok Build CLI, Windsurf, Zed, Hermes Agent, Amp, Cline, Roo Code and Continue (the last seven for MCP servers and instructions; Hermes also for shell hooks, Amp also for skills, Continue also for project rules and, at user scope, commands, Cline and Roo Code also for rules, commands and skills) are supported, at user and
+xAI's Grok Build CLI, Windsurf, Zed, Hermes Agent, Amp, Cline, Roo Code and Continue (the last seven for MCP servers and instructions; Hermes also for shell hooks, Zed and Amp also for skills, Continue also for project rules and, at user scope, commands, Cline and Roo Code also for rules, commands and skills) are supported, at user and
 project scope.
 
 > [!IMPORTANT]
@@ -100,7 +100,7 @@ preview with `kitbag diff github:cargopete/dotagents --to all`.
 | `copilot`        | GitHub Copilot (CLI, VS Code) | user, project | ✓ | ✓    | ✓          | project      | ✓      | ✓      | -        |
 | `grok-build`     | Grok Build        | user, project | ✓   | ✓            | ✓*         | ✓            | ✓      | -      | -        |
 | `windsurf`       | Windsurf          | user, project | user | ✓           | -          | -            | -      | -      | -        |
-| `zed`            | Zed               | user, project | ✓   | ✓            | -          | -            | -      | -      | -        |
+| `zed`            | Zed               | user, project | ✓   | ✓            | -          | -            | ✓      | -      | -        |
 | `hermes`         | Hermes Agent      | user, project | user | ✓           | -          | -            | -      | -      | -        |
 | `amp`            | Amp               | user, project | ✓   | ✓            | -          | as skills    | ✓      | -      | -        |
 | `cline`          | Cline             | user, project | user | ✓           | ✓          | ✓            | ✓      | -      | -        |
@@ -134,7 +134,7 @@ Where things go:
 | opencode | `~/.config/opencode/opencode.json` or `opencode.jsonc` (`mcp.servers`), `~/.config/opencode/{AGENTS.md, commands/*.md, skills/<name>/, agents/*.md}`; honours `XDG_CONFIG_HOME` | `opencode.json(c)` or `.opencode/opencode.json(c)` (the first that exists, else `opencode.json`), `AGENTS.md` (shared with Codex, Cursor and Antigravity), `.opencode/{commands,skills,agents}/`; capture reads every config file there is |
 | Grok Build | `$GROK_HOME/config.toml` (`[mcp_servers.<name>]`, default `~/.grok`), `$GROK_HOME/{AGENTS.md, rules/*.md, commands/*.md, skills/}` | `.grok/config.toml`, `AGENTS.md` (shared with Codex, Cursor, Antigravity and opencode), `.grok/{rules,commands,skills}/`; Grok reads project files only in folders you have trusted |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` (`mcpServers`), `~/.codeium/windsurf/memories/global_rules.md` | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode and Grok Build); capture also reads the legacy `.windsurfrules`; Windsurf's docs describe no project MCP file, so MCP servers are not written at project scope |
-| Zed | `settings.json` in `~/.config/zed` (macOS), `$XDG_CONFIG_HOME/zed` or `~/.config/zed` (Linux), `%APPDATA%\Zed` (Windows) (`context_servers`), and `AGENTS.md` next to it (Zed's personal instructions) | `.zed/settings.json` (`context_servers`; Zed starts these only in a trusted worktree); instructions go to the first of `.rules`, `.cursorrules`, `.windsurfrules`, `.clinerules`, `.github/copilot-instructions.md`, `AGENT.md` and `AGENTS.md` that exists, since Zed reads only that one, and to `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build and Windsurf) when none does |
+| Zed | `settings.json` in `~/.config/zed` (macOS), `$XDG_CONFIG_HOME/zed` or `~/.config/zed` (Linux), `%APPDATA%\Zed` (Windows) (`context_servers`), and `AGENTS.md` next to it (Zed's personal instructions), `~/.agents/skills/<name>/` (skills) | `.zed/settings.json` (`context_servers`; Zed starts these only in a trusted worktree); instructions go to the first of `.rules`, `.cursorrules`, `.windsurfrules`, `.clinerules`, `.github/copilot-instructions.md`, `AGENT.md` and `AGENTS.md` that exists, since Zed reads only that one, and to `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build and Windsurf) when none does; `.agents/skills/<name>/` (skills; Amp writes its project skills to the same folder) |
 | Hermes Agent | `$HERMES_HOME/config.yaml` (`mcp_servers`, default `~/.hermes`), `$HERMES_HOME/SOUL.md` (Hermes's identity file, the only global file it reads for instructions; capture reads only a kitbag-managed block in it) | `.hermes.md` or `HERMES.md` when the project has one (Hermes loads it before `AGENTS.md`), otherwise `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf and Grok Build); Hermes documents no project MCP file, so MCP servers are not written at project scope |
 | Amp | `~/.config/amp/settings.json` or `settings.jsonc` (`amp.mcpServers`; `%USERPROFILE%\.config\amp` on Windows), `~/.config/amp/AGENTS.md`, `~/.config/agents/skills/<name>/` | `.amp/settings.json` or `settings.jsonc` (`amp.mcpServers`; Amp asks you to approve these servers, `amp mcp approve`), `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf, Grok Build and Hermes), or `AGENT.md` / `CLAUDE.md` when that is the file Amp reads, `.agents/skills/<name>/` |
 | Cline | `~/.cline/data/settings/cline_mcp_settings.json` (`mcpServers`; `CLINE_MCP_SETTINGS_PATH` names the file, `CLINE_DATA_DIR` replaces `~/.cline/data`, `CLINE_DIR` replaces `~/.cline`), `~/.cline/rules/kitbag.md` (instructions: a managed block in a file of its own; Cline reads every file in that directory), `~/.cline/rules/<name>.md`, `~/.cline/workflows/<name>.md`, `~/.cline/skills/<name>/`; capture also reads `~/Documents/Cline/Rules/`, `~/Cline/Rules/`, `~/Documents/Cline/Workflows/` and `~/.agents/skills/` | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build, Windsurf and Zed), `.cline/rules/<name>.md`, `.cline/workflows/<name>.md`, `.cline/skills/<name>/`; capture also reads the older `.clinerules/` (rules, `workflows/`, `skills/`) and `.agents/skills/`; Cline's docs describe no project MCP file, so MCP servers are not written at project scope |
@@ -1235,9 +1235,23 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   `AGENT.md`, `AGENTS.md`, so kitbag writes its block there (counting
   `.github/copilot-instructions.md` when Copilot is a target too), and capture reads that file
   only, naming the others it ignores. The Rules Library lives in Zed's own database and is being
-  replaced by skills and the personal `AGENTS.md`; kitbag doesn't read or write it. Rules,
-  commands, skills (`~/.agents/skills/`, `.agents/skills/`), agents and settings are not carried
-  yet. The config directory follows Zed's source (`XDG_CONFIG_HOME` on Linux, `~/.config/zed` on
+  replaced by skills and the personal `AGENTS.md`; kitbag doesn't read or write it, and capture
+  says so. Skills are carried (Zed's docs, checked 2026-11-27 at zed.dev/docs/ai/skills): a
+  skill is a folder with a `SKILL.md` (`name` and `description`, both required, and optionally
+  `disable-model-invocation`) and any files it brings, in `~/.agents/skills/` and a project's
+  `.agents/skills/`, the only folders those docs name, so that is where kitbag writes and
+  capture reads (other tools' skill folders, `.claude/skills` among them, are not read by Zed
+  and not touched). Zed loads only a name of lowercase letters, digits and single hyphens, up to
+  64, that matches the folder, so any other skill name is skipped with a warning; a description
+  over 1,024 characters is warned about. Zed loads a project's skills only in a trusted
+  worktree, asks you before the agent first runs a skill you added, and skips a skill folder
+  nested below the skills folder; kitbag leaves all of that to Zed. Amp also writes a project's
+  skills to `.agents/skills/`, so applying both leaves one copy, and kitbag warns when a skill
+  that declares its own MCP servers (which kitbag leaves out for Amp) would differ between the
+  two. Zed's docs name no folder of its own for skills, nor a rules file or a commands folder
+  (the Rules Library is the only place they live), so rules and commands are not carried; agents
+  (#14), hooks (#13) and settings are not carried yet. The skills path for Windows is
+  `%USERPROFILE%\.agents\skills` here, which the docs write as `~/.agents/skills/`. The config directory follows Zed's source (`XDG_CONFIG_HOME` on Linux, `~/.config/zed` on
   macOS); `FLATPAK_XDG_CONFIG_HOME` is not honoured.
 - **Hermes Agent** (Nous Research) keeps MCP servers under `mcp_servers` in
   `~/.hermes/config.yaml` (or `$HERMES_HOME/config.yaml`; run kitbag with `HERMES_HOME` set to
