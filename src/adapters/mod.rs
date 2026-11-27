@@ -23,6 +23,7 @@ pub mod common;
 pub mod copilot;
 pub mod cursor;
 pub mod gemini;
+pub mod grok_build;
 pub mod opencode;
 
 /// Global (per-user) configuration or one project's configuration.
@@ -415,13 +416,14 @@ pub fn all() -> &'static [&'static dyn Adapter] {
         &antigravity::Antigravity,
         &opencode::OpenCode,
         &copilot::Copilot,
+        &grok_build::GrokBuild,
     ]
 }
 
 /// Other names accepted for a target id, as (alias, canonical id). Only ever
 /// used to read user input; output, state files and profiles use the
 /// canonical id.
-pub const ALIASES: &[(&str, &str)] = &[("claude", "claude-code")];
+pub const ALIASES: &[(&str, &str)] = &[("claude", "claude-code"), ("grok", "grok-build")];
 
 /// The canonical id for `id`: an alias becomes the id it stands for, anything
 /// else is returned unchanged. Case-sensitive, like the ids themselves.
@@ -453,6 +455,8 @@ mod tests {
         assert_eq!(canonical_id("Claude"), "Claude");
         assert_eq!(get("claude").map(|a| a.id()), Some("claude-code"));
         assert!(get("Claude").is_none());
+        assert_eq!(canonical_id("grok"), "grok-build");
+        assert_eq!(get("grok").map(|a| a.id()), Some("grok-build"));
         // Aliases never shadow a real id and always point at one.
         for (alias, id) in ALIASES {
             assert!(!ids().contains(alias));

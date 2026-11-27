@@ -16,6 +16,7 @@ const ALL: &[&str] = &[
     "antigravity",
     "opencode",
     "copilot",
+    "grok-build",
 ];
 
 /// Capture `from` in a fixture sandbox, save + reload the profile, apply it to `to`
@@ -236,4 +237,26 @@ fn claude_code_to_copilot_user_skills() {
         a.skills.iter().map(|s| &s.name).collect::<Vec<_>>()
     );
     assert!(b.commands.is_empty(), "no user prompt files");
+}
+
+#[test]
+fn claude_code_to_grok_build() {
+    let (a, b) = round_trip("claude-code", "grok-build", Scope::User);
+    for (name, s) in &a.mcp_servers {
+        assert_eq!(&b.mcp_servers[name], s, "server {name}");
+    }
+    assert_eq!(b.instructions, a.instructions);
+    // Rules get files of their own and come back with their globs.
+    assert_eq!(b.rules, a.rules);
+    // Commands keep their frontmatter (allowed-tools included).
+    assert_eq!(b.commands, a.commands);
+    assert_eq!(b.skills, a.skills);
+}
+
+#[test]
+fn grok_build_to_grok_build_project() {
+    let (a, b) = round_trip("grok-build", "grok-build", Scope::Project);
+    assert_eq!(b.mcp_servers, a.mcp_servers);
+    assert_eq!(b.rules, a.rules);
+    assert_eq!(b.skills, a.skills);
 }

@@ -1605,3 +1605,315 @@ fn copilot_instructions_have_their_own_files() {
     }
     assert!(plan(&prof, &["copilot"], &env).changes.is_empty());
 }
+
+// ------------------------------------------------------------ grok build
+
+#[test]
+fn grok_build_capture() {
+    let sb = Sandbox::fixtures();
+    let r = capture(&["grok-build"], &sb.env(Scope::User));
+    let p = &r.profile;
+
+    let gh = &p.mcp_servers["github"];
+    assert_eq!(gh.command.as_deref(), Some("npx"));
+    // The pasted token is redacted; Grok's own ${VAR:-default} is kept.
+    assert_eq!(
+        gh.env["GITHUB_PERSONAL_ACCESS_TOKEN"],
+        "${GITHUB_PERSONAL_ACCESS_TOKEN}"
+    );
+    assert_eq!(gh.env["LOG_LEVEL"], "${LOG_LEVEL:-info}");
+    let linear = &p.mcp_servers["linear"];
+    assert_eq!(linear.transport(), Transport::Http);
+    assert_eq!(linear.headers["Authorization"], "Bearer ${LINEAR_API_KEY}");
+    assert!(p.mcp_servers["old"].disabled);
+
+    assert!(
+        p.instructions
+            .as_deref()
+            .unwrap()
+            .contains("British English")
+    );
+    assert_eq!(p.rules.len(), 1);
+    assert_eq!(p.rules[0].name, "commits");
+    assert!(p.rules[0].globs.is_empty());
+    assert_eq!(p.commands[0].name, "explain");
+    assert_eq!(p.commands[0].argument_hint.as_deref(), Some("[path]"));
+    assert_eq!(p.skills[0].name, "release-notes");
+    assert!(p.agents.is_empty());
+
+    let locations: Vec<&str> = r.redactions.iter().map(|x| x.location.as_str()).collect();
+    assert_eq!(
+        locations,
+        vec!["mcp_servers.github.env.GITHUB_PERSONAL_ACCESS_TOKEN"]
+    );
+    let notes: Vec<&str> = r.notes.iter().map(|n| n.message.as_str()).collect();
+    assert!(
+        notes.iter().any(|n| n.contains("startup_timeout_sec")),
+        "{notes:?}"
+    );
+    assert!(
+        notes.iter().any(|n| n.contains("agent definitions")),
+        "{notes:?}"
+    );
+}
+
+#[test]
+fn grok_build_project_capture_unwraps_scoped_rules() {
+    let sb = Sandbox::fixtures();
+    let p = capture(&["grok-build"], &sb.env(Scope::Project)).profile;
+    let pg = &p.mcp_servers["postgres"];
+    assert_eq!(pg.args, vec!["--dsn", "${DATABASE_URL}"]);
+    assert_eq!(pg.cwd.as_deref(), Some("tools"));
+    let py = p.rules.iter().find(|r| r.name == "python").unwrap();
+    assert_eq!(py.globs, vec!["*.py"]);
+    assert_eq!(py.description.as_deref(), Some("Python style"));
+    assert_eq!(py.body, "Use type hints everywhere.");
+    assert_eq!(p.skills[0].name, "db-migrate");
+}
+
+#[test]
+fn grok_build_apply_user() {
+    let sb = Sandbox::empty();
+    let p = plan(&sample(), &["grok-build"], &sb.env(Scope::User));
+    let cfg = planned(&p, &sb.home().join(".grok/config.toml")).unwrap();
+    assert!(cfg.contains("[mcp_servers.github]"), "{cfg}");
+    // Grok expands references itself: written as they are, nothing resolved.
+    assert!(cfg.contains("GITHUB_TOKEN = \"${GITHUB_TOKEN}\""), "{cfg}");
+    assert!(
+        cfg.contains("Authorization = \"Bearer ${LINEAR_API_KEY}\""),
+        "{cfg}"
+    );
+    assert!(p.sensitive.is_empty() && p.missing_env.is_empty());
+
+    let agents = planned(&p, &sb.home().join(".grok/AGENTS.md")).unwrap();
+    assert!(agents.contains("Use British English."));
+    assert!(
+        !agents.contains("Strict mode."),
+        "rules get their own files"
+    );
+    let rule = planned(&p, &sb.home().join(".grok/rules/ts.md")).unwrap();
+    assert!(
+        rule.contains("_Applies when working with files matching: `src/**/*.ts`_\n\nStrict mode."),
+        "{rule}"
+    );
+    let cmd = planned(&p, &sb.home().join(".grok/commands/review.md")).unwrap();
+    assert!(cmd.contains("Review $ARGUMENTS"), "{cmd}");
+    assert!(
+        p.notes
+            .iter()
+            .any(|n| n.target == "grok-build" && n.message.contains("no file-scoped rules")),
+        "{:?}",
+        p.notes
+    );
+}
+
+#[test]
+fn grok_build_apply_project() {
+    let sb = Sandbox::empty();
+    let mut prof = sample();
+    prof.skills = capture(&["grok-build"], &Sandbox::fixtures().env(Scope::User))
+        .profile
+        .skills;
+    let p = plan(&prof, &["grok-build"], &sb.env(Scope::Project));
+    assert!(planned(&p, &sb.project().join(".grok/config.toml")).is_some());
+    assert!(planned(&p, &sb.project().join("AGENTS.md")).is_some());
+    assert!(planned(&p, &sb.project().join(".grok/rules/ts.md")).is_some());
+    assert!(planned(&p, &sb.project().join(".grok/commands/review.md")).is_some());
+    assert!(
+        planned(
+            &p,
+            &sb.project().join(".grok/skills/release-notes/SKILL.md")
+        )
+        .is_some()
+    );
+    let notes: Vec<&str> = p.notes.iter().map(|n| n.message.as_str()).collect();
+    assert!(notes.iter().any(|n| n.contains("trusted")), "{notes:?}");
+    assert!(
+        notes.iter().any(|n| n.contains("replaces a user server")),
+        "{notes:?}"
+    );
+}
+
+#[test]
+fn grok_build_follows_grok_home() {
+    let sb = Sandbox::empty();
+    let mut env = sb.env(Scope::User);
+    let custom = sb.path("grok-home");
+    env.locations
+        .insert("GROK_HOME".into(), custom.to_string_lossy().into_owned());
+    let p = plan(&sample(), &["grok-build"], &env);
+    assert!(planned(&p, &custom.join("config.toml")).is_some());
+    assert!(planned(&p, &custom.join("AGENTS.md")).is_some());
+    assert!(planned(&p, &sb.home().join(".grok/config.toml")).is_none());
+}
+
+#[test]
+fn grok_build_apply_merges_into_existing_toml_and_keeps_its_keys() {
+    let sb = Sandbox::empty();
+    let cfg_path = sb.home().join(".grok/config.toml");
+    std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &cfg_path,
+        "# mine\n[ui]\ntheme = \"dark\"\n\n# keep me\n[mcp_servers.github]\ncommand = \"npx\"\nargs = [\"-y\", \"@modelcontextprotocol/server-github\"]\nenv = { GITHUB_TOKEN = \"old\" }\nstartup_timeout_sec = 90\ntool_timeout_sec = 600\n",
+    )
+    .unwrap();
+    apply(&sb, &sample(), &["grok-build"], &sb.env(Scope::User));
+    let text = std::fs::read_to_string(&cfg_path).unwrap();
+    assert!(text.starts_with("# mine\n[ui]\ntheme = \"dark\""), "{text}");
+    assert!(text.contains("# keep me\n[mcp_servers.github]"), "{text}");
+    assert!(
+        text.contains("GITHUB_TOKEN = \"${GITHUB_TOKEN}\""),
+        "{text}"
+    );
+    assert!(text.contains("startup_timeout_sec = 90"), "{text}");
+    assert!(text.contains("tool_timeout_sec = 600"), "{text}");
+    assert!(text.contains("[mcp_servers.linear]"), "{text}");
+    // Idempotent.
+    assert!(
+        plan(&sample(), &["grok-build"], &sb.env(Scope::User))
+            .changes
+            .is_empty()
+    );
+    Store::new(sb.state()).undo(None, false).unwrap();
+    assert!(
+        std::fs::read_to_string(&cfg_path)
+            .unwrap()
+            .contains("GITHUB_TOKEN = \"old\"")
+    );
+}
+
+#[test]
+fn grok_build_keeps_env_refs_with_defaults_and_writes_disabled_servers() {
+    let sb = Sandbox::empty();
+    let mut prof = Profile::new("team");
+    prof.mcp_servers.insert(
+        "db".into(),
+        McpServer {
+            command: Some("db-mcp".into()),
+            args: vec!["--url".into(), "${DB_URL:-postgres://localhost/dev}".into()],
+            disabled: true,
+            ..Default::default()
+        },
+    );
+    prof.mcp_servers.insert(
+        "events".into(),
+        McpServer {
+            url: Some("https://example.com/sse".into()),
+            transport: Some(Transport::Sse),
+            ..Default::default()
+        },
+    );
+    let p = plan(&prof, &["grok-build"], &sb.env(Scope::User));
+    let cfg = planned(&p, &sb.home().join(".grok/config.toml")).unwrap();
+    assert!(
+        cfg.contains("\"${DB_URL:-postgres://localhost/dev}\""),
+        "{cfg}"
+    );
+    assert!(cfg.contains("enabled = false"), "{cfg}");
+    assert!(!cfg.contains("events"), "{cfg}");
+    assert!(
+        p.notes
+            .iter()
+            .any(|n| n.message.contains("SSE server skipped")),
+        "{:?}",
+        p.notes
+    );
+}
+
+#[test]
+fn grok_build_shares_agents_md_with_codex_cursor_antigravity_and_opencode() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::Project);
+    let prof = sample();
+    let agents = sb.project().join("AGENTS.md");
+    std::fs::write(&agents, "My own notes.\n").unwrap();
+    let p = apply(
+        &sb,
+        &prof,
+        &["codex", "cursor", "antigravity", "opencode", "grok-build"],
+        &env,
+    );
+    assert_eq!(
+        p.changes.iter().filter(|c| c.path == agents).count(),
+        1,
+        "AGENTS.md is planned once"
+    );
+    let text = sb.read("project/AGENTS.md");
+    assert_eq!(text.matches("Use British English.").count(), 1, "{text}");
+    // Codex folded the rules into AGENTS.md, which Grok reads as well.
+    assert!(
+        p.notes
+            .iter()
+            .any(|n| n.target == "grok-build" && n.message.contains("sees the rules twice")),
+        "{:?}",
+        p.notes
+    );
+    assert!(plan(&prof, &["grok-build"], &env).changes.is_empty());
+    // Grok's capture leaves out the rules Codex folded in; its own files hold them.
+    let r = capture(&["grok-build"], &env);
+    assert_eq!(r.profile.rules, prof.rules);
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n.message.contains("were not captured (ts)"))
+    );
+    Store::new(sb.state()).undo(None, false).unwrap();
+    assert_eq!(std::fs::read_to_string(&agents).unwrap(), "My own notes.\n");
+    assert!(!sb.project().join(".grok").exists());
+}
+
+#[test]
+fn grok_build_notes_instructions_loading_twice_with_claude_code() {
+    let sb = Sandbox::empty();
+    let p = plan(
+        &sample(),
+        &["claude-code", "grok-build"],
+        &sb.env(Scope::User),
+    );
+    assert!(
+        p.notes
+            .iter()
+            .any(|n| n.target == "grok-build" && n.message.contains("load twice")),
+        "{:?}",
+        p.notes
+    );
+    let alone = plan(&sample(), &["grok-build"], &sb.env(Scope::User));
+    assert!(!alone.notes.iter().any(|n| n.message.contains("load twice")));
+}
+
+#[test]
+fn grok_build_warns_about_positional_arguments() {
+    let sb = Sandbox::empty();
+    let mut prof = sample();
+    prof.commands[0].body = "Compare $1 with $2".into();
+    let p = plan(&prof, &["grok-build"], &sb.env(Scope::User));
+    assert!(
+        p.notes
+            .iter()
+            .any(|n| n.target == "grok-build" && n.message.contains("from $0")),
+        "{:?}",
+        p.notes
+    );
+    // $ARGUMENTS alone is fine.
+    let p = plan(&sample(), &["grok-build"], &sb.env(Scope::User));
+    assert!(!p.notes.iter().any(|n| n.message.contains("from $0")));
+}
+
+#[test]
+fn grok_is_an_alias_on_the_command_line() {
+    let sb = Sandbox::empty();
+    std::fs::create_dir_all(sb.path("p")).unwrap();
+    std::fs::write(
+        sb.path("p/kitbag.toml"),
+        "kitbag = 1\nname = \"p\"\n\n[mcp_servers.test]\ncommand = \"c\"\n",
+    )
+    .unwrap();
+    sb.cli()
+        .args(["apply", "p", "--to", "grok", "--yes"])
+        .assert()
+        .success();
+    assert!(
+        sb.read("home/.grok/config.toml")
+            .contains("[mcp_servers.test]")
+    );
+}

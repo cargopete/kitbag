@@ -250,3 +250,50 @@ fn copilot_agents_are_not_read_or_written_through_a_link_out_of_the_project() {
     );
     assert!(!sb.path("outside/reviewer.agent.md").exists());
 }
+
+/// A dotfiles manager (dfs, stow, chezmoi's symlink mode) links
+/// `~/.grok/config.toml` into its repository: apply writes the repository's
+/// file, and the link stays a link.
+#[test]
+fn grok_build_writes_through_a_linked_user_config() {
+    let sb = Sandbox::empty();
+    fs::create_dir_all(sb.path("p")).unwrap();
+    fs::write(sb.path("p/kitbag.toml"), SERVER).unwrap();
+    fs::create_dir_all(sb.path("dotfiles/grok")).unwrap();
+    fs::write(
+        sb.path("dotfiles/grok/config.toml"),
+        "# from my dotfiles\n[ui]\ntheme = \"dark\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(sb.home().join(".grok")).unwrap();
+    symlink(
+        sb.path("dotfiles/grok/config.toml"),
+        sb.home().join(".grok/config.toml"),
+    )
+    .unwrap();
+    sb.cli()
+        .args(["apply", "p", "--to", "grok-build", "--yes"])
+        .assert()
+        .success();
+    let link = sb.home().join(".grok/config.toml");
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let text = fs::read_to_string(sb.path("dotfiles/grok/config.toml")).unwrap();
+    assert!(text.starts_with("# from my dotfiles\n"), "{text}");
+    assert!(text.contains("[mcp_servers.test]"), "{text}");
+    sb.cli().arg("undo").assert().success();
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read_to_string(sb.path("dotfiles/grok/config.toml")).unwrap(),
+        "# from my dotfiles\n[ui]\ntheme = \"dark\"\n"
+    );
+}

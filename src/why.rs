@@ -121,6 +121,7 @@ pub const TOOLS: &[&str] = &[
     "gemini-cli",
     "antigravity",
     "opencode",
+    "grok-build",
 ];
 
 /// The report for target `id`.
@@ -132,6 +133,7 @@ pub fn explain(id: &str, place: &Place) -> Report {
         "cursor" => cursor(place),
         "gemini-cli" => gemini(place),
         "antigravity" => antigravity(place),
+        "grok-build" => grok_build(place),
         _ => {
             let (id, name) = crate::adapters::get(id).map_or(("", ""), |a| (a.id(), a.name()));
             let mut r = Report::new(id, name);
@@ -1225,6 +1227,292 @@ fn antigravity(place: &Place) -> Report {
     }
     shared_gemini_md(&mut r, env, "Gemini CLI");
     r.note("Antigravity doesn't read files in subdirectories below the workspace; global and always-on rules share a 20,000-token budget");
+    r
+}
+
+// ---------------------------------------------------------------------------
+// Grok Build
+// https://github.com/xai-org/grok-build: crates/codegen/xai-grok-agent/src/prompt/agents_md.rs,
+// crates/codegen/xai-grok-config/src/compat.rs and the user guide's 12-project-rules.md
+
+/// The instruction file names Grok Build looks for in each directory, in order
+/// (`INSTRUCTION_FILENAMES`); it loads every one that exists.
+const GROK_NAMES: &[&str] = &[
+    "Agents.md",
+    "Claude.md",
+    "CLAUDE.md",
+    "CLAUDE.local.md",
+    "AGENT.md",
+    "AGENTS.md",
+];
+
+/// One `[compat.<vendor>]` cell: the `GROK_<VENDOR>_<CELL>_ENABLED` variable,
+/// else config.toml, else on.
+fn grok_compat(
+    env: &Env,
+    config: Option<&toml_edit::DocumentMut>,
+    vendor: &str,
+    cell: &str,
+) -> bool {
+    let var = format!(
+        "GROK_{}_{}_ENABLED",
+        vendor.to_ascii_uppercase(),
+        cell.to_ascii_uppercase()
+    );
+    if let Some(v) = env.vars.get(&var).map(|v| v.trim().to_ascii_lowercase())
+        && !v.is_empty()
+    {
+        return !matches!(v.as_str(), "0" | "false" | "no" | "off");
+    }
+    config
+        .and_then(|d| d.get("compat"))
+        .and_then(|c| c.get(vendor))
+        .and_then(|v| v.get(cell))
+        .and_then(|i| i.as_bool())
+        .unwrap_or(true)
+}
+
+/// `*.md` directly in `dir` (not below), sorted by name.
+fn md_in(dir: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+        })
+        .collect();
+    files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    files
+}
+
+/// Load `path`, unless the same file (a link, or the home directory inside
+/// the project) was loaded already.
+fn grok_load(r: &mut Report, seen: &mut Vec<PathBuf>, path: &Path, why: String) {
+    let key = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if seen.contains(&key) {
+        r.skip(path, "already loaded above (the same file)");
+    } else {
+        seen.push(key);
+        r.load(path, why);
+    }
+}
+
+/// The rules in `dir`: all load; one whose frontmatter scopes it to some files is a trap.
+fn grok_rules(r: &mut Report, seen: &mut Vec<PathBuf>, dir: &Path, label: &str) {
+    for f in md_in(dir) {
+        let globs = read_text_opt(&f).ok().flatten().and_then(|text| {
+            let doc = frontmatter::parse(&text);
+            // kitbag writes such a rule with a first line saying which files
+            // it is for, which the model does see.
+            if doc
+                .body
+                .trim_start()
+                .starts_with("_Applies when working with files matching:")
+            {
+                return None;
+            }
+            ["paths", "globs", "applyTo"]
+                .iter()
+                .map(|k| frontmatter::glob_list(doc.data.get(*k)))
+                .find(|g| !g.is_empty())
+        });
+        grok_load(r, seen, &f, label.to_string());
+        if let Some(globs) = globs {
+            r.trap(
+                Some(&f),
+                format!("its frontmatter limits it to {}, but Grok Build strips frontmatter and loads every rule, for every file", globs.join(", ")),
+            );
+        }
+    }
+}
+
+/// The instruction files Grok Build finds in `dir`, in its order, under their
+/// real names. On macOS and Windows names match in any case, and two names
+/// that reach the same file count once.
+fn grok_named(dir: &Path, os: Os) -> Vec<PathBuf> {
+    let Ok(rd) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let entries: Vec<String> = rd
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    let mut out: Vec<PathBuf> = Vec::new();
+    for name in GROK_NAMES {
+        let found = entries.iter().find(|e| {
+            if os == Os::Linux {
+                e.as_str() == *name
+            } else {
+                e.eq_ignore_ascii_case(name)
+            }
+        });
+        if let Some(e) = found {
+            let p = dir.join(e);
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+fn grok_build(place: &Place) -> Report {
+    let mut r = Report::new("grok-build", "Grok Build");
+    let env = place.env;
+    let home = crate::adapters::grok_build::grok_home(env);
+    let config = read_toml(&home.join("config.toml"));
+    let cell = |vendor: &str, c: &str| grok_compat(env, config.as_ref(), vendor, c);
+    let (claude_agents, claude_rules) = (cell("claude", "agents"), cell("claude", "rules"));
+    let (cursor_agents, cursor_rules) = (cell("cursor", "agents"), cell("cursor", "rules"));
+
+    let mut seen: Vec<PathBuf> = Vec::new();
+
+    // 1. Home: $GROK_HOME, then ~/.claude and ~/.cursor when their cells are on.
+    for p in grok_named(&home, env.os) {
+        grok_load(&mut r, &mut seen, &p, "global".into());
+    }
+    grok_rules(&mut r, &mut seen, &home.join("rules"), "global rule");
+    for (vendor, dir, agents, rules_on) in [
+        (
+            "claude",
+            env.home.join(".claude"),
+            claude_agents,
+            claude_rules,
+        ),
+        (
+            "cursor",
+            env.home.join(".cursor"),
+            cursor_agents,
+            cursor_rules,
+        ),
+    ] {
+        for p in grok_named(&dir, env.os) {
+            if agents {
+                grok_load(
+                    &mut r,
+                    &mut seen,
+                    &p,
+                    format!("global ({vendor} compatibility)"),
+                );
+            } else {
+                r.skip(&p, format!("[compat.{vendor}] agents is off"));
+            }
+        }
+        if rules_on {
+            grok_rules(
+                &mut r,
+                &mut seen,
+                &dir.join("rules"),
+                &format!("global rule ({vendor} compatibility)"),
+            );
+        } else {
+            for f in md_in(&dir.join("rules")) {
+                r.skip(&f, format!("[compat.{vendor}] rules is off"));
+            }
+        }
+    }
+    // [paths] extra_rule_dirs: absolute or ~/ entries only.
+    let extra: Vec<String> = config
+        .as_ref()
+        .and_then(|d| d.get("paths"))
+        .and_then(|p| p.get("extra_rule_dirs"))
+        .and_then(|i| i.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    for e in extra {
+        let dir = match e.strip_prefix("~/") {
+            Some(rest) => env.home.join(rest),
+            None if Path::new(&e).is_absolute() => PathBuf::from(&e),
+            None => {
+                r.note(format!("[paths] extra_rule_dirs entry '{e}' is neither absolute nor ~/..., so Grok Build loads nothing from it"));
+                continue;
+            }
+        };
+        grok_rules(&mut r, &mut seen, &dir, "rule from [paths] extra_rule_dirs");
+    }
+
+    // 2. Project: every directory from the git root down to this one (only
+    // this one outside git). Needs folder trust.
+    let root = place.dir.ancestors().find(|d| d.join(".git").exists());
+    let dirs: Vec<PathBuf> = match root {
+        Some(root) => root_down(&place.dir)
+            .into_iter()
+            .filter(|d| d.starts_with(root))
+            .collect(),
+        None => vec![place.dir.clone()],
+    };
+    let before = r.loaded().count();
+    for d in &dirs {
+        let label = if *d == place.dir {
+            "project"
+        } else {
+            "repository root or parent"
+        };
+        for p in grok_named(d, env.os) {
+            grok_load(&mut r, &mut seen, &p, label.to_string());
+        }
+        for name in ["CLAUDE.md", "CLAUDE.local.md"] {
+            let p = d.join(".claude").join(name);
+            if !file(&p) {
+                continue;
+            }
+            if claude_agents {
+                grok_load(
+                    &mut r,
+                    &mut seen,
+                    &p,
+                    format!("{label} (Claude compatibility)"),
+                );
+            } else {
+                r.skip(&p, "[compat.claude] agents is off");
+            }
+        }
+        flag_wrong_case(&mut r, place, d, "AGENTS.md");
+        grok_rules(
+            &mut r,
+            &mut seen,
+            &d.join(".grok").join("rules"),
+            &format!("{label} rule"),
+        );
+        for (vendor, on) in [("claude", claude_rules), ("cursor", cursor_rules)] {
+            let dir = d.join(format!(".{vendor}")).join("rules");
+            if on {
+                grok_rules(
+                    &mut r,
+                    &mut seen,
+                    &dir,
+                    &format!("{label} rule ({vendor} compatibility)"),
+                );
+            } else {
+                for f in md_in(&dir) {
+                    r.skip(&f, format!("[compat.{vendor}] rules is off"));
+                }
+            }
+        }
+    }
+    if r.loaded().count() > before {
+        r.unverified("Grok Build loads a project's files only once the folder is trusted (`grok --trust` or the prompt); kitbag can't tell whether this one is. Files the repository's .gitignore ignores are skipped too");
+    }
+    if root.is_none() {
+        r.note(
+            "not inside a git repository: Grok Build reads only this directory, not its parents",
+        );
+    }
+    if r.loaded().next().is_none() {
+        r.note("no instruction files found");
+    }
+    r.note("every file listed loads, in this order; on a conflict the later (deeper) one wins. Instruction files in subdirectories are read later, when Grok works there");
     r
 }
 

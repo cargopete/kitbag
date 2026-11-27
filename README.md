@@ -9,8 +9,8 @@ kitbag captures your MCP servers, instructions, rules, slash commands, skills an
 from the AI coding tools you already use. It stores them as a small, git-friendly **profile** with secrets
 redacted and applies that profile to any other tool in one step. Claude Code, Cursor,
 OpenAI Codex CLI, Gemini CLI, Claude Desktop, Google Antigravity, opencode (the last two
-for MCP servers and instructions) and GitHub Copilot (MCP servers, instructions, rules, prompt files and skills) are
-supported, at user and project scope.
+for MCP servers and instructions), GitHub Copilot (MCP servers, instructions, rules, prompt files and skills)
+and xAI's Grok Build CLI are supported, at user and project scope.
 
 > [!IMPORTANT]
 > **Status: early release (v0.1).** kitbag works today and is tested against real setups,
@@ -88,15 +88,21 @@ Starting from scratch? `kitbag init my-profile` writes a commented starter profi
 | `antigravity`    | Google Antigravity | user, project | ✓  | ✓            | -          | -            | -      | -      | -        |
 | `opencode`       | opencode          | user, project | ✓   | ✓            | -          | -            | -      | -      | -        |
 | `copilot`        | GitHub Copilot (CLI, VS Code) | user, project | ✓ | ✓    | ✓          | project      | ✓      | ✓      | -        |
+| `grok-build`     | Grok Build        | user, project | ✓   | ✓            | ✓*         | ✓            | ✓      | -      | -        |
 
 `claude` is accepted as an alias for `claude-code` wherever a target id is given (`--to`,
 `--from`, `targets`, `disabled_on`, and `[settings.claude]`, read as `[settings.claude-code]`;
 a profile with both tables is an error); kitbag always writes and prints `claude-code`. It
-never means `claude-desktop`.
+never means `claude-desktop`. Likewise `grok` is an alias for `grok-build`.
 
 *folded*: the tool has no file-scoped rules, so rules become labelled sections of its single
 instructions file. Each section records the rule's globs, and `capture` splits them back out
 losslessly.
+
+\*Grok Build has a rules directory, but no file-scoped or on-demand rules: every
+rule there loads for every file. kitbag writes each rule to its own file with a first line saying
+which files it is for (`_Applies when working with files matching: ..._`), and capture reads the
+globs back from the frontmatter, which Grok strips before the model sees the rule.
 
 Where things go:
 
@@ -109,6 +115,7 @@ Where things go:
 | Claude Desktop | `claude_desktop_config.json` in `~/Library/Application Support/Claude` (macOS), `%APPDATA%\Claude` (Windows), `~/.config/Claude` (Linux) | n/a |
 | Antigravity | `~/.gemini/config/mcp_config.json`, `~/.gemini/GEMINI.md` (the same file and managed block as Gemini CLI); capture also reads `~/.gemini/AGENTS.md` and `~/.gemini/config/{AGENTS,GEMINI}.md` | `.agents/mcp_config.json`, `AGENTS.md` (shared with Codex and Cursor); capture also reads `GEMINI.md` and `.agents/{AGENTS,GEMINI}.md` |
 | opencode | `~/.config/opencode/opencode.json` or `opencode.jsonc` (`mcp.servers`), `~/.config/opencode/AGENTS.md`; honours `XDG_CONFIG_HOME` | `opencode.json(c)` or `.opencode/opencode.json(c)` (the first that exists, else `opencode.json`), `AGENTS.md` (shared with Codex, Cursor and Antigravity); capture reads every config file there is |
+| Grok Build | `$GROK_HOME/config.toml` (`[mcp_servers.<name>]`, default `~/.grok`), `$GROK_HOME/{AGENTS.md, rules/*.md, commands/*.md, skills/}` | `.grok/config.toml`, `AGENTS.md` (shared with Codex, Cursor, Antigravity and opencode), `.grok/{rules,commands,skills}/`; Grok reads project files only in folders you have trusted |
 | GitHub Copilot | `$COPILOT_HOME/mcp-config.json` (`mcpServers`, default `~/.copilot`), `$COPILOT_HOME/copilot-instructions.md`, `$COPILOT_HOME/instructions/*.instructions.md`, `$COPILOT_HOME/skills/`, `$COPILOT_HOME/agents/*.agent.md` | `.mcp.json` (shared with Claude Code, written in Claude Code's shape), `.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` (`applyTo`), `.github/prompts/*.prompt.md`, `.github/skills/`, `.github/agents/*.agent.md`; capture also reads `.github/mcp.json`, legacy chat modes in `.github/chatmodes/` and `.vscode/mcp.json` (`servers`), and `disabledMcpServers` from Copilot's `settings.json` |
 
 How each tool receives `${VAR}` references:
@@ -123,6 +130,7 @@ How each tool receives `${VAR}` references:
 | Antigravity | resolved value (its docs describe no interpolation); remote servers get `serverUrl`, SSE servers are skipped | yes, unless `--secrets never` |
 | opencode | `{env:VAR}` (expanded by opencode; defaults resolved at apply time); SSE servers are skipped | no |
 | GitHub Copilot | `${VAR}` / `${VAR:-default}` (expanded by Copilot); capture also reads `${env:VAR}` from `.vscode/mcp.json` | no |
+| Grok Build | `${VAR}` / `${VAR:-default}` (expanded by Grok Build); capture also reads `bearer_token_env_var` as an `Authorization` header; SSE servers are skipped | no |
 
 ## The profile format
 
@@ -158,7 +166,7 @@ description = "Optional"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
 env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_PERSONAL_ACCESS_TOKEN}" }
-# cwd = "/path"               # working directory (Codex, Gemini CLI, Antigravity, opencode)
+# cwd = "/path"               # working directory (Codex, Gemini CLI, Antigravity, opencode, Grok Build)
 
 [mcp_servers.linear]          # remote server; transport inferred from `url`
 url = "https://mcp.linear.app/mcp"
@@ -166,7 +174,7 @@ headers = { Authorization = "Bearer ${LINEAR_API_KEY}" }
 # transport = "sse"           # stdio | http | sse (only needed for legacy SSE)
 # targets = ["claude-code"]   # only these tools (see "Per-tool MCP servers")
 # disabled_on = ["cursor"]    # or every tool except these
-# disabled = true             # keep the definition; Codex writes enabled = false, Antigravity and opencode disabled = true, others skip it
+# disabled = true             # keep the definition; Codex and Grok Build write enabled = false, Antigravity and opencode disabled = true, others skip it
 
 [settings.claude-code]        # per-tool settings, allow-listed keys only
 model = "opus"
@@ -184,7 +192,7 @@ releases will refuse newer profiles instead of misreading them.
 don't need it. `targets` lists the only tools a server is applied to; `disabled_on` lists the
 tools it is kept out of. Use one or the other, not both, and give `targets` at least one tool.
 Target names are those of `kitbag list-targets` (`claude-code`, `cursor`, `codex`,
-`gemini-cli`, `claude-desktop`, `antigravity`, `opencode`, `copilot`). An unknown name (a typo, or a tool from a newer
+`gemini-cli`, `claude-desktop`, `antigravity`, `opencode`, `copilot`, `grok-build`). An unknown name (a typo, or a tool from a newer
 kitbag) is a warning that lists the valid ones, and the name is ignored: it matches no tool.
 `only` and `except` still load as older names for the same fields (an empty `only` still means
 no restriction, with a warning); set each field under one name, not both. Capture writes the new
@@ -680,6 +688,11 @@ the tool's documentation doesn't answer; kitbag says so instead of guessing). It
   Cursor's app storage, not on disk, so they can't be listed.
 - **Gemini CLI** (with `context.fileName`), **Antigravity** (including its 24,000-byte
   truncation) and **opencode** (`AGENTS.md`, else `CLAUDE.md`, per directory).
+- **Grok Build**: `$GROK_HOME` files and rules, then Claude Code's and Cursor's home files and
+  rules (as `[compat.claude]` / `[compat.cursor]` and the `GROK_*_ENABLED` variables allow),
+  `[paths] extra_rule_dirs`, then every directory from the git root down, where every
+  instruction file name that exists loads (`AGENTS.md` and `CLAUDE.md` alike). It flags a rule
+  whose frontmatter limits it to some files, since Grok loads every rule for every file.
 
 By default every tool that reads instruction files is shown; `--to` limits it, and `--home`
 (or `KITBAG_HOME`) points it at a sandbox. Under `--home`, Claude Code's managed policy file is
@@ -863,6 +876,13 @@ Good next candidates: Windsurf, Zed.
   plan notes when the `AGENTS.md` kitbag creates takes its place. Files listed under
   `instructions`, `{file:...}` references and opencode's agents, commands, skills and plugins
   are not carried yet, and its tool permissions are left alone.
+- **Grok Build** also reads Claude Code's files (`CLAUDE.md`, `.claude/rules`, `.claude/skills`,
+  `.claude/commands`, `.mcp.json`) and `~/.agents/skills` by default. The plan notes when the
+  same instructions would load twice, and that Codex's folded rules in a shared `AGENTS.md` sit
+  next to `.grok/rules/`. Commands are Claude Code style markdown; Grok counts positional
+  arguments from `$0`, so kitbag warns about commands that use `$1`-style placeholders. Grok
+  Build agent definitions (`.grok/agents/`), personas, plugins, hooks and settings are not
+  carried yet.
 - **GitHub Copilot** and Claude Code both read a project's `.mcp.json`. kitbag writes it in
   Claude Code's shape for both (no `cwd`, no `tools`; a `cwd` is dropped with a warning), so
   applying both writes each server once, and a server the profile keeps off one of them stays

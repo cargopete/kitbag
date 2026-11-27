@@ -1,0 +1,4 @@
+[mcp_servers.postgres]
+command = "postgres-mcp"
+args = ["--dsn", "${DATABASE_URL}"]
+cwd = "tools"

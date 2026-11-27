@@ -440,3 +440,102 @@ fn a_file_with_the_wrong_case_is_reported() {
     let skip = line_with(&out, &proj.join("agents.md"), "skip");
     assert!(skip.contains("must be called AGENTS.md"), "{skip}");
 }
+
+/// Grok Build: home files first ($GROK_HOME, then Claude's and Cursor's),
+/// then every directory from the git root down; every name that exists loads.
+#[test]
+fn grok_build_loads_home_then_root_down_and_every_instruction_file() {
+    let sb = Sandbox::empty();
+    let repo = sb.path("ws/repo");
+    let sub = repo.join("sub");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    write(&sb.home().join(".grok/AGENTS.md"), "# me\n");
+    write(&sb.home().join(".grok/rules/b.md"), "b\n");
+    write(&sb.home().join(".grok/rules/a.md"), "a\n");
+    write(&sb.home().join(".claude/CLAUDE.md"), "# claude me\n");
+    write(&sb.home().join(".cursor/rules/c.md"), "c\n");
+    write(&sb.path("ws/AGENTS.md"), "# above the repo\n");
+    write(&repo.join("AGENTS.md"), "# repo\n");
+    write(&repo.join("CLAUDE.md"), "# repo claude\n");
+    write(
+        &repo.join(".claude/rules/scoped.md"),
+        "---\npaths:\n  - \"src/**\"\n---\n\nOnly for src.\n",
+    );
+    write(&sub.join("AGENTS.md"), "# sub\n");
+    write(&sub.join(".grok/rules/s.md"), "s\n");
+
+    let out = why(&sb, &sub, "grok");
+    let order = [
+        std::path::PathBuf::from("~/.grok/AGENTS.md"),
+        std::path::PathBuf::from("~/.grok/rules/a.md"),
+        std::path::PathBuf::from("~/.grok/rules/b.md"),
+        std::path::PathBuf::from("~/.claude/CLAUDE.md"),
+        std::path::PathBuf::from("~/.cursor/rules/c.md"),
+        repo.join("CLAUDE.md"),
+        repo.join("AGENTS.md"),
+        repo.join(".claude/rules/scoped.md"),
+        sub.join("AGENTS.md"),
+        sub.join(".grok/rules/s.md"),
+    ];
+    let mut last = 0;
+    for (i, p) in order.iter().enumerate() {
+        let line = line_with(&out, p, "load");
+        assert!(line.contains(&format!("load {}", i + 1)), "{line}\n{out}");
+        let at = out.find(line).unwrap();
+        assert!(at >= last, "{} out of order:\n{out}", p.display());
+        last = at;
+    }
+    // Above the git root nothing is read.
+    assert!(!out.contains(&disp(&sb.path("ws/AGENTS.md"))), "{out}");
+    // A Claude rule scoped by frontmatter loads for every file in Grok.
+    line_with(&out, &repo.join(".claude/rules/scoped.md"), "trap");
+    assert!(out.contains("trusted"), "{out}");
+}
+
+#[test]
+fn grok_build_compat_cells_skip_claude_files() {
+    let sb = Sandbox::empty();
+    let repo = sb.path("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    write(
+        &sb.home().join(".grok/config.toml"),
+        "[compat.claude]\nrules = false\n",
+    );
+    write(&sb.home().join(".claude/CLAUDE.md"), "# claude me\n");
+    write(&sb.home().join(".claude/rules/r.md"), "r\n");
+    write(&repo.join(".claude/CLAUDE.md"), "# project claude\n");
+    write(&repo.join("CLAUDE.md"), "# top-level claude\n");
+
+    // config.toml turns rules off; the variable turns named files off.
+    let out = sb
+        .cli()
+        .env("GROK_CLAUDE_AGENTS_ENABLED", "false")
+        .args(["doctor", "--why"])
+        .arg(&repo)
+        .args(["--to", "grok-build"])
+        .output()
+        .unwrap();
+    let out = String::from_utf8(out.stdout).unwrap();
+    line_with(&out, Path::new("~/.claude/rules/r.md"), "rules is off");
+    line_with(&out, Path::new("~/.claude/CLAUDE.md"), "agents is off");
+    line_with(&out, &repo.join(".claude/CLAUDE.md"), "agents is off");
+    // A top-level CLAUDE.md is always recognized.
+    line_with(&out, &repo.join("CLAUDE.md"), "load 1");
+
+    // With the defaults all of them load.
+    let out = why(&sb, &repo, "grok-build");
+    line_with(&out, &repo.join(".claude/CLAUDE.md"), "load");
+    line_with(&out, Path::new("~/.claude/CLAUDE.md"), "load");
+}
+
+#[test]
+fn grok_build_outside_git_reads_only_the_directory() {
+    let sb = Sandbox::empty();
+    let dir = sb.path("plain/inner");
+    write(&sb.path("plain/AGENTS.md"), "# parent\n");
+    write(&dir.join("AGENTS.md"), "# here\n");
+    let out = why(&sb, &dir, "grok-build");
+    line_with(&out, &dir.join("AGENTS.md"), "load 1");
+    assert!(!out.contains(&disp(&sb.path("plain/AGENTS.md"))), "{out}");
+    assert!(out.contains("not inside a git repository"), "{out}");
+}
