@@ -12,6 +12,8 @@
 //!   as they are in the profile's agent.
 //!   Docs: <https://code.claude.com/docs/en/sub-agents>.
 //! * Settings: `.claude/settings.json` (allow-listed keys only).
+//! * Plugins, by reference: the `enabledPlugins` and `extraKnownMarketplaces`
+//!   keys of that file (see `plugins.rs`); plugin files are never copied.
 //! * Hooks: the `hooks` key of that file, with `capture --include hooks` and
 //!   `apply --apply-hooks` (see `hook_files.rs`).
 
@@ -343,15 +345,6 @@ fn note_not_carried(cap: &mut Captured, env: &Env) {
             .map(|f| f.iter().filter(|r| r.ends_with(".md")).count())
             .unwrap_or(0)
     };
-    let plugins = read_text_opt(&dir.join("plugins").join("installed_plugins.json"))
-        .ok()
-        .flatten()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .map_or(0, |v| match v.get("plugins") {
-            Some(Value::Object(m)) => m.len(),
-            Some(Value::Array(a)) => a.len(),
-            _ => 0,
-        });
     let plural =
         |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
     let mut parts = Vec::new();
@@ -360,12 +353,6 @@ fn note_not_carried(cap: &mut Captured, env: &Env) {
         parts.push(format!(
             "{} (output-styles/)",
             plural(styles, "output style", "output styles")
-        ));
-    }
-    if plugins > 0 {
-        parts.push(format!(
-            "{} (plugins/installed_plugins.json)",
-            plural(plugins, "plugin", "plugins")
         ));
     }
     if !parts.is_empty() {
@@ -555,6 +542,15 @@ impl Adapter for ClaudeCode {
             cap.sources.push(p.settings.clone());
             if let Value::Object(doc) = parse_value(Some(&text), &p.settings)? {
                 pick_settings(&mut cap, ID, &doc);
+                let installed = read_text_opt(
+                    &config_dir(env)
+                        .join("plugins")
+                        .join("installed_plugins.json"),
+                )
+                .ok()
+                .flatten()
+                .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+                crate::plugins::capture(&mut cap, ID, env, &doc, installed.as_ref());
                 if env.include_hooks {
                     super::hook_files::capture(
                         &mut cap,
@@ -571,7 +567,6 @@ impl Adapter for ClaudeCode {
                     "apiKeyHelper",
                     "awsAuthRefresh",
                     "statusLine",
-                    "enabledPlugins",
                 ]
                 .into_iter()
                 .filter(|k| doc.contains_key(*k) && !(*k == "hooks" && env.include_hooks))
@@ -709,6 +704,7 @@ impl Adapter for ClaudeCode {
             Scope::User => config_dir(env),
             Scope::Project => env.project.join(".claude"),
         };
+        crate::plugins::apply(profile, env, opts, work, &p.settings, ID)?;
         super::hook_files::apply(
             profile,
             env,

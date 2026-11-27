@@ -541,6 +541,9 @@ pub struct Profile {
     /// The scripts the hooks run (`hooks/<path>` in the profile; `path` is
     /// relative to `hooks/`).
     pub hook_files: Vec<SkillFile>,
+    /// Plugins and the marketplaces they come from, by reference, per target
+    /// (see [`crate::plugins`]).
+    pub plugins: BTreeMap<String, crate::plugins::PluginSet>,
     /// Problems found while loading that don't stop the profile from loading.
     pub warnings: Vec<String>,
 }
@@ -562,6 +565,10 @@ impl Profile {
             && self.skills.is_empty()
             && self.agents.is_empty()
             && self.hooks.is_empty()
+            && self
+                .plugins
+                .values()
+                .all(crate::plugins::PluginSet::is_empty)
     }
 
     pub fn sort(&mut self) {

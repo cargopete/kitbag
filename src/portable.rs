@@ -141,6 +141,7 @@ pub fn expand_profile(profile: &Profile, env: &Env) -> Profile {
     for s in p.mcp_servers.values_mut() {
         *s = s.map_strings(|v| expand_home(v, &env.home, env.os));
     }
+    crate::plugins::expand_paths(&mut p.plugins, &env.home, env.os);
     if let Some(Value::Object(perms)) = p
         .settings
         .get_mut("claude-code")

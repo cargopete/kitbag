@@ -930,6 +930,7 @@ fn cmd_capture(
     let (kept, uncaptured) = match &old {
         Some(old) => {
             kept_items = profile_io::keep_item_targeting(&mut r.profile, old);
+            kept_items.extend(crate::plugins::keep_targeting(&mut r.profile, old));
             if !prune {
                 uncaptured_items = profile_io::keep_uncaptured_items(&mut r.profile, old);
             }
@@ -1013,13 +1014,14 @@ fn cmd_capture(
         println!("  {} {}", paint(DIM, "read"), tildify(s, &env.home));
     }
     println!(
-        "\n  {} MCP server(s), {} rule(s), {} command(s), {} skill(s){}{}{}{}",
+        "\n  {} MCP server(s), {} rule(s), {} command(s), {} skill(s){}{}{}{}{}",
         p.mcp_servers.len(),
         p.rules.len(),
         p.commands.len(),
         p.skills.len(),
         agent_count(p),
         hook_count(p),
+        plugin_count(p),
         if p.instructions.is_some() {
             ", instructions"
         } else {
@@ -1387,6 +1389,10 @@ fn cmd_inspect(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, as_json: boo
         .iter()
         .map(|h| visible_line(&crate::secrets::mask_line(&crate::hooks::describe(h))).into_owned())
         .collect();
+    let plugins: Vec<String> = crate::plugins::list(&profile)
+        .iter()
+        .map(|l| visible_line(l).into_owned())
+        .collect();
     let instructions = profile
         .instructions
         .as_ref()
@@ -1427,6 +1433,7 @@ fn cmd_inspect(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, as_json: boo
         })
         .collect();
     risky.extend(policy::risky_content(&profile));
+    risky.extend(crate::plugins::review_lines(&profile));
     let risky: Vec<String> = risky
         .iter()
         .map(|r| {
@@ -1508,6 +1515,7 @@ fn cmd_inspect(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, as_json: boo
             "rules": rules, "commands": commands, "skills": skills, "agents": agents,
             "settings": settings,
             "hooks": hooks,
+            "plugins": plugins,
             "mcp_servers": server_json,
             "safety": {
                 "commands": servers.iter().filter(|s| s.local).map(|s| json!({"name": s.name, "command": s.endpoint})).collect::<Vec<_>>(),
@@ -1557,6 +1565,12 @@ fn cmd_inspect(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, as_json: boo
         println!("  {:<15}", format!("hooks ({})", hooks.len()));
         for h in &hooks {
             println!("    {h}");
+        }
+    }
+    if !plugins.is_empty() {
+        println!("  {:<15}", format!("plugins ({})", plugins.len()));
+        for p in &plugins {
+            println!("    {p}");
         }
     }
     if !settings.is_empty() {
@@ -1734,6 +1748,13 @@ fn plan_apply(
     } else {
         Vec::new()
     };
+    // Plugins can bundle hooks, MCP servers and commands, and the tool fetches
+    // them itself: from a git source they are withheld unless it is trusted.
+    let withheld_plugins = if untrusted {
+        crate::plugins::drop_untrusted(&mut profile)
+    } else {
+        Vec::new()
+    };
     let secrets = a.secrets.unwrap_or(if untrusted {
         SecretsMode::Never
     } else {
@@ -1830,6 +1851,17 @@ fn plan_apply(
                 message: format!(
                     "{} hook(s) not applied, because the profile comes from a remote repository (needs --trust-source and --apply-hooks)",
                     withheld_hooks.len()
+                ),
+            });
+        }
+    }
+    for (target, d) in withheld_plugins {
+        if plan.targets.contains(&target) {
+            plan.notes.push(adapters::Note {
+                level: adapters::Level::Warn,
+                target,
+                message: format!(
+                    "not applied, because the profile comes from a remote repository: {d} (needs --trust-source)"
                 ),
             });
         }
@@ -2549,6 +2581,16 @@ fn hook_count(p: &Profile) -> String {
         String::new()
     } else {
         format!(", {} hook(s)", p.hooks.len())
+    }
+}
+
+/// `, N plugin(s)` for a profile with plugins, else nothing.
+fn plugin_count(p: &Profile) -> String {
+    let n: usize = p.plugins.values().map(|s| s.enabled.len()).sum();
+    if n == 0 {
+        String::new()
+    } else {
+        format!(", {n} plugin(s)")
     }
 }
 
@@ -3306,13 +3348,14 @@ fn cmd_doctor(
                     visible_line(&resolved.origin)
                 );
                 println!(
-                    "  {} MCP server(s), {} rule(s), {} command(s), {} skill(s){}{}{}",
+                    "  {} MCP server(s), {} rule(s), {} command(s), {} skill(s){}{}{}{}",
                     p.mcp_servers.len(),
                     p.rules.len(),
                     p.commands.len(),
                     p.skills.len(),
                     agent_count(&p),
                     hook_count(&p),
+                    plugin_count(&p),
                     if p.instructions.is_some() {
                         ", instructions"
                     } else {

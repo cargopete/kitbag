@@ -298,7 +298,17 @@ fn reports_what_is_not_carried_and_drops_custom_output_styles() {
     assert!(
         warned(
             &r,
-            "not carried by kitbag (no portable form yet): 1 output style (output-styles/), 2 plugins (plugins/installed_plugins.json)"
+            "not carried by kitbag (no portable form yet): 1 output style (output-styles/)"
+        ),
+        "{:?}",
+        r.notes
+    );
+    // Plugins are carried by reference (see tests/plugins.rs); installs the
+    // settings don't enable are said to be left behind.
+    assert!(
+        warned(
+            &r,
+            "2 plugin(s) in plugins/installed_plugins.json are not enabled in settings.json"
         ),
         "{:?}",
         r.notes
