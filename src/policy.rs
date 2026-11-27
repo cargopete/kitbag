@@ -31,8 +31,117 @@ pub fn allowed_keys(target: &str) -> &'static [&'static str] {
         "gemini-cli" => &["model", "ui"],
         // Only `display.personality` is read from it and written to it.
         "hermes" => &["display"],
+        // `~/.cursor/cli-config.json`, the Cursor Agent CLI's file
+        // (cursor.com/docs/cli/reference/configuration). The editor's own
+        // settings are not documented and stay out.
+        "cursor" => &[
+            "approvalMode",
+            "permissions",
+            "editor",
+            "notifications",
+            "hints",
+            "rewind",
+            "suggestNextPrompt",
+            "display",
+            "attribution",
+        ],
+        // Flat, dotted keys of Amp's `settings.json` (ampcode.com/docs/cli/settings).
+        "amp" => &[
+            "amp.showCosts",
+            "amp.notifications.enabled",
+            "amp.terminal.copyOnSelect",
+            "amp.terminal.detailsExpandedByDefault",
+            "amp.thread.autoArchiveOnQuit",
+            "amp.git.commit.ampThread.enabled",
+            "amp.git.commit.coauthor.enabled",
+            "amp.tools.disable",
+        ],
+        // The user-level keys of Copilot CLI's `settings.json`
+        // (docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference).
+        "copilot" => &[
+            "model",
+            "effortLevel",
+            "defaultMode",
+            "defaultPermissionMode",
+            "allowedUrls",
+            "deniedUrls",
+            "permissions",
+            "theme",
+            "banner",
+            "beep",
+            "beepOnSchedule",
+            "editorMode",
+            "includeCoAuthoredBy",
+            "renderMarkdown",
+            "showReasoning",
+            "showTimestamps",
+            "showTipsOnStartup",
+            "transcriptView",
+            "screenReader",
+            "scrollbar",
+            "sidebar",
+            "streamerMode",
+        ],
+        // opencode.ai/docs/config and /docs/permissions (the V2 `permissions` array).
+        "opencode" => &["model", "default_agent", "permissions"],
+        // Only some keys of the `agent` object; see `nested_keys`.
+        "zed" => &["agent"],
         _ => &[],
     }
+}
+
+/// Keys of an allow-listed settings object that may be carried, when the
+/// object also holds keys that must not be (`agent` in Zed's `settings.json`
+/// has profiles, a terminal init command and more). `None`: the whole value
+/// is carried.
+pub fn nested_keys(target: &str, key: &str) -> Option<&'static [&'static str]> {
+    match (target, key) {
+        // zed.dev/docs/reference/all-settings (Agent), /docs/ai/tool-permissions.
+        ("zed", "agent") => Some(&[
+            "default_model",
+            "default_profile",
+            "tool_permissions",
+            "single_file_review",
+            "notify_when_agent_waiting",
+            "play_sound_when_agent_done",
+            "expand_edit_card",
+            "expand_terminal_card",
+            "thinking_display",
+            "use_modifier_to_send",
+            "show_turn_stats",
+        ]),
+        // Only the key that blocks the allow-all options: it restricts.
+        ("copilot", "permissions") => Some(&["disableBypassPermissionsMode"]),
+        ("cursor", "editor") => Some(&["vimMode"]),
+        ("cursor", "permissions") => Some(&["allow", "deny"]),
+        ("cursor", "display") => Some(&[
+            "showLineNumbers",
+            "showThinkingBlocks",
+            "showStatusIndicators",
+            "showStatusLineRunningTime",
+        ]),
+        ("cursor", "attribution") => Some(&["attributeCommitsToAgent", "attributePRsToAgent"]),
+        _ => None,
+    }
+}
+
+/// `value` cut down to the keys [`nested_keys`] allows, with the dotted names
+/// of the keys cut. A value that is not an object has nothing to cut (and no
+/// meaning to the tool): it is returned as it is.
+pub fn restrict_nested(target: &str, key: &str, value: &Value) -> (Value, Vec<String>) {
+    let (Some(keys), Value::Object(map)) = (nested_keys(target, key), value) else {
+        return (value.clone(), Vec::new());
+    };
+    let mut kept = Map::new();
+    let mut dropped = Vec::new();
+    for (k, v) in map {
+        if keys.contains(&k.as_str()) {
+            kept.insert(k.clone(), v.clone());
+        } else {
+            dropped.push(format!("{key}.{k}"));
+        }
+    }
+    (Value::Object(kept), dropped)
 }
 
 /// Split `settings` into the allow-listed part and the names of dropped keys.
@@ -45,7 +154,12 @@ pub fn filter(
     let mut dropped = Vec::new();
     for (k, v) in settings.into_iter().flatten() {
         if keys.contains(&k.as_str()) {
-            allowed.insert(k.clone(), v.clone());
+            let (v, cut) = restrict_nested(target, k, v);
+            let emptied = !cut.is_empty() && v.as_object().is_some_and(Map::is_empty);
+            dropped.extend(cut);
+            if !emptied {
+                allowed.insert(k.clone(), v);
+            }
         } else {
             dropped.push(k.clone());
         }
@@ -179,6 +293,92 @@ fn risky_default_mode(mode: &str) -> bool {
     )
 }
 
+/// Cursor CLI approval modes that run tools without asking the user each time.
+/// (`auto-review` is only named in Cursor's docs, not described, so it is
+/// treated like `unrestricted`.)
+fn risky_cursor_mode(mode: &str) -> bool {
+    matches!(mode, "unrestricted" | "auto-review")
+}
+
+/// Does this Cursor CLI permission entry (`Shell(ls)`, `Read(src/**)`,
+/// `WebFetch(*)`) allow far more than one specific action? Cursor's `Shell`
+/// entries name a command, which covers every call of it.
+pub fn broad_cursor_rule(rule: &str) -> bool {
+    let (tool, spec) = normalize_rule(rule);
+    let spec = spec.as_deref().unwrap_or("");
+    match tool.as_str() {
+        "shell" => {
+            let (command, next) = segment_command(spec);
+            spec.starts_with('*') || spec.is_empty() || dangerous(command, next)
+        }
+        "read" | "write" => whole_filesystem(spec),
+        "webfetch" => spec == "*",
+        _ => false,
+    }
+}
+
+/// Copilot CLI's permission modes that stop asking: `assisted` has a model
+/// review requests, `allow-all` allows everything.
+fn risky_copilot_mode(mode: &str) -> bool {
+    matches!(mode, "assisted" | "allow-all")
+}
+
+/// opencode permission rules (`{action, resource, effect}`, V2) with
+/// `effect: allow`. Rules of any other effect restrict.
+fn opencode_allow_rules(settings: &Map<String, Value>) -> Vec<&Map<String, Value>> {
+    settings
+        .get("permissions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .filter(|r| r.get("effect").and_then(Value::as_str) == Some("allow"))
+        .collect()
+}
+
+/// The `pattern`s of a Zed `always_allow` list, for a warning.
+fn zed_patterns(list: &[Value]) -> String {
+    list.iter()
+        .map(|p| {
+            p.get("pattern")
+                .and_then(Value::as_str)
+                .map_or_else(|| p.to_string(), str::to_string)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn opencode_rule_text(rule: &Map<String, Value>) -> String {
+    let f = |k: &str| {
+        rule.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string()
+    };
+    format!("{} {}", f("action"), f("resource"))
+}
+
+/// An allow rule that covers every resource of an action that runs code,
+/// writes files or leaves the project (or every action).
+fn opencode_broad_rule(rule: &Map<String, Value>) -> bool {
+    let action = rule.get("action").and_then(Value::as_str).unwrap_or("");
+    let resource = rule.get("resource").and_then(Value::as_str).unwrap_or("");
+    action == "*"
+        || (matches!(resource, "*" | "**")
+            && matches!(
+                action,
+                "shell" | "edit" | "external_directory" | "webfetch" | "execute"
+            ))
+}
+
+/// The `tool_permissions` object of Zed's `agent` settings, as a mutable map.
+fn zed_tool_permissions(settings: &mut Map<String, Value>) -> Option<&mut Map<String, Value>> {
+    settings
+        .get_mut("agent")?
+        .get_mut("tool_permissions")?
+        .as_object_mut()
+}
+
 /// Human-readable warnings for settings that widen what an agent may do unattended.
 pub fn risky(target: &str, settings: &Map<String, Value>) -> Vec<String> {
     let mut out = Vec::new();
@@ -228,6 +428,105 @@ pub fn risky(target: &str, settings: &Map<String, Value>) -> Vec<String> {
                 out.push("codex: sandbox_mode = danger-full-access".into());
             }
         }
+        "cursor" => {
+            if let Some(mode) = settings.get("approvalMode").and_then(Value::as_str)
+                && risky_cursor_mode(mode)
+            {
+                out.push(format!("cursor: approvalMode = {mode}"));
+            }
+            if let Some(Value::Array(allow)) =
+                settings.get("permissions").and_then(|p| p.get("allow"))
+                && !allow.is_empty()
+            {
+                let broad: Vec<&str> = allow
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|r| broad_cursor_rule(r))
+                    .collect();
+                let mut msg = format!(
+                    "cursor: allows {} tool permission rule(s) without prompting",
+                    allow.len()
+                );
+                if !broad.is_empty() {
+                    msg.push_str(&format!(", including broad ones: {}", broad.join(", ")));
+                }
+                out.push(msg);
+            }
+        }
+        "copilot" => {
+            if let Some(mode) = settings
+                .get("defaultPermissionMode")
+                .and_then(Value::as_str)
+                && risky_copilot_mode(mode)
+            {
+                out.push(format!("copilot: defaultPermissionMode = {mode}"));
+            }
+            if settings.get("defaultMode").and_then(Value::as_str) == Some("autopilot") {
+                out.push("copilot: defaultMode = autopilot".into());
+            }
+            if let Some(Value::Array(urls)) = settings.get("allowedUrls")
+                && !urls.is_empty()
+            {
+                let list: Vec<&str> = urls.iter().filter_map(Value::as_str).collect();
+                let broad = list.contains(&"*");
+                out.push(format!(
+                    "copilot: allowedUrls lets agents reach {} without prompting{}: {}",
+                    if broad { "any URL" } else { "these URLs" },
+                    if broad { " (including '*')" } else { "" },
+                    list.join(", ")
+                ));
+            }
+        }
+        "opencode" => {
+            let allow = opencode_allow_rules(settings);
+            if !allow.is_empty() {
+                let broad: Vec<String> = allow
+                    .iter()
+                    .filter(|r| opencode_broad_rule(r))
+                    .map(|r| opencode_rule_text(r))
+                    .collect();
+                let mut msg = format!(
+                    "opencode: allows {} permission rule(s) without prompting",
+                    allow.len()
+                );
+                if !broad.is_empty() {
+                    msg.push_str(&format!(", including broad ones: {}", broad.join(", ")));
+                }
+                out.push(msg);
+            }
+        }
+        "zed" => {
+            let perms = settings
+                .get("agent")
+                .and_then(|a| a.get("tool_permissions"))
+                .and_then(Value::as_object);
+            if let Some(perms) = perms {
+                if perms.get("default").and_then(Value::as_str) == Some("allow") {
+                    out.push("zed: agent.tool_permissions.default = allow".into());
+                }
+                for (tool, def) in perms
+                    .get("tools")
+                    .and_then(Value::as_object)
+                    .into_iter()
+                    .flatten()
+                {
+                    if def.get("default").and_then(Value::as_str) == Some("allow") {
+                        out.push(format!(
+                            "zed: agent.tool_permissions.tools.{tool}.default = allow"
+                        ));
+                    }
+                    if let Some(Value::Array(a)) = def.get("always_allow")
+                        && !a.is_empty()
+                    {
+                        out.push(format!(
+                            "zed: agent.tool_permissions.tools.{tool}.always_allow approves {} pattern(s) without prompting: {}",
+                            a.len(),
+                            zed_patterns(a)
+                        ));
+                    }
+                }
+            }
+        }
         _ => {}
     }
     out
@@ -236,7 +535,9 @@ pub fn risky(target: &str, settings: &Map<String, Value>) -> Vec<String> {
 /// Remove the settings that let agents act without asking or reach outside
 /// the project: permissive `defaultMode`s, `additionalDirectories`, every
 /// `permissions.allow` rule, Codex's `approval_policy = never` and
-/// `sandbox_mode = danger-full-access`. Used for profiles from remote sources.
+/// `sandbox_mode = danger-full-access`, Cursor's `approvalMode = unrestricted`
+/// and permission `allow` entries, opencode's `allow` rules and Zed's
+/// `tool_permissions` that allow. Used for profiles from remote sources.
 /// Returns a description of each removed setting. (Gemini CLI's allow-listed
 /// keys, `model` and `ui`, grant nothing.)
 pub fn drop_risky(target: &str, settings: &mut Map<String, Value>) -> Vec<String> {
@@ -279,6 +580,114 @@ pub fn drop_risky(target: &str, settings: &mut Map<String, Value>) -> Vec<String
                     settings.remove(key);
                     out.push(format!("{key} = {bad}"));
                 }
+            }
+        }
+        "cursor" => {
+            if let Some(mode) = settings
+                .get("approvalMode")
+                .and_then(Value::as_str)
+                .filter(|m| risky_cursor_mode(m))
+                .map(str::to_string)
+            {
+                settings.remove("approvalMode");
+                out.push(format!("approvalMode = {mode}"));
+            }
+            if let Some(Value::Object(perms)) = settings.get_mut("permissions") {
+                // `deny` restricts, so it stays.
+                if let Some(allow) = perms.remove("allow") {
+                    out.push(format!("permissions.allow {allow}"));
+                }
+                if perms.is_empty() {
+                    settings.remove("permissions");
+                }
+            }
+        }
+        "copilot" => {
+            for (key, bad) in [
+                ("defaultPermissionMode", None),
+                ("defaultMode", Some("autopilot")),
+            ] {
+                let hit = settings
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|v| bad.map_or_else(|| risky_copilot_mode(v), |b| *v == b));
+                if let Some(v) = hit.map(str::to_string) {
+                    settings.remove(key);
+                    out.push(format!("{key} = {v}"));
+                }
+            }
+            if let Some(urls) = settings.remove("allowedUrls") {
+                out.push(format!("allowedUrls {urls}"));
+            }
+        }
+        "opencode" => {
+            // Rules are ordered and the last match wins; taking out `allow`
+            // rules can only leave the tool asking or denying more.
+            if let Some(Value::Array(rules)) = settings.get_mut("permissions") {
+                let mut removed = Vec::new();
+                rules.retain(|r| {
+                    let keep = matches!(
+                        r.get("effect").and_then(Value::as_str),
+                        Some("ask" | "deny")
+                    );
+                    if !keep {
+                        removed.push(match r.as_object() {
+                            Some(o) => format!(
+                                "permissions {}: {}",
+                                opencode_rule_text(o),
+                                r.get("effect").and_then(Value::as_str).unwrap_or("?")
+                            ),
+                            None => format!("permissions {r}"),
+                        });
+                    }
+                    keep
+                });
+                out.extend(removed);
+                if rules.is_empty() {
+                    settings.remove("permissions");
+                }
+            }
+        }
+        "zed" => {
+            if let Some(perms) = zed_tool_permissions(settings) {
+                if perms.get("default").and_then(Value::as_str) == Some("allow") {
+                    perms.remove("default");
+                    out.push("agent.tool_permissions.default = allow".into());
+                }
+                if let Some(Value::Object(tools)) = perms.get_mut("tools") {
+                    for (tool, def) in tools.iter_mut() {
+                        let Some(def) = def.as_object_mut() else {
+                            continue;
+                        };
+                        if def.get("default").and_then(Value::as_str) == Some("allow") {
+                            def.remove("default");
+                            out.push(format!(
+                                "agent.tool_permissions.tools.{tool}.default = allow"
+                            ));
+                        }
+                        if let Some(always) = def.remove("always_allow") {
+                            out.push(format!(
+                                "agent.tool_permissions.tools.{tool}.always_allow {always}"
+                            ));
+                        }
+                    }
+                    tools.retain(|_, d| d.as_object().is_none_or(|o| !o.is_empty()));
+                    if tools.is_empty() {
+                        perms.remove("tools");
+                    }
+                }
+                if perms.is_empty()
+                    && let Some(Value::Object(agent)) = settings.get_mut("agent")
+                {
+                    agent.remove("tool_permissions");
+                }
+            }
+            if settings
+                .get("agent")
+                .and_then(Value::as_object)
+                .is_some_and(Map::is_empty)
+            {
+                settings.remove("agent");
             }
         }
         _ => {}

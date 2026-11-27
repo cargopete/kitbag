@@ -43,6 +43,16 @@
 //!   copied. Apply appends to the array the file already has, in the config
 //!   file the MCP servers go to.
 //!
+//! * Settings: `model` (`provider/model`), `default_agent` and the V2
+//!   `permissions` array (`{action, resource, effect}`), from
+//!   opencode.ai/docs/config and /docs/permissions (checked 2026-11-27), in the
+//!   config file the MCP servers go to. The last matching permission rule
+//!   wins, so rules from a profile are put before the ones the file has: the
+//!   file's own rules keep the last word. opencode 1's `permission` object is a
+//!   different shape and is neither read nor written, and `permissions` is
+//!   left out of a file that still uses the opencode 1 layout. Theme and
+//!   terminal settings live in opencode 2's `cli.json`, which is not touched.
+//!
 //! Docs: <https://opencode.ai/docs/config/>, <https://opencode.ai/docs/mcp-servers/>,
 //! <https://opencode.ai/docs/rules/>, <https://opencode.ai/docs/commands/>,
 //! <https://opencode.ai/docs/skills/>, <https://opencode.ai/docs/agents/>,
@@ -55,12 +65,13 @@ use serde_json::{Map, Value, json};
 
 use super::common::{
     MdKind, add_agent, capture_instructions, capture_markdown_dir, capture_skills_dir, claim_name,
-    import_server, merge_json_servers_off, name_from_rel, read_text_item, render_server,
-    server_entries, servers_for, set_disabled_true, set_enabled_false, str_of, string_list,
-    string_map, write_agent, write_command, write_instructions, write_skill,
+    drop_redacted_settings, import_server, merge_json_servers_off, merge_json_settings,
+    name_from_rel, pick_settings, read_text_item, render_server, safe_settings, server_entries,
+    servers_for, set_disabled_true, set_enabled_false, str_of, string_list, string_map,
+    write_agent, write_command, write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
-use crate::edit::json::parse_value;
+use crate::edit::json::{JsonDoc, parse_value};
 use crate::frontmatter;
 use crate::model::{Agent, Command, McpServer, Profile, Transport, is_valid_name};
 use crate::plan_fs::{join_rel, walk_files};
@@ -327,7 +338,8 @@ impl Adapter for OpenCode {
                     | Feature::Instructions
                     | Feature::Commands
                     | Feature::Skills
-                    | Feature::Agents => Support::Native,
+                    | Feature::Agents
+                    | Feature::Settings => Support::Native,
                     // No rule files: rules are folded into AGENTS.md.
                     Feature::Rules => Support::Folded,
                     _ => Support::None,
@@ -393,12 +405,18 @@ impl Adapter for OpenCode {
     fn capture(&self, env: &Env) -> Result<Captured> {
         let mut cap = Captured::for_env(env);
         let p = paths(env);
+        let mut settings_read = false;
         for file in &p.configs {
             let Some(text) = cap.read_config(file, ID)? else {
                 continue;
             };
             cap.sources.push(file.clone());
             let doc = parse_value(Some(&text), file)?;
+            // The settings come from the first config file, the one apply writes to.
+            if !settings_read && let Value::Object(map) = &doc {
+                settings_read = true;
+                pick_settings(&mut cap, ID, map);
+            }
             crate::plugins::capture_opencode(&mut cap, &doc, &tildify(file, &env.home));
             match doc.get("mcp") {
                 None | Some(Value::Null) => {}
@@ -646,14 +664,67 @@ impl Adapter for OpenCode {
         for a in &profile.agents {
             apply_agent(work, agents.target(), a, opts)?;
         }
-        if profile.settings.contains_key(ID) {
-            work.info(
-                ID,
-                "kitbag doesn't manage opencode settings; settings.opencode was not applied",
-            );
+        let mut settings = safe_settings(profile, ID, work);
+        drop_redacted_settings(&mut settings, ID, work);
+        let rules = settings.remove("permissions");
+        merge_json_settings(work, &file, &settings, opts, ID)?;
+        if let Some(rules) = rules {
+            apply_permissions(work, &file, layout, &rules)?;
         }
         Ok(())
     }
+}
+
+/// Add the profile's permission rules to the `permissions` array of `file`,
+/// before the rules it has: opencode uses the last rule that matches, so what
+/// the file already says keeps the last word. Rules it has are not repeated.
+fn apply_permissions(work: &mut Work, file: &Path, layout: Layout, rules: &Value) -> Result<()> {
+    let Value::Array(rules) = rules else {
+        work.warn(
+            ID,
+            "settings.opencode.permissions is not a list of rules; not applied",
+        );
+        return Ok(());
+    };
+    let text = work.fs.read(file)?;
+    let mut doc = JsonDoc::parse(text.as_deref(), file)?;
+    let current = doc.value();
+    if layout == Layout::Legacy || current.get("permission").is_some() {
+        work.warn(
+            ID,
+            format!(
+                "{} uses opencode 1's layout (a 'permission' object, or MCP servers directly under 'mcp'); permissions were not applied, since the 'permissions' list is opencode 2's",
+                file.display()
+            ),
+        );
+        return Ok(());
+    }
+    let have: Vec<Value> = match current.get("permissions") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(a)) => a.clone(),
+        Some(_) => {
+            work.warn(
+                ID,
+                format!(
+                    "'permissions' in {} is not a list; left as it is",
+                    file.display()
+                ),
+            );
+            return Ok(());
+        }
+    };
+    let mut merged: Vec<Value> = Vec::new();
+    for r in rules {
+        if !have.contains(r) && !merged.contains(r) {
+            merged.push(r.clone());
+        }
+    }
+    if merged.is_empty() {
+        return Ok(());
+    }
+    merged.extend(have);
+    doc.set(&["permissions"], &Value::Array(merged));
+    work.fs.write(file, doc.render())
 }
 
 /// Is `model` in opencode's `provider/model[#variant]` form?

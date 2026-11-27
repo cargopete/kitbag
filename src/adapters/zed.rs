@@ -25,11 +25,18 @@
 //! * Extensions, by reference: the ids in `auto_install_extensions` of the user
 //!   `settings.json`, which Zed installs from its gallery itself; see
 //!   `crate::plugins`.
+//! * Settings, at user scope only: some keys of the `agent` object of the user
+//!   `settings.json` (`default_model`, `default_profile`, `tool_permissions`
+//!   and a few display switches; `crate::policy::nested_keys`), from
+//!   zed.dev/docs/reference/all-settings and /docs/ai/tool-permissions
+//!   (checked 2026-11-27). Zed's project `.zed/settings.json` is not written:
+//!   its docs don't say that the `agent` keys apply there. Profiles, model
+//!   parameters, `terminal_init_command`, providers (`language_models`) and
+//!   everything else are left alone.
 //! * Rules and commands: Zed's docs describe no rules file or commands folder
 //!   (the Rules Library is a database inside Zed that is being replaced by
 //!   skills and the personal `AGENTS.md`, and kitbag never reads or writes it),
-//!   so neither is carried. Agents (#14), hooks (#13) and settings are not
-//!   carried either.
+//!   so neither is carried. Agents (#14) and hooks (#13) are not carried either.
 //!
 //! Docs: <https://zed.dev/docs/ai/mcp>, <https://zed.dev/docs/ai/instructions>,
 //! <https://zed.dev/docs/ai/skills>, <https://zed.dev/docs/worktree-trust>. The user and project `context_servers`
@@ -42,8 +49,9 @@ use anyhow::Result;
 use serde_json::{Map, Value, json};
 
 use super::common::{
-    Resolver, capture_instructions, capture_skills_dir, import_server, merge_json_servers_off,
-    server_entries, server_from_json, servers_for, set_enabled_false, skill_name_mismatch,
+    Resolver, capture_instructions, capture_skills_dir, drop_redacted_settings, import_server,
+    merge_json_servers_off, merge_json_settings, pick_settings, safe_settings, server_entries,
+    server_from_json, servers_for, set_enabled_false, skill_name_mismatch,
     skill_with_required_frontmatter, write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Os, Scope, Support, Work};
@@ -152,10 +160,11 @@ impl Adapter for Zed {
     fn scopes(&self) -> &'static [Scope] {
         &[Scope::User, Scope::Project]
     }
-    fn support(&self, _scope: Scope) -> [(Feature, Support); 8] {
+    fn support(&self, scope: Scope) -> [(Feature, Support); 8] {
         Feature::ALL.map(|f| {
             let s = match f {
                 Feature::Mcp | Feature::Instructions | Feature::Skills => Support::Native,
+                Feature::Settings if scope == Scope::User => Support::Native,
                 _ => Support::None,
             };
             (f, s)
@@ -218,6 +227,9 @@ impl Adapter for Zed {
             }
             if env.scope == Scope::User {
                 crate::plugins::capture_zed(&mut cap, &doc, "settings.json");
+                if let Value::Object(doc) = &doc {
+                    pick_settings(&mut cap, ID, doc);
+                }
             }
         }
 
@@ -397,10 +409,14 @@ impl Adapter for Zed {
         }
         write_instructions(work, &path, profile, opts, false, ID)?;
         apply_skills(profile, env, opts, work)?;
-        if profile.settings.contains_key(ID) {
+        if env.scope == Scope::User {
+            let mut settings = safe_settings(profile, ID, work);
+            drop_redacted_settings(&mut settings, ID, work);
+            merge_json_settings(work, &file, &settings, opts, ID)?;
+        } else if profile.settings.contains_key(ID) {
             work.info(
                 ID,
-                "kitbag doesn't manage Zed settings; settings.zed was not applied",
+                "settings.zed was not applied to the project: Zed's docs don't say that the agent settings work in .zed/settings.json; apply it at user scope",
             );
         }
         crate::plugins::apply_zed(profile, env, opts, work, &file)?;

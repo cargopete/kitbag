@@ -13,6 +13,19 @@
 //!   `.claude/agents/` and `~/.claude/agents/`, which are Claude Code's, so
 //!   they are not captured or written here.
 //!   Docs: <https://cursor.com/docs/subagents>.
+//! * Settings, at user scope only, and only the Agent CLI's file: the keys of
+//!   `crate::policy::allowed_keys("cursor")` in `~/.cursor/cli-config.json`
+//!   (`$CURSOR_CONFIG_DIR/cli-config.json`, or `$XDG_CONFIG_HOME/cursor/cli-config.json`
+//!   on Linux, as the CLI docs say; the project's `.cursor/cli.json` takes only
+//!   permissions and is not written). A file kitbag creates starts with
+//!   `"version": 1`; the docs say the CLI repairs missing fields. Docs:
+//!   <https://cursor.com/docs/cli/reference/configuration> and
+//!   <https://cursor.com/docs/cli/reference/permissions> (checked 2026-11-27).
+//!   Cursor's docs name no `settings.json` path or agent/model keys for the
+//!   editor, and the editor keeps some settings in a `state.vscdb` database with
+//!   no documented layout; kitbag never reads or writes either. The CLI's
+//!   `model` object (no documented shape), `sandbox`, `network` and `channel`
+//!   are left alone.
 
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -23,11 +36,12 @@ use serde_json::{Map, Value, json};
 
 use super::common::{
     AgentName, add_command, add_instructions, add_rule, capture_agent_dir, capture_instructions,
-    capture_skills_dir, claim_name, documented_agent, import_server, merge_json_servers,
-    name_from_rel, note_agent_keys, read_text_item, render_server, server_entries,
-    server_from_json, servers_for, write_agent, write_instructions, write_skill,
+    capture_skills_dir, claim_name, documented_agent, drop_redacted_settings, import_server,
+    merge_json_servers, merge_json_settings, name_from_rel, note_agent_keys, pick_settings,
+    read_text_item, render_server, safe_settings, server_entries, server_from_json, servers_for,
+    write_agent, write_instructions, write_skill,
 };
-use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
+use super::{Adapter, ApplyOptions, Captured, Env, Feature, Os, Scope, Support, Work};
 use crate::edit::block;
 use crate::edit::json::parse_value;
 use crate::frontmatter;
@@ -76,6 +90,21 @@ fn paths(env: &Env) -> Paths {
             }
         }
     }
+}
+
+/// The Agent CLI's global config file, as its docs give the location:
+/// `$CURSOR_CONFIG_DIR`, else `$XDG_CONFIG_HOME/cursor` on Linux, else `~/.cursor`.
+fn cli_config(env: &Env) -> PathBuf {
+    let dir = env
+        .location_var("CURSOR_CONFIG_DIR")
+        .or_else(|| {
+            (env.os == Os::Linux)
+                .then(|| env.location_var("XDG_CONFIG_HOME"))
+                .flatten()
+                .map(|d| d.join("cursor"))
+        })
+        .unwrap_or_else(|| env.home.join(".cursor"));
+    dir.join("cli-config.json")
 }
 
 /// Cursor's frontmatter reader is not a YAML parser: it expects unquoted,
@@ -198,7 +227,14 @@ impl Adapter for Cursor {
             (Feature::Skills, Support::Native),
             (Feature::Agents, Support::Native),
             (Feature::OutputStyles, Support::None),
-            (Feature::Settings, Support::None),
+            (
+                Feature::Settings,
+                if scope == Scope::User {
+                    Support::Native
+                } else {
+                    Support::None
+                },
+            ),
         ]
     }
 
@@ -214,6 +250,9 @@ impl Adapter for Cursor {
         out.push(("commands", p.commands));
         out.push(("skills", p.skills));
         out.push(("agents", p.agents));
+        if env.scope == Scope::User {
+            out.push(("settings", cli_config(env)));
+        }
         out
     }
 
@@ -237,6 +276,16 @@ impl Adapter for Cursor {
                 server_entries(&mut cap, ID, &p.mcp, "mcpServers", doc.get("mcpServers"))
             {
                 import(&mut cap, name, def);
+            }
+        }
+
+        if env.scope == Scope::User {
+            let file = cli_config(env);
+            if let Some(text) = cap.read_config(&file, ID)? {
+                cap.sources.push(file.clone());
+                if let Value::Object(doc) = parse_value(Some(&text), &file)? {
+                    pick_settings(&mut cap, ID, &doc);
+                }
             }
         }
 
@@ -408,10 +457,27 @@ impl Adapter for Cursor {
         for a in &profile.agents {
             apply_agent(work, &p.agents, a, opts)?;
         }
-        if profile.settings.contains_key(ID) {
+        if env.scope == Scope::User {
+            let file = cli_config(env);
+            let mut settings = safe_settings(profile, ID, work);
+            drop_redacted_settings(&mut settings, ID, work);
+            if !settings.is_empty() {
+                if work.fs.read(&file)?.is_none() {
+                    settings.insert("version".into(), json!(1));
+                }
+                merge_json_settings(work, &file, &settings, opts, ID)?;
+                work.info(
+                    ID,
+                    format!(
+                        "settings.cursor went to {}, the Cursor Agent CLI's file; the editor's own settings are not documented and were not touched",
+                        crate::ui::tildify(&file, &work.home)
+                    ),
+                );
+            }
+        } else if profile.settings.contains_key(ID) {
             work.info(
                 ID,
-                "Cursor settings are managed in its UI; settings.cursor was not applied",
+                "settings.cursor was not applied to the project: .cursor/cli.json takes only permissions and kitbag writes the user's cli-config.json; apply it at user scope",
             );
         }
         super::hook_files::apply_for(profile, env, opts, work, &super::hook_files::CURSOR)?;

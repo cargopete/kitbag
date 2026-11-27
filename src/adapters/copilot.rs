@@ -5,6 +5,13 @@
 //! * Plugins, by reference: `enabledPlugins` and `extraKnownMarketplaces` in
 //!   Copilot CLI's `settings.json` (`$COPILOT_HOME/settings.json`, or the
 //!   repository's `.github/copilot/settings.json`); see `crate::plugins`.
+//! * Settings, at user scope only: the keys of `crate::policy::allowed_keys("copilot")`
+//!   (`model`, `effortLevel`, `defaultMode`, `defaultPermissionMode`, URL
+//!   allow/deny lists and display switches) in `$COPILOT_HOME/settings.json`, from
+//!   docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference
+//!   (checked 2026-11-27). A repository's `.github/copilot/settings.json` takes only
+//!   some keys, which that page doesn't list, so it is not written. Sandbox
+//!   settings, hooks, `statusLine.command`, proxy and BYOK providers are not carried.
 //! * MCP: Copilot's native files use a top-level `mcpServers` object:
 //!   `$COPILOT_HOME/mcp-config.json` (default `~/.copilot/mcp-config.json`) for
 //!   the user, and `.mcp.json` at the workspace root for a project. Copilot CLI
@@ -428,6 +435,9 @@ fn capture_settings(cap: &mut Captured, env: &Env, path: &Path) -> Result<()> {
     };
     let doc = parse_value(Some(&text), path)?;
     if let Value::Object(settings) = &doc {
+        if env.scope == Scope::User {
+            super::common::pick_settings(cap, ID, settings);
+        }
         let before = cap.profile.plugins.len();
         crate::plugins::capture(cap, ID, env, settings, None);
         if cap.profile.plugins.len() > before {
@@ -470,7 +480,9 @@ impl Adapter for Copilot {
                 | Feature::Agents => true,
                 // VS Code prompt files; user ones live in VS Code's profile storage.
                 Feature::Commands => scope == Scope::Project,
-                Feature::OutputStyles | Feature::Settings => false,
+                Feature::OutputStyles => false,
+                // Copilot CLI's user settings.json.
+                Feature::Settings => scope == Scope::User,
             };
             (
                 f,
@@ -708,10 +720,14 @@ impl Adapter for Copilot {
             apply_agent(work, env, &p.agents, a, opts)?;
         }
 
-        if profile.settings.contains_key(ID) {
+        if env.scope == Scope::User {
+            let mut settings = super::common::safe_settings(profile, ID, work);
+            super::common::drop_redacted_settings(&mut settings, ID, work);
+            super::common::merge_json_settings(work, &p.settings, &settings, opts, ID)?;
+        } else if profile.settings.contains_key(ID) {
             work.info(
                 ID,
-                "kitbag doesn't manage Copilot settings; settings.copilot was not applied",
+                "settings.copilot was not applied to the repository: Copilot CLI's docs say only some keys can be overridden in .github/copilot/settings.json and don't list which; apply it at user scope",
             );
         }
         crate::plugins::apply(profile, env, opts, work, &p.settings, ID)?;
