@@ -104,7 +104,10 @@ enum Cmd {
         /// tools that have them (Claude Code, Cursor, Codex, Gemini CLI, Grok
         /// Build, Antigravity, Copilot, Hermes), and the scripts they run
         /// (redacted like everything else). Hooks run commands by themselves,
-        /// so applying them needs --apply-hooks
+        /// so applying them needs --apply-hooks. 'memory': the notes agents
+        /// have written about you and your projects (Claude Code auto memory,
+        /// Codex memories, Hermes MEMORY.md and USER.md); they can hold
+        /// personal data, so read memory/ before sharing the profile
         #[arg(long, value_enum, value_delimiter = ',', value_name = "WHAT")]
         include: Vec<Include>,
     },

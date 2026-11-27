@@ -57,8 +57,8 @@
 //!   shell or alias entries, and the docs say to put reusable prompts in a
 //!   skill; every skill is already a slash command), so neither is carried.
 //! * Never read or written: `.env`, `auth.json`, `mcp-tokens/` (credentials),
-//!   and Hermes' own stores (`memories/`, sessions, `profiles/`,
-//!   `skill-bundles/`). Run kitbag with `HERMES_HOME` set to a profile's
+//!   and Hermes' own stores (sessions, `profiles/`, `skill-bundles/`;
+//!   `memories/` only with `capture --include memory`, see [`crate::memory`]). Run kitbag with `HERMES_HOME` set to a profile's
 //!   directory to use that profile.
 //!
 //! Docs: <https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp>,
@@ -253,7 +253,17 @@ impl Adapter for Hermes {
                     ),
                 );
             }
-            let stores = present(OTHER_STORES);
+            let mut stores = present(OTHER_STORES);
+            // Its memory files are carried, but only when asked for.
+            if let Some(i) = stores.iter().position(|s| *s == "memories") {
+                stores.remove(i);
+                if !env.include_memory {
+                    cap.info(
+                        ID,
+                        "Hermes memories not captured: pass --include memory to carry MEMORY.md and USER.md",
+                    );
+                }
+            }
             if !stores.is_empty() {
                 cap.info(
                     ID,
