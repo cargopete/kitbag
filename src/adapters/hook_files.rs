@@ -490,6 +490,10 @@ const NO_HOOKS: &[(&str, &str)] = &[
         "continue",
         "Continue's docs and config.yaml reference describe no hooks, so there is no hook file to write (checked 2026-11-27)",
     ),
+    (
+        "vscode",
+        "the vscode target carries only the editor's AI extensions and settings (#19); it has no hook file (checked 2026-11-27)",
+    ),
 ];
 
 /// The hook format of the target `id`.

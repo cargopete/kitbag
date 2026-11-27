@@ -97,6 +97,8 @@ struct Manifest {
     #[serde(default)]
     plugins: BTreeMap<String, crate::plugins::PluginSet>,
     #[serde(default)]
+    editor: BTreeMap<String, crate::editor::EditorSet>,
+    #[serde(default)]
     targets: BTreeMap<String, TargetEntry>,
 }
 
@@ -189,6 +191,9 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
     let (plugin_issues, plugin_warnings) = crate::plugins::validate(&mut m.plugins);
     issues.extend(plugin_issues);
     warnings.extend(plugin_warnings);
+    let (editor_issues, editor_warnings) = crate::editor::validate(&m.editor);
+    issues.extend(editor_issues);
+    warnings.extend(editor_warnings);
     if !issues.is_empty() {
         return Err(ProfileError::new(
             format!("{} is not a valid kitbag profile", file.display()),
@@ -202,6 +207,7 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
         settings,
         hooks: m.hooks,
         plugins: m.plugins,
+        editor: m.editor,
         schemas,
         warnings,
         ..Profile::default()
@@ -895,6 +901,39 @@ pub fn manifest_toml(p: &Profile) -> String {
             plugins.insert(target, Item::Table(t));
         }
         doc["plugins"] = Item::Table(plugins);
+    }
+    if p.editor.values().any(|s| !s.is_empty()) {
+        let implicit = || {
+            let mut t = Table::new();
+            t.set_implicit(true);
+            t
+        };
+        let mut editor = implicit();
+        for (id, set) in p.editor.iter().filter(|(_, s)| !s.is_empty()) {
+            let v = serde_json::to_value(set).expect("serializable");
+            let mut t = implicit();
+            for (key, val) in v.as_object().expect("object") {
+                match (key.as_str(), val) {
+                    ("settings", Value::Object(m)) => {
+                        t.insert(key, Item::Table(json_to_table(m)));
+                    }
+                    ("keybindings", Value::Array(blocks)) => {
+                        let mut arr = toml_edit::ArrayOfTables::new();
+                        for b in blocks {
+                            arr.push(json_to_table(b.as_object().expect("object")));
+                        }
+                        t.insert(key, Item::ArrayOfTables(arr));
+                    }
+                    _ => {
+                        if let Some(x) = json_to_value(val) {
+                            t.insert(key, Item::Value(x));
+                        }
+                    }
+                }
+            }
+            editor.insert(id, Item::Table(t));
+        }
+        doc["editor"] = Item::Table(editor);
     }
     doc.to_string()
 }
@@ -1909,11 +1948,11 @@ mod tests {
         rule("---\ntargets: 3\n---\nB\n");
         let e = load(dir.path()).unwrap_err().to_string();
         assert!(e.contains("'targets' must be a list of tool names"), "{e}");
-        rule("---\ndisabled_on: [vscode]\nonly: []\n---\nB\n");
+        rule("---\ndisabled_on: [emacs]\nonly: []\n---\nB\n");
         let p = load(dir.path()).unwrap();
         assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
         assert!(p.warnings[0].starts_with("rules/r.md: 'only' is empty"));
-        assert!(p.warnings[1].contains("unknown target 'vscode' in 'disabled_on' is ignored"));
+        assert!(p.warnings[1].contains("unknown target 'emacs' in 'disabled_on' is ignored"));
         assert!(p.rules[0].targeting.applies_to("cursor"));
         // Another tool's `only` that isn't a list is left alone.
         fs::create_dir_all(dir.path().join("commands")).unwrap();
@@ -2054,7 +2093,7 @@ mod tests {
     #[test]
     fn targeting_warnings() {
         // A target from a newer kitbag loads, with a warning, and matches nothing.
-        let unknown = "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\ntargets = [\"vim\", \"codex\"]\n[mcp_servers.b]\ncommand = \"b\"\nexcept = [\"vscode\"]\n";
+        let unknown = "kitbag = 1\nname = \"x\"\n[mcp_servers.a]\ncommand = \"a\"\ntargets = [\"vim\", \"codex\"]\n[mcp_servers.b]\ncommand = \"b\"\nexcept = [\"emacs\"]\n";
         let p = parse_manifest(unknown, Path::new("k")).unwrap();
         assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
         assert!(
@@ -2064,10 +2103,10 @@ mod tests {
             p.warnings
         );
         assert!(p.warnings[0].contains(
-            "valid targets: claude-code, cursor, codex, gemini-cli, claude-desktop, antigravity, opencode, copilot, grok-build, windsurf, zed, hermes, amp, cline, roo, continue"
+            "valid targets: claude-code, cursor, codex, gemini-cli, claude-desktop, antigravity, opencode, copilot, grok-build, windsurf, zed, hermes, amp, cline, roo, continue, vscode"
         ));
         assert!(
-            p.warnings[1].starts_with("mcp_servers.b: unknown target 'vscode' in 'disabled_on'")
+            p.warnings[1].starts_with("mcp_servers.b: unknown target 'emacs' in 'disabled_on'")
         );
         assert!(p.mcp_servers["a"].applies_to("codex"));
         assert!(!p.mcp_servers["a"].applies_to("cursor"));

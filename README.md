@@ -115,6 +115,7 @@ preview with `kitbag diff github:cargopete/dotagents --to all`.
 | `cline`          | Cline             | user, project | user | ✓           | ✓          | ✓                       | ✓      | -      | -             | -        |
 | `roo`            | Roo Code (alias: `roo-code`) | user, project | ✓ | ✓    | ✓          | ✓                       | ✓      | -      | -             | -        |
 | `continue`       | Continue          | user, project | ✓   | ✓            | project    | user                    | -      | -      | -             | -        |
+| `vscode`         | VS Code (editor; `[editor.vscode]`) | user | -  | -            | -          | -                       | -      | -      | -             | user     |
 
 `claude` is accepted as an alias for `claude-code` wherever a target id is given (`--to`,
 `--from`, `targets`, `disabled_on`, and `[settings.claude]`, read as `[settings.claude-code]`;
@@ -1314,6 +1315,109 @@ Nothing in the `.github/copilot/settings.json` carry above depends on this: VS C
 `[plugins.claude-code]` already write. Also not writable from the docs, and therefore not a gap
 in kitbag: Grok Build's marketplace sources and project-level `[plugins] paths` (no entry shape
 or path meaning is documented), and Zed's project-level `auto_install_extensions` (UNVERIFIED).
+
+### Editor extensions, AI settings and AI keybindings: `[editor.vscode]`, `[editor.zed]`
+
+An optional `[editor.<id>]` section carries a small, allow-listed slice of an editor: extension
+ids, a few AI settings, and a few AI keybindings. It is not an editor sync (no theme, font,
+window, tab or format-on-save settings, no snippets, no Settings Sync, no `settings.json` dump);
+the editors have Settings Sync for that. Everything below was read from the official docs on
+2026-11-27; what those docs don't name is not carried.
+
+```toml
+[editor.vscode]
+extensions = ["Continue.continue", "saoudrizwan.claude-dev"]   # exact publisher.extension, optional @version
+
+[editor.vscode.settings]
+"chat.agent.enabled" = true
+"github.copilot.enable" = { "*" = true, markdown = false }
+
+[[editor.zed.keybindings]]
+context = "Workspace"                                          # optional, as in keymap.json
+bindings = { "ctrl-alt-a" = "agent::Toggle" }
+```
+
+`kitbag capture --from vscode` reads the AI keys of `User/settings.json` and runs
+`code --list-extensions`; `kitbag capture --from zed` reads the AI bindings of `keymap.json`.
+`apply --to vscode` merges the settings into the existing JSONC file (comments and your other keys
+stay), and `apply --to zed` appends the bindings as a block at the end of `keymap.json` (Zed lets
+the later binding win; a binding the file already has is not repeated, and one it binds
+differently is noted). Both are idempotent, and `kitbag undo` restores the files.
+
+**VS Code, default profile and user scope only.** The settings go to `User/settings.json`
+(`%APPDATA%\Code\User` on Windows, `~/Library/Application Support/Code/User` on macOS,
+`~/.config/Code/User` on Linux). `User/profiles/<id>/` is never written: VS Code's profiles page
+says how to see the active profile in the UI but gives no way for a program to tell, so kitbag
+doesn't guess. A workspace's `.vscode/settings.json` is not written either (the target has user
+scope only). `code --user-data-dir` and portable mode are not followed.
+
+**What is carried.**
+
+- Extensions (`code --install-extension publisher.extension[@version]`), by the exact id each
+  extension's own official page publishes, matched without regard to case and never rewritten
+  (and never switched between the Microsoft Marketplace and Open VSX, or installed from a VSIX
+  path or a link):
+  `Continue.continue` ([docs.continue.dev](https://docs.continue.dev/ide-extensions/install)),
+  `saoudrizwan.claude-dev` for Cline ([cline.bot/install](https://cline.bot/install)) and
+  `RooVeterinaryInc.roo-cline` for Roo Code
+  ([Roo Code docs](https://roocodeinc.github.io/Roo-Code/getting-started/installing)).
+  The ids of GitHub Copilot's extensions are **not** carried: no official GitHub or VS Code page
+  I could find publishes a `publisher.extension` id for them (UNVERIFIED which ids are current),
+  so they are a documented skip.
+- Settings, from VS Code's [AI settings reference](https://code.visualstudio.com/docs/copilot/reference/copilot-settings),
+  with the type shown there (a value of another type is refused): `chat.agent.enabled`,
+  `chat.agent.maxRequests` (1 to 1000), `chat.checkpoints.enabled`, `chat.commandCenter.enabled`,
+  `chat.disableAIFeatures`, `chat.useAgentSkills`, `chat.useAgentsMdFile`, `chat.useClaudeMdFile`,
+  `github.copilot.editor.enableCodeActions`, `github.copilot.enable` (language id = true/false),
+  `github.copilot.nextEditSuggestions.enabled` and
+  `github.copilot.chat.codeGeneration.useInstructionFiles`. All are booleans, a count or a map of
+  booleans, so no value can hold a token. Nothing flagged Experimental or Preview there, and none
+  of the auto-approve, terminal, sandbox, endpoint or model keys.
+- Zed keybindings, from [Zed's keybindings docs](https://zed.dev/docs/key-bindings): only plain
+  string actions (no arguments) that [Zed's action list](https://zed.dev/docs/all-actions) names:
+  `agent::AddSelectionToThread`, `agent::CycleFavoriteModels`, `agent::ExpandMessageEditor`,
+  `agent::Keep`, `agent::KeepAll`, `agent::NewThread`, `agent::OpenAgentDiff`, `agent::Reject`,
+  `agent::RejectAll`, `agent::Toggle`, `agent::ToggleFocus`, `agent::ToggleModelSelector`,
+  `agent::ToggleNewThreadMenu`, `agent::ToggleProfileSelector`, `agent::ToggleThinkingMode`,
+  `agent::UndoLastReject` and `assistant::InlineAssist`. Not the actions that approve a tool call
+  (`agent::AllowAlways`, `agent::AllowOnce`), not bindings with arguments, not the rest of your
+  keymap. Zed's extensions stay in `[plugins.zed]` and its agent settings in `[settings.zed]`;
+  `[editor.zed]` refuses `extensions` and `settings` rather than repeat them.
+
+**Extensions run code.** Every plan lists each extension as `publisher.extension` (with its
+version when the profile pins one) and whether it is already installed, will be installed, or
+can't be because `code` is not on `PATH` (a warning; nothing is called installed). Only extensions
+that are not installed yet are installed, after the files are written, and only once you
+confirm (or pass `--yes`); `--dry-run` and `diff` install nothing. From a git source no extension
+is installed without `--trust-source` (the settings are plain data and still apply), and the plan
+names each one withheld. `inspect` lists them among what a profile runs. An id that isn't on the
+list above is dropped with a note, so a hand-written profile can't install anything else.
+
+**Undo restores `settings.json` and `keymap.json`, not extensions.** An extension kitbag installed
+stays installed when you undo; kitbag never uninstalls anything, so nothing you already had can go.
+Remove one yourself with `code --uninstall-extension publisher.extension`. (Recording which
+installs were new, to uninstall them safely on undo, is left for a later slice.)
+`--home` redirects the files but not `code`: `code` lists and installs for whoever runs kitbag.
+
+**Not carried, and why** (official docs checked 2026-11-27):
+
+- VS Code's `keybindings.json`: its [keybindings page](https://code.visualstudio.com/docs/configure/keybindings)
+  describes the file, the evaluation order and the `-command` removal syntax but names no path
+  for it (the profiles page only says profiles are stored "similar to your user settings and
+  keyboard shortcuts"), so kitbag doesn't write there.
+- Cursor's editor: [Cursor's VS Code migration page](https://cursor.com/docs/configuration/migrations/vscode)
+  describes an import of extensions, themes, settings and keybindings, and names no `settings.json`
+  or `keybindings.json` path and no `cursor --install-extension` / `--list-extensions`. Skipped
+  (the Cursor Agent CLI's own settings are `[settings.cursor]`). `state.vscdb` is never read.
+- Windsurf: its docs now redirect to Devin Desktop's, which name no editor settings path and no
+  extension command, and say extensions can't be installed through any marketplace on Devin Desktop. Skipped;
+  Devin folders are not written (see #20).
+- VSCodium: its [site](https://vscodium.com/) names no settings path, keybindings path or
+  `codium` command. VS Code Insiders: the profiles page says only that its folder is
+  `Code - Insiders` (profiles location), not its settings or command, so it is skipped too.
+- Non-default profiles (`User/profiles/<id>/`), workspace `.vscode/settings.json`, Zed's project
+  keymap, Continue as an editor contribution beyond its extension id, and the Experimental
+  `chat.plugins.marketplaces` / `chat.pluginLocations` (#12) are left alone.
 
 ### Plugins: `rules/` at the root, no `kitbag.toml`
 

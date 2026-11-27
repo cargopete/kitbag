@@ -31,6 +31,7 @@ pub mod hermes;
 pub(crate) mod hook_files;
 pub mod opencode;
 pub mod roo;
+pub mod vscode;
 pub mod windsurf;
 pub mod zed;
 
@@ -278,6 +279,9 @@ pub struct Work {
     pub removed_items: Vec<(String, String)>,
     /// Skill directories the plan empties; removed when empty after the write.
     pub prune_dirs: Vec<PathBuf>,
+    /// Editor extensions the plan lists, with what it does about each (see
+    /// [`crate::editor`]).
+    pub extensions: Vec<crate::editor::ExtensionPlan>,
 }
 
 /// One rule, command, skill or agent a plan writes (`hash` is its
@@ -536,6 +540,7 @@ pub fn all() -> &'static [&'static dyn Adapter] {
         &cline::Cline,
         &roo::Roo,
         &continue_ide::ContinueIde,
+        &vscode::VsCode,
     ]
 }
 

@@ -217,9 +217,9 @@ fn ambiguous_unknown_and_bad_arguments_are_errors() {
     let err = fails(&sb, &["disable", "agent:review", "p"]);
     assert!(err.contains("has no agent 'review'"), "{err}");
 
-    let err = fails(&sb, &["disable", "docs", "p", "--on", "vscode"]);
+    let err = fails(&sb, &["disable", "docs", "p", "--on", "emacs"]);
     assert!(
-        err.contains("unknown target 'vscode'") && err.contains("known targets"),
+        err.contains("unknown target 'emacs'") && err.contains("known targets"),
         "{err}"
     );
     assert_eq!(sb.read("p/kitbag.toml"), MANIFEST);

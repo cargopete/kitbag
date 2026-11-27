@@ -33,6 +33,12 @@
 //!   its docs don't say that the `agent` keys apply there. Profiles, model
 //!   parameters, `terminal_init_command`, providers (`language_models`) and
 //!   everything else are left alone.
+//! * Keybindings, at user scope only: bindings of the plain AI actions of
+//!   `crate::editor::ZED_ACTIONS` in `keymap.json` of the config directory,
+//!   from zed.dev/docs/key-bindings and zed.dev/docs/all-actions (checked
+//!   2026-11-27), in `[editor.zed]`. New bindings are appended as a block at
+//!   the end of the file, where Zed's docs say the later binding wins; what
+//!   the file holds stays. The rest of the keymap is never captured.
 //! * Rules and commands: Zed's docs describe no rules file or commands folder
 //!   (the Rules Library is a database inside Zed that is being replaced by
 //!   skills and the personal `AGENTS.md`, and kitbag never reads or writes it),
@@ -55,7 +61,8 @@ use super::common::{
     skill_with_required_frontmatter, write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Os, Scope, Support, Work};
-use crate::edit::json::parse_value;
+use crate::edit::json::{JsonArrayDoc, parse_value};
+use crate::editor::{self, EditorSet, KeyBlock};
 use crate::frontmatter;
 use crate::model::{Profile, Transport};
 
@@ -103,6 +110,109 @@ fn settings_file(env: &Env) -> PathBuf {
         Scope::User => config_dir(env).join("settings.json"),
         Scope::Project => env.project.join(".zed").join("settings.json"),
     }
+}
+
+fn keymap_file(env: &Env) -> PathBuf {
+    config_dir(env).join("keymap.json")
+}
+
+/// The AI bindings of Zed's `keymap.json`: plain actions of
+/// [`editor::ZED_ACTIONS`] only, in the context blocks they are in.
+fn capture_keymap(cap: &mut Captured, env: &Env) -> Result<()> {
+    let file = keymap_file(env);
+    let Some(text) = cap.read_config(&file, ID)? else {
+        return Ok(());
+    };
+    cap.sources.push(file.clone());
+    let jd = JsonArrayDoc::parse(Some(&text), &file)?;
+    let mut set = EditorSet::default();
+    for block in jd.items() {
+        let Some(bindings) = block.get("bindings").and_then(Value::as_object) else {
+            continue;
+        };
+        let context = block
+            .get("context")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let mut raw = EditorSet::default();
+        raw.keybindings.push(KeyBlock {
+            context,
+            bindings: bindings
+                .iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                .collect(),
+        });
+        let (kept, _) = editor::allowed(ID, &raw);
+        set.keybindings.extend(kept.keybindings);
+    }
+    if !set.keybindings.is_empty() {
+        let n: usize = set.keybindings.iter().map(|b| b.bindings.len()).sum();
+        cap.info(
+            ID,
+            format!("{n} AI keybinding(s) captured from keymap.json; the rest of the keymap is not carried"),
+        );
+        cap.profile.editor.insert(ID.to_string(), set);
+    }
+    Ok(())
+}
+
+/// Append the profile's bindings to Zed's `keymap.json`, as blocks at the end
+/// (the later binding wins in Zed). A binding the file already has in that
+/// context is not added again.
+fn merge_keymap(work: &mut Work, file: &std::path::Path, blocks: &[KeyBlock]) -> Result<()> {
+    if blocks.is_empty() {
+        return Ok(());
+    }
+    let text = work.fs.read(file)?;
+    let mut doc = JsonArrayDoc::parse(text.as_deref(), file)?;
+    let items = doc.items();
+    let mut changed = false;
+    for b in blocks {
+        let in_context =
+            |it: &&Value| it.get("context").and_then(Value::as_str) == b.context.as_deref();
+        let bound = |key: &str| {
+            items
+                .iter()
+                .filter(in_context)
+                .filter_map(|it| it.get("bindings")?.get(key)?.as_str())
+                .next_back()
+        };
+        let mut missing = Map::new();
+        for (key, action) in &b.bindings {
+            match bound(key) {
+                Some(a) if a == action => {}
+                Some(other) => {
+                    work.info(
+                        ID,
+                        format!(
+                            "keymap.json binds {} to {} in this context; the profile's {} is appended after it and wins in Zed",
+                            crate::ui::visible_line(key),
+                            crate::ui::visible_line(other),
+                            crate::ui::visible_line(action)
+                        ),
+                    );
+                    missing.insert(key.clone(), json!(action));
+                }
+                None => {
+                    missing.insert(key.clone(), json!(action));
+                }
+            }
+        }
+        if missing.is_empty() {
+            continue;
+        }
+        let mut entry = Map::new();
+        if let Some(c) = &b.context {
+            entry.insert("context".into(), json!(c));
+        }
+        entry.insert("bindings".into(), Value::Object(missing));
+        doc.append(&Value::Object(entry));
+        changed = true;
+    }
+    if changed {
+        work.fs.write(file, doc.render())?;
+    }
+    Ok(())
 }
 
 fn project_file(env: &Env, name: &str) -> PathBuf {
@@ -273,6 +383,7 @@ impl Adapter for Zed {
         }
         capture_skills_dir(&mut cap, &skills_dir(env), ID)?;
         if env.scope == Scope::User {
+            capture_keymap(&mut cap, env)?;
             cap.info(
                 ID,
                 "Zed's Rules Library lives in Zed's own database, which kitbag never reads, so those rules were not captured; Zed is replacing it with skills (~/.agents/skills) and the personal AGENTS.md, which are captured",
@@ -420,6 +531,26 @@ impl Adapter for Zed {
             );
         }
         crate::plugins::apply_zed(profile, env, opts, work, &file)?;
+        if let Some(set) = profile.editor.get(ID) {
+            let (set, dropped) = editor::allowed(ID, set);
+            if !dropped.is_empty() {
+                work.warn(
+                    ID,
+                    format!(
+                        "not applied (not on kitbag's allow-list of AI keybindings): {}",
+                        dropped.join(", ")
+                    ),
+                );
+            }
+            if env.scope == Scope::User {
+                merge_keymap(work, &keymap_file(env), &set.keybindings)?;
+            } else if !set.keybindings.is_empty() {
+                work.info(
+                    ID,
+                    "editor.zed keybindings were not applied to the project: Zed's keymap.json is a user file; apply them at user scope",
+                );
+            }
+        }
         Ok(())
     }
 }

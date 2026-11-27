@@ -184,6 +184,9 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
         for (t, s) in c.profile.plugins {
             merged.plugins.entry(t).or_insert(s);
         }
+        for (t, s) in c.profile.editor {
+            merged.editor.entry(t).or_insert(s);
+        }
     }
     if read == 0 && !failures.is_empty() {
         anyhow::bail!(
@@ -346,6 +349,9 @@ pub struct Plan {
     pub removed_items: Vec<(String, String)>,
     /// Skill directories the plan empties, taken out once the write is done.
     pub prune_dirs: Vec<PathBuf>,
+    /// Editor extensions the plan lists: to install, already installed, or
+    /// not installable here. They are installed after the files are written.
+    pub extensions: Vec<crate::editor::ExtensionPlan>,
     /// Where the profile comes from ([`ApplyOptions::source`]).
     pub source: Option<String>,
     /// At project scope, the project directory (as given, and canonical):
@@ -661,6 +667,7 @@ pub fn plan(
         file_writes,
         removed_items: work.removed_items,
         prune_dirs: work.prune_dirs,
+        extensions: work.extensions,
         source: opts.source.clone(),
         confine_to: (env.scope == Scope::Project).then(|| {
             let root = env
