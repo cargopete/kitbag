@@ -8,6 +8,7 @@
 //! rules/<name>.md          scoped rules with optional `globs` frontmatter
 //! commands/<name>.md       reusable prompts / slash commands
 //! agents/<name>.md         custom agents (Copilot `.agent.md`; chat modes)
+//! output-styles/<name>.md  Claude Code output styles (response role, tone and format)
 //! skills/<name>/SKILL.md   agent skills, plus any supporting files
 //! hooks/<path>             scripts the `[[hooks]]` of the manifest run (optional)
 //! ```
@@ -469,6 +470,21 @@ pub struct Agent {
     pub targeting: Targeting,
 }
 
+/// A Claude Code output style: a Markdown file that sets Claude's role, tone
+/// and response format for a whole session. Its text is a prompt the tool
+/// sends with every request, so remote profiles show it in the plan.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OutputStyle {
+    pub name: String,
+    pub description: Option<String>,
+    /// Other frontmatter keys (`name`, `keep-coding-instructions`,
+    /// `force-for-plugin` ...), kept verbatim.
+    pub extra: Map<String, Value>,
+    /// Markdown instructions for the style.
+    pub body: String,
+    pub targeting: Targeting,
+}
+
 /// A hook: a shell command a tool runs on an event (before a tool call, when
 /// a session starts ...). Hooks run automatically, so kitbag carries them only
 /// when asked (see [`crate::hooks`]).
@@ -536,6 +552,7 @@ pub struct Profile {
     pub commands: Vec<Command>,
     pub skills: Vec<Skill>,
     pub agents: Vec<Agent>,
+    pub output_styles: Vec<OutputStyle>,
     /// Hooks, in the order they were captured. Optional: most profiles have none.
     pub hooks: Vec<Hook>,
     /// The scripts the hooks run (`hooks/<path>` in the profile; `path` is
@@ -564,6 +581,7 @@ impl Profile {
             && self.commands.is_empty()
             && self.skills.is_empty()
             && self.agents.is_empty()
+            && self.output_styles.is_empty()
             && self.hooks.is_empty()
             && self
                 .plugins
@@ -576,14 +594,15 @@ impl Profile {
         self.commands.sort_by(|a, b| a.name.cmp(&b.name));
         self.skills.sort_by(|a, b| a.name.cmp(&b.name));
         self.agents.sort_by(|a, b| a.name.cmp(&b.name));
+        self.output_styles.sort_by(|a, b| a.name.cmp(&b.name));
         self.hook_files.sort_by(|a, b| a.path.cmp(&b.path));
     }
 }
 
-/// One rule, command, skill or agent a profile keeps off a target.
+/// One rule, command, skill, agent or output style a profile keeps off a target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkippedItem {
-    /// `rule`, `command`, `skill` or `agent`.
+    /// `rule`, `command`, `skill`, `agent` or `output-style`.
     pub kind: &'static str,
     pub name: String,
     pub why: &'static str,
@@ -597,7 +616,7 @@ impl SkippedItem {
 }
 
 impl Profile {
-    /// The rules, commands, skills and agents not applied to `target`.
+    /// The rules, commands, skills, agents and output styles not applied to `target`.
     pub fn skipped_items(&self, target: &str) -> Vec<SkippedItem> {
         let mut out = Vec::new();
         let mut add = |kind: &'static str, name: &str, t: &Targeting| {
@@ -621,6 +640,9 @@ impl Profile {
         for a in &self.agents {
             add("agent", &a.name, &a.targeting);
         }
+        for o in &self.output_styles {
+            add("output-style", &o.name, &o.targeting);
+        }
         out
     }
 
@@ -635,6 +657,7 @@ impl Profile {
         p.commands.retain(|c| c.targeting.applies_to(target));
         p.skills.retain(|s| s.targeting.applies_to(target));
         p.agents.retain(|a| a.targeting.applies_to(target));
+        p.output_styles.retain(|o| o.targeting.applies_to(target));
         Some(p)
     }
 }
@@ -705,6 +728,11 @@ pub fn portable_name_issues(p: &Profile) -> Vec<String> {
     check(
         "agents/",
         p.agents.iter().map(|a| a.name.clone()).collect(),
+        &mut issues,
+    );
+    check(
+        "output-styles/",
+        p.output_styles.iter().map(|o| o.name.clone()).collect(),
         &mut issues,
     );
     let mut hook_paths: Vec<String> = Vec::new();

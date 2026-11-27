@@ -448,7 +448,7 @@ impl Adapter for Copilot {
     fn scopes(&self) -> &'static [Scope] {
         &[Scope::User, Scope::Project]
     }
-    fn support(&self, scope: Scope) -> [(Feature, Support); 7] {
+    fn support(&self, scope: Scope) -> [(Feature, Support); 8] {
         Feature::ALL.map(|f| {
             let native = match f {
                 Feature::Mcp
@@ -458,7 +458,7 @@ impl Adapter for Copilot {
                 | Feature::Agents => true,
                 // VS Code prompt files; user ones live in VS Code's profile storage.
                 Feature::Commands => scope == Scope::Project,
-                Feature::Settings => false,
+                Feature::OutputStyles | Feature::Settings => false,
             };
             (
                 f,

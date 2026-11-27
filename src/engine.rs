@@ -147,6 +147,7 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
         merge_named!(commands, "command");
         merge_named!(skills, "skill");
         merge_named!(agents, "agent");
+        merge_named!(output_styles, "output style");
         for h in c.profile.hooks {
             if !merged.hooks.contains(&h) {
                 merged.hooks.push(h);
@@ -420,6 +421,7 @@ pub fn plan(
             (Feature::Commands, profile.commands.len()),
             (Feature::Skills, profile.skills.len()),
             (Feature::Agents, profile.agents.len()),
+            (Feature::OutputStyles, profile.output_styles.len()),
         ];
         for (f, n) in items {
             if n > 0 && a.supports(env.scope, f) == Support::None {
@@ -638,6 +640,7 @@ fn item_feature(s: &SkippedItem) -> Feature {
         "rule" => Feature::Rules,
         "command" => Feature::Commands,
         "skill" => Feature::Skills,
+        "output-style" => Feature::OutputStyles,
         _ => Feature::Agents,
     }
 }
@@ -800,6 +803,13 @@ fn find_unrecorded(
         "skill" => one
             .skills
             .extend(profile.skills.iter().find(|k| k.name == s.name).cloned()),
+        "output-style" => one.output_styles.extend(
+            profile
+                .output_styles
+                .iter()
+                .find(|o| o.name == s.name)
+                .cloned(),
+        ),
         _ => one
             .agents
             .extend(profile.agents.iter().find(|g| g.name == s.name).cloned()),

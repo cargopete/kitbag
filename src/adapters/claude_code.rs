@@ -11,6 +11,10 @@
 //!   being the system prompt. Frontmatter keys other than `description` are kept
 //!   as they are in the profile's agent.
 //!   Docs: <https://code.claude.com/docs/en/sub-agents>.
+//! * Output styles: `~/.claude/output-styles/*.md` and `.claude/output-styles/*.md`
+//!   (the folder itself, not subfolders), markdown with optional `name`,
+//!   `description` and `keep-coding-instructions` frontmatter; the `outputStyle`
+//!   setting names one. Docs: <https://code.claude.com/docs/en/output-styles>.
 //! * Settings: `.claude/settings.json` (allow-listed keys only).
 //! * Plugins, by reference: the `enabledPlugins` and `extraKnownMarketplaces`
 //!   keys of that file (see `plugins.rs`); plugin files are never copied.
@@ -23,17 +27,22 @@ use anyhow::Result;
 use serde_json::{Map, Value, json};
 
 use super::common::{
-    MdKind, add_agent, capture_instructions, capture_markdown_dir, capture_skills_dir, claim_name,
-    import_server, merge_json_servers, merge_json_settings, name_from_rel, pick_settings,
-    read_text_item, render_server, safe_settings, server_entries, server_from_json, servers_for,
-    write_agent, write_instructions, write_skill,
+    MdKind, add_agent, add_output_style, capture_instructions, capture_markdown_dir,
+    capture_skills_dir, claim_name, import_server, merge_json_servers, merge_json_settings,
+    name_from_rel, pick_settings, read_text_item, render_server, safe_settings, server_entries,
+    server_from_json, servers_for, write_agent, write_instructions, write_output_style,
+    write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
 use crate::frontmatter::{self, opt};
-use crate::model::{Agent, McpServer, Profile, Rule, RuleMode, Transport, is_valid_name};
+use crate::model::{
+    Agent, McpServer, OutputStyle, Profile, Rule, RuleMode, Transport, is_valid_name,
+};
 use crate::plan_fs::{join_rel, read_text_opt, walk_files};
-use crate::profile_io::{agent_from_markdown, command_to_markdown};
+use crate::profile_io::{
+    agent_from_markdown, command_to_markdown, output_style_from_markdown, output_style_to_markdown,
+};
 use crate::secrets::RefStyle;
 
 pub(crate) const ID: &str = "claude-code";
@@ -49,6 +58,7 @@ struct Paths {
     commands: PathBuf,
     skills: PathBuf,
     agents: PathBuf,
+    output_styles: PathBuf,
     settings: PathBuf,
     /// `.claude/settings.local.json`, where a project's servers are rejected
     /// (`disabledMcpjsonServers`): yours alone, not shared with the team.
@@ -79,6 +89,7 @@ fn paths(env: &Env) -> Paths {
                 commands: d.join("commands"),
                 skills: d.join("skills"),
                 agents: d.join("agents"),
+                output_styles: d.join("output-styles"),
                 settings: d.join("settings.json"),
                 local_settings: None,
             }
@@ -98,6 +109,7 @@ fn paths(env: &Env) -> Paths {
                 commands: p.join(".claude").join("commands"),
                 skills: p.join(".claude").join("skills"),
                 agents: p.join(".claude").join("agents"),
+                output_styles: p.join(".claude").join("output-styles"),
                 settings: p.join(".claude").join("settings.json"),
                 local_settings: Some(p.join(".claude").join("settings.local.json")),
             }
@@ -306,64 +318,132 @@ fn import(cap: &mut Captured, name: &str, def: &Map<String, Value>) {
     import_server(cap, ID, name, s, false);
 }
 
-/// Output styles that ship with Claude Code; any other name is a file in `output-styles/`.
-const BUILTIN_OUTPUT_STYLES: &[&str] = &["default", "explanatory", "learning"];
+/// The styles Claude Code ships; any other name is a file in `output-styles/`
+/// (or comes from a plugin or managed policy). Checked in any case, though
+/// Claude Code's own match for the setting is case-sensitive.
+const BUILTIN_OUTPUT_STYLES: &[&str] =
+    &["default", "proactive", "concise", "explanatory", "learning"];
 
-/// `outputStyle` naming a custom style would point at a file the profile doesn't carry.
-fn drop_custom_output_style(cap: &mut Captured) {
-    let Some(settings) = cap.profile.settings.get_mut(ID) else {
-        return;
-    };
-    let Some(Value::String(style)) = settings.get("outputStyle") else {
-        return;
-    };
-    if BUILTIN_OUTPUT_STYLES.contains(&style.to_ascii_lowercase().as_str()) {
-        return;
+/// The name Claude Code gives a style: `name` in its frontmatter, else the file name.
+fn style_name(o: &OutputStyle) -> &str {
+    match o.extra.get("name") {
+        Some(Value::String(n)) if !n.trim().is_empty() => n.as_str(),
+        _ => &o.name,
     }
-    let style = style.clone();
-    settings.remove("outputStyle");
-    if settings.is_empty() {
-        cap.profile.settings.remove(ID);
-    }
-    cap.warn(
-        ID,
-        format!(
-            "dropped setting outputStyle = \"{style}\": it names a custom output style, and kitbag doesn't carry output styles"
-        ),
-    );
 }
 
-/// Claude Code features kitbag has no portable form for yet, so the user
-/// knows what a captured profile leaves behind.
-fn note_not_carried(cap: &mut Captured, env: &Env) {
-    let dir = match env.scope {
-        Scope::User => config_dir(env),
-        Scope::Project => env.project.join(".claude"),
+/// `outputStyle` is kept as it is, even when it names a style the capture has
+/// no file for (a plugin's, one a policy manages, or a file kitbag skipped):
+/// Claude Code falls back to its default style for a name it can't find, so
+/// carrying the setting loses nothing. Say so, since the style itself isn't
+/// in the profile then.
+fn note_unknown_output_style(cap: &mut Captured) {
+    let Some(Value::String(style)) = cap
+        .profile
+        .settings
+        .get(ID)
+        .and_then(|s| s.get("outputStyle"))
+    else {
+        return;
     };
-    let count_md = |sub: &str| {
-        walk_files(&dir.join(sub), 10_000)
-            .map(|f| f.iter().filter(|r| r.ends_with(".md")).count())
-            .unwrap_or(0)
-    };
-    let plural =
-        |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
-    let mut parts = Vec::new();
-    let styles = count_md("output-styles");
-    if styles > 0 {
-        parts.push(format!(
-            "{} (output-styles/)",
-            plural(styles, "output style", "output styles")
-        ));
+    if BUILTIN_OUTPUT_STYLES.contains(&style.to_ascii_lowercase().as_str())
+        || cap
+            .profile
+            .output_styles
+            .iter()
+            .any(|o| style_name(o) == style)
+    {
+        return;
     }
-    if !parts.is_empty() {
-        cap.info(
+    let message = format!(
+        "outputStyle = \"{style}\" names no output style file in this capture (a plugin's or a managed style, or a file kitbag skipped); the setting is kept as it is"
+    );
+    cap.info(ID, message);
+}
+
+/// Capture `<dir>/*.md` as output styles. The file stem is the profile name;
+/// Claude Code's own name for the style is its `name` key when there is one,
+/// which is kept with the other frontmatter. Only the folder itself is read:
+/// the docs name no subfolders.
+fn capture_output_styles(cap: &mut Captured, dir: &Path) -> Result<()> {
+    if cap.escapes(dir, ID) {
+        return Ok(());
+    }
+    let mut seen = std::collections::BTreeMap::new();
+    for rel in walk_files(dir, 500)? {
+        if !rel.ends_with(".md") {
+            continue;
+        }
+        let path = join_rel(dir, &rel);
+        if rel.contains('/') {
+            cap.warn(
+                ID,
+                format!(
+                    "skipped {}: Claude Code's docs read output styles from the folder itself, not from subfolders",
+                    path.display()
+                ),
+            );
+            continue;
+        }
+        if rel.eq_ignore_ascii_case("readme.md") {
+            cap.warn(
+                ID,
+                format!("skipped {}: a README, not an output style", path.display()),
+            );
+            continue;
+        }
+        let name = name_from_rel(&rel, ".md");
+        claim_name(&mut seen, dir, &rel, &name)?;
+        if !is_valid_name(&name) {
+            cap.warn(
+                ID,
+                format!("skipped {}: unsupported file name", path.display()),
+            );
+            continue;
+        }
+        let Some(text) = read_text_item(cap, &path, ID) else {
+            continue;
+        };
+        let mut style = output_style_from_markdown(&name, &text);
+        // A file name with spaces is flattened for the profile ("My style"
+        // -> "My-style"), but Claude Code's name for the style, which
+        // `outputStyle` uses, is the file name: keep it as `name`.
+        let stem = rel.strip_suffix(".md").unwrap_or(&rel);
+        if stem != name && !style.extra.contains_key("name") {
+            style.extra.insert("name".into(), Value::from(stem));
+        }
+        if add_output_style(cap, style, ID) {
+            cap.sources.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// One output style as `<dir>/<name>.md`.
+fn apply_output_style(
+    work: &mut Work,
+    dir: &Path,
+    o: &OutputStyle,
+    opts: &ApplyOptions,
+) -> Result<()> {
+    if o.extra.contains_key("force-for-plugin") {
+        work.info(
             ID,
             format!(
-                "not carried by kitbag (no portable form yet): {}",
-                parts.join(", ")
+                "output style '{}': force-for-plugin only applies to styles a plugin ships; written as it is, Claude Code ignores it in a user or project style",
+                o.name
             ),
         );
     }
+    let path = dir.join(format!("{}.md", o.name));
+    write_output_style(
+        work,
+        &path,
+        output_style_to_markdown(o).as_bytes(),
+        opts,
+        ID,
+        &o.name,
+    )
 }
 
 /// Permission rules and directories the settings file already has in another
@@ -457,7 +537,7 @@ impl Adapter for ClaudeCode {
     fn scopes(&self) -> &'static [Scope] {
         &[Scope::User, Scope::Project]
     }
-    fn support(&self, _scope: Scope) -> [(Feature, Support); 7] {
+    fn support(&self, _scope: Scope) -> [(Feature, Support); 8] {
         Feature::ALL.map(|f| (f, Support::Native))
     }
 
@@ -470,6 +550,7 @@ impl Adapter for ClaudeCode {
             ("commands", p.commands),
             ("skills", p.skills),
             ("agents", p.agents),
+            ("output-styles", p.output_styles),
             ("settings", p.settings),
         ]
     }
@@ -537,6 +618,7 @@ impl Adapter for ClaudeCode {
         capture_markdown_dir(&mut cap, &p.commands, ".md", MdKind::Command, ID)?;
         capture_skills_dir(&mut cap, &p.skills, ID)?;
         capture_agents(&mut cap, &p.agents)?;
+        capture_output_styles(&mut cap, &p.output_styles)?;
 
         if let Some(text) = cap.read_config(&p.settings, ID)? {
             cap.sources.push(p.settings.clone());
@@ -590,9 +672,8 @@ impl Adapter for ClaudeCode {
                     );
                 }
             }
-            drop_custom_output_style(&mut cap);
+            note_unknown_output_style(&mut cap);
         }
-        note_not_carried(&mut cap, env);
         Ok(cap)
     }
 
@@ -690,6 +771,9 @@ impl Adapter for ClaudeCode {
         }
         for a in &profile.agents {
             apply_agent(work, &p.agents, a, opts)?;
+        }
+        for o in &profile.output_styles {
+            apply_output_style(work, &p.output_styles, o, opts)?;
         }
 
         let mut settings = safe_settings(profile, ID, work);

@@ -25,15 +25,17 @@ pub enum Kind {
     Command,
     Skill,
     Agent,
+    OutputStyle,
 }
 
 impl Kind {
-    const ALL: [Kind; 5] = [
+    const ALL: [Kind; 6] = [
         Kind::Server,
         Kind::Rule,
         Kind::Command,
         Kind::Skill,
         Kind::Agent,
+        Kind::OutputStyle,
     ];
 
     /// The prefix that picks this kind (`skill:foo`).
@@ -44,6 +46,7 @@ impl Kind {
             Kind::Command => "command",
             Kind::Skill => "skill",
             Kind::Agent => "agent",
+            Kind::OutputStyle => "output-style",
         }
     }
 
@@ -61,6 +64,7 @@ impl Kind {
             "command" => Some(Kind::Command),
             "skill" => Some(Kind::Skill),
             "agent" => Some(Kind::Agent),
+            "output-style" => Some(Kind::OutputStyle),
             _ => None,
         }
     }
@@ -124,6 +128,11 @@ fn targeting_of(p: &Profile, kind: Kind, name: &str) -> Option<Targeting> {
             .iter()
             .find(|r| r.name == name)
             .map(|r| r.targeting.clone()),
+        Kind::OutputStyle => p
+            .output_styles
+            .iter()
+            .find(|r| r.name == name)
+            .map(|r| r.targeting.clone()),
     }
 }
 
@@ -136,6 +145,7 @@ fn names_of(p: &Profile) -> Vec<String> {
             Kind::Command => p.commands.iter().map(|r| r.name.as_str()).collect(),
             Kind::Skill => p.skills.iter().map(|r| r.name.as_str()).collect(),
             Kind::Agent => p.agents.iter().map(|r| r.name.as_str()).collect(),
+            Kind::OutputStyle => p.output_styles.iter().map(|r| r.name.as_str()).collect(),
         };
         out.extend(names.into_iter().map(|n| format!("{}:{n}", k.prefix())));
     }
@@ -325,6 +335,7 @@ fn markdown_path(dir: &Path, kind: Kind, name: &str) -> Result<PathBuf> {
         }
         Kind::Command => dir.join("commands").join(format!("{name}.md")),
         Kind::Agent => dir.join("agents").join(format!("{name}.md")),
+        Kind::OutputStyle => dir.join("output-styles").join(format!("{name}.md")),
         Kind::Skill => dir.join("skills").join(name).join("SKILL.md"),
         Kind::Server => bail!("an MCP server is in {MANIFEST}"),
     };

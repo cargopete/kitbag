@@ -267,7 +267,7 @@ fn skill_symlinks_are_followed_only_inside_the_skill() {
 }
 
 #[test]
-fn reports_what_is_not_carried_and_drops_custom_output_styles() {
+fn reports_what_is_not_carried_and_keeps_custom_output_styles() {
     let sb = Sandbox::empty();
     write(
         &sb,
@@ -295,14 +295,10 @@ fn reports_what_is_not_carried_and_drops_custom_output_styles() {
         r#"{"outputStyle": "Jenny", "model": "opus", "hooks": {}}"#,
     );
     let r = capture(&["claude-code"], &sb.env(Scope::User));
-    assert!(
-        warned(
-            &r,
-            "not carried by kitbag (no portable form yet): 1 output style (output-styles/)"
-        ),
-        "{:?}",
-        r.notes
-    );
+    // Output styles are carried (see tests/output_styles.rs), not listed as left behind.
+    assert!(!warned(&r, "not carried by kitbag"), "{:?}", r.notes);
+    assert_eq!(r.profile.output_styles.len(), 1);
+    assert_eq!(r.profile.output_styles[0].name, "Jenny");
     // Plugins are carried by reference (see tests/plugins.rs); installs the
     // settings don't enable are said to be left behind.
     assert!(
@@ -317,21 +313,38 @@ fn reports_what_is_not_carried_and_drops_custom_output_styles() {
     let names: Vec<&str> = r.profile.agents.iter().map(|a| a.name.as_str()).collect();
     assert_eq!(names, ["nested-tester", "reviewer"]);
     assert!(!warned(&r, "subagent"));
-    assert!(warned(&r, "dropped setting outputStyle = \"Jenny\""));
+    // The setting names a style that is in the profile, so it stays, quietly.
+    assert!(!warned(&r, "outputStyle"), "{:?}", r.notes);
     assert!(warned(&r, "hooks"));
     assert_eq!(
         serde_json::Value::Object(r.profile.settings["claude-code"].clone()),
-        serde_json::json!({"model": "opus"})
+        serde_json::json!({"model": "opus", "outputStyle": "Jenny"})
     );
 
-    // Built-in styles are carried.
-    fs::write(&settings, r#"{"outputStyle": "Explanatory"}"#).unwrap();
+    // Built-in styles are carried, including the newer Proactive and Concise.
+    for name in ["Explanatory", "Proactive", "Concise", "Learning"] {
+        fs::write(&settings, format!(r#"{{"outputStyle": "{name}"}}"#)).unwrap();
+        let r = capture(&["claude-code"], &sb.env(Scope::User));
+        assert_eq!(r.profile.settings["claude-code"]["outputStyle"], name);
+        assert!(!warned(&r, "outputStyle"), "{name}: {:?}", r.notes);
+    }
+
+    // A name with no file in the capture (a plugin's or a managed style) is
+    // kept too, with a note, since Claude Code falls back to its default.
+    fs::write(&settings, r#"{"outputStyle": "From a plugin"}"#).unwrap();
     let r = capture(&["claude-code"], &sb.env(Scope::User));
     assert_eq!(
         r.profile.settings["claude-code"]["outputStyle"],
-        "Explanatory"
+        "From a plugin"
     );
-    assert!(!warned(&r, "dropped setting"));
+    assert!(
+        warned(
+            &r,
+            "outputStyle = \"From a plugin\" names no output style file"
+        ),
+        "{:?}",
+        r.notes
+    );
 }
 
 #[test]

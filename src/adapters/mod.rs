@@ -120,17 +120,19 @@ pub enum Feature {
     Commands,
     Skills,
     Agents,
+    OutputStyles,
     Settings,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 7] = [
+    pub const ALL: [Feature; 8] = [
         Feature::Mcp,
         Feature::Instructions,
         Feature::Rules,
         Feature::Commands,
         Feature::Skills,
         Feature::Agents,
+        Feature::OutputStyles,
         Feature::Settings,
     ];
 
@@ -142,6 +144,7 @@ impl Feature {
             Feature::Commands => "commands",
             Feature::Skills => "skills",
             Feature::Agents => "agents",
+            Feature::OutputStyles => "output-styles",
             Feature::Settings => "settings",
         }
     }
@@ -452,7 +455,7 @@ pub trait Adapter: Sync {
     /// Documentation link for the tool's configuration.
     fn docs(&self) -> &'static str;
     fn scopes(&self) -> &'static [Scope];
-    fn support(&self, scope: Scope) -> [(Feature, Support); 7];
+    fn support(&self, scope: Scope) -> [(Feature, Support); 8];
     /// Key config locations for this scope (shown by `doctor` and `list-targets`).
     fn locations(&self, env: &Env) -> Vec<(&'static str, PathBuf)>;
     /// Is the tool installed or configured (in this project)?

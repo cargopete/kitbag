@@ -88,24 +88,24 @@ preview with `kitbag diff github:cargopete/dotagents --to all`.
 
 ## Targets
 
-| Target id        | Tool              | Scopes        | MCP | Instructions | Rules      | Commands     | Skills | Agents | Settings |
-|------------------|-------------------|---------------|-----|--------------|------------|--------------|--------|--------|----------|
-| `claude-code`    | Claude Code       | user, project | ✓   | ✓            | ✓          | ✓            | ✓      | ✓      | ✓        |
-| `cursor`         | Cursor            | user, project | ✓   | project      | project    | ✓            | ✓      | ✓      | -        |
-| `codex`          | OpenAI Codex CLI  | user, project | ✓   | ✓            | folded     | user         | ✓      | ✓      | ✓        |
-| `gemini-cli`     | Gemini CLI        | user, project | ✓   | ✓            | folded     | ✓            | ✓      | ✓      | ✓        |
-| `claude-desktop` | Claude Desktop    | user          | ✓ (local servers) | -  | -          | -            | -      | -      | -        |
-| `antigravity`    | Google Antigravity | user, project | ✓  | ✓            | ✓          | as skills    | ✓      | ✓      | -        |
-| `opencode`       | opencode          | user, project | ✓   | ✓            | folded     | ✓            | ✓      | ✓      | -        |
-| `copilot`        | GitHub Copilot (CLI, VS Code) | user, project | ✓ | ✓    | ✓          | project; user as skills | ✓ | ✓ | -  |
-| `grok-build`     | Grok Build        | user, project | ✓   | ✓            | ✓*         | ✓            | ✓      | -      | -        |
-| `windsurf`       | Windsurf          | user, project | user | ✓           | project    | ✓            | project | -     | -        |
-| `zed`            | Zed               | user, project | ✓   | ✓            | -          | -            | ✓      | -      | -        |
-| `hermes`         | Hermes Agent      | user, project | user | ✓           | -          | -            | ✓      | -      | -        |
-| `amp`            | Amp               | user, project | ✓   | ✓            | -          | as skills    | ✓      | -      | -        |
-| `cline`          | Cline             | user, project | user | ✓           | ✓          | ✓            | ✓      | -      | -        |
-| `roo`            | Roo Code (alias: `roo-code`) | user, project | ✓ | ✓    | ✓          | ✓            | ✓      | -      | -        |
-| `continue`       | Continue          | user, project | ✓   | ✓            | project    | user         | -      | -      | -        |
+| Target id        | Tool              | Scopes        | MCP | Instructions | Rules      | Commands                | Skills | Agents | Output styles | Settings |
+|------------------|-------------------|---------------|-----|--------------|------------|-------------------------|--------|--------|---------------|----------|
+| `claude-code`    | Claude Code       | user, project | ✓   | ✓            | ✓          | ✓                       | ✓      | ✓      | ✓             | ✓        |
+| `cursor`         | Cursor            | user, project | ✓   | project      | project    | ✓                       | ✓      | ✓      | -             | -        |
+| `codex`          | OpenAI Codex CLI  | user, project | ✓   | ✓            | folded     | user                    | ✓      | ✓      | -             | ✓        |
+| `gemini-cli`     | Gemini CLI        | user, project | ✓   | ✓            | folded     | ✓                       | ✓      | ✓      | -             | ✓        |
+| `claude-desktop` | Claude Desktop    | user          | ✓ (local servers) | -  | -          | -                       | -      | -      | -             | -        |
+| `antigravity`    | Google Antigravity | user, project | ✓  | ✓            | ✓          | as skills               | ✓      | ✓      | -             | -        |
+| `opencode`       | opencode          | user, project | ✓   | ✓            | folded     | ✓                       | ✓      | ✓      | -             | -        |
+| `copilot`        | GitHub Copilot (CLI, VS Code) | user, project | ✓ | ✓    | ✓          | project; user as skills | ✓      | ✓      | -             | -        |
+| `grok-build`     | Grok Build        | user, project | ✓   | ✓            | ✓*         | ✓                       | ✓      | -      | -             | -        |
+| `windsurf`       | Windsurf          | user, project | user | ✓           | project    | ✓                       | project | -     | -             | -        |
+| `zed`            | Zed               | user, project | ✓   | ✓            | -          | -                       | ✓      | -      | -             | -        |
+| `hermes`         | Hermes Agent      | user, project | user | ✓           | -          | -                       | ✓      | -      | -             | -        |
+| `amp`            | Amp               | user, project | ✓   | ✓            | -          | as skills               | ✓      | -      | -             | -        |
+| `cline`          | Cline             | user, project | user | ✓           | ✓          | ✓                       | ✓      | -      | -             | -        |
+| `roo`            | Roo Code (alias: `roo-code`) | user, project | ✓ | ✓    | ✓          | ✓                       | ✓      | -      | -             | -        |
+| `continue`       | Continue          | user, project | ✓   | ✓            | project    | user                    | -      | -      | -             | -        |
 
 `claude` is accepted as an alias for `claude-code` wherever a target id is given (`--to`,
 `--from`, `targets`, `disabled_on`, and `[settings.claude]`, read as `[settings.claude-code]`;
@@ -181,6 +181,8 @@ my-profile/
 │       └── SKILL.md
 ├── agents/
 │   └── reviewer.md        # custom agents (GitHub Copilot)
+├── output-styles/
+│   └── terse.md           # Claude Code output styles
 └── hooks/
     └── typecheck.sh       # scripts the [[hooks]] of kitbag.toml run (optional)
 ```
@@ -206,7 +208,7 @@ url = "https://mcp.linear.app/mcp"
 headers = { Authorization = "Bearer ${LINEAR_API_KEY}" }
 # transport = "sse"           # stdio | http | sse (only needed for legacy SSE)
 # targets = ["claude-code"]   # only these tools (see "Per-tool MCP servers")
-# disabled_on = ["cursor"]    # or every tool except these (also for rules, commands, skills, agents)
+# disabled_on = ["cursor"]    # or every tool except these (also for rules, commands, skills, agents, output styles)
 # disabled = true             # keep the definition; Codex and Grok Build write enabled = false, Antigravity and opencode disabled = true, others skip it
 
 [settings.claude-code]        # per-tool settings, allow-listed keys only
@@ -335,8 +337,8 @@ kitbag disable deploy                             # off on every tool (profile: 
 kitbag enable deploy                              # on everywhere again
 ```
 
-The item is an MCP server, rule, command, skill or agent; a name that is more than one of them
-needs `mcp:`, `rule:`, `command:`, `skill:` or `agent:` in front, and an unknown name or tool is
+The item is an MCP server, rule, command, skill, agent or output style; a name that is more than one of them
+needs `mcp:`, `rule:`, `command:`, `skill:`, `agent:` or `output-style:` in front, and an unknown name or tool is
 an error (`claude` is read as `claude-code`). Without `--on` an item is turned off on every
 tool, written as a `disabled_on` naming each one (a tool added by a later kitbag is not in it);
 enabling clears the list. Comments and everything else in the file stay as they are, `only` /
@@ -344,7 +346,7 @@ enabling clears the list. Comments and everything else in the file stay as they 
 replaced. Hooks have no per-tool setting and are not handled. When you run `kitbag apply`
 afterwards, a server you turned off for a tool that has its own switch is kept there and
 switched off (see the table above) instead of removed; enabling it again switches it back on.
-Rules, commands, skills and agents have no documented switch, so their files are removed.
+Rules, commands, skills, agents and output styles have no documented switch, so their files are removed.
 
 **Env references.** `${NAME}` takes its value from the environment. `${NAME:-fallback}`
 falls back to a non-secret default (it is written to disk wherever the variable is unset, so
@@ -527,6 +529,57 @@ Apply is additive and undo removes only the files kitbag wrote. From a git sourc
 snippet is skipped unless you pass `--trust-source`. A plain
 `tools` list only narrows what an agent may use, so it doesn't count. The plan warns about
 such agents in a local profile.
+
+### Output styles: `output-styles/<name>.md`
+
+Output styles set Claude's role, tone and response format for a whole session. Only
+**Claude Code** has them as a file (no other target is written: see below). Claude Code's
+[output styles page](https://code.claude.com/docs/en/output-styles) (checked 2026-11-27) says
+a custom style is "a Markdown file: frontmatter for metadata, then the instructions for
+Claude", saved at one of three levels: user `~/.claude/output-styles`, project
+`.claude/output-styles`, and managed policy (`.claude/output-styles` inside the managed
+settings directory, which kitbag never writes). The file name is the style's name unless `name`
+is set in the frontmatter, and all frontmatter fields are optional: `name`, `description`,
+`keep-coding-instructions` (default `false`) and `force-for-plugin` (plugin styles only).
+
+```markdown
+---
+name: Diagrams first
+description: Lead every explanation with a diagram
+keep-coding-instructions: true
+---
+
+When explaining code, start with a Mermaid diagram, then explain in prose.
+```
+
+Capture reads `*.md` files in the folder itself (the docs name no subfolders, so a nested
+file is skipped with a note), skips a `README.md`, and keeps `description` and every other
+frontmatter key as it is. A file name with characters kitbag's names don't allow (a space) is
+flattened (`My style.md` becomes `My-style.md`) and gets `name: My style` so Claude Code still
+calls the style what it did. Apply writes `<name>.md` to `~/.claude/output-styles/`
+(`$CLAUDE_CONFIG_DIR/output-styles/`) or the project's `.claude/output-styles/`.
+
+The `outputStyle` setting (`~/.claude/settings.json` or the project's `.claude/settings.json`;
+the docs say `/output-style` itself saves to `.claude/settings.local.json`, which kitbag does not
+read) is carried in `[settings.claude-code]` like the other settings, whatever it names: a
+built-in style (`Proactive`, `Concise`, `Explanatory`, `Learning`, `default`), a style in the
+profile, or one kitbag has no file for (a plugin's or a managed one), which is kept with a
+note, since Claude Code falls back to its default style when it can't find the name. The
+value is case-sensitive in Claude Code.
+
+Apply is additive and undo removes only the files and keys kitbag wrote. The style text is a
+prompt sent with every request, so `kitbag diff` shows it in full, including for a git
+source; capture redacts secrets in it and `kitbag doctor` flags any left in a profile. A
+style has no way to run commands, so a git source's styles are not held back (review them
+anyway: they steer everything Claude says). `targets` / `disabled_on` in the frontmatter work as
+for the other items, and `kitbag disable output-style:<name>` sets them.
+
+Other tools: Hermes Agent's docs name a comparable feature (`agent.personalities` in
+`config.yaml`, picked with `display.personality`, and `SOUL.md`), and Grok Build's name
+`personas/*.toml` without a format; neither is written yet, and no style text is folded into
+instructions files. Codex's `personality` setting is documented as deprecated, Gemini CLI's
+`system.md` replaces the whole system prompt, and Roo Code's custom modes also set tool access.
+The other targets' docs describe only ordinary rules or instructions files.
 
 ### Hooks: `[[hooks]]` in `kitbag.toml`, and `hooks/`
 
@@ -1224,7 +1277,7 @@ wrapping of their own.
 |---|---|
 | `kitbag init [DIR]` | Write a commented starter profile |
 | `kitbag capture [--from IDS] [-o DIR] [--dry-run] [--force] [--prune] [--include hooks]` | Read the current setup into a profile (secrets redacted). Writes only into a new or empty directory. `--force` replaces an existing profile's files and leaves anything else in the directory alone; the profile's MCP servers (and rules, commands, skills and agents with `targets` / `disabled_on`) found in no tool are kept unless `--prune`. With several tools, one whose config can't be read is reported and the rest are captured |
-| `kitbag disable ITEM [--on IDS] [PROFILE]`, `kitbag enable ...` | Turn an MCP server, rule, command, skill or agent off or on for some tools (default: all) by editing its `targets` / `disabled_on` in a local profile; applies nothing |
+| `kitbag disable ITEM [--on IDS] [PROFILE]`, `kitbag enable ...` | Turn an MCP server, rule, command, skill, agent or output style off or on for some tools (default: all) by editing its `targets` / `disabled_on` in a local profile; applies nothing |
 | `kitbag diff <SOURCE> [--to IDS] [--exit-code]` | Show exactly what `apply` would change; never writes |
 | `kitbag apply <SOURCE> [--to IDS] [--yes] [--dry-run] [--apply-hooks]` | Plan, confirm, write with backups; hooks only with `--apply-hooks` (and, from a git source, `--trust-source`) |
 | `kitbag inspect <SOURCE> [--to IDS] [--json]` | What a profile or plugin holds, what in it runs commands, reads env vars, installs executables or connects to the network, and (for the tools in `--to`, default `detected`) which files `apply` would write; never writes or starts anything |
@@ -1708,12 +1761,11 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   `.agent.md` wins over a `.md`, and an agent over a chat mode. Agents VS Code keeps in its
   own profile storage aren't read. Copilot's own MCP and folder trust prompts are left alone.
 - Apply is additive and doesn't delete entries that were removed from the profile (see above).
-- **Not carried yet:** output styles (`output-styles/`);
-  hooks only for Claude Code, and only with `--include hooks` (see
+- **Not carried yet:** hooks only for Claude Code, and only with `--include hooks` (see
   [Hooks](#hooks-hooks-in-kitbagtoml-and-hooks)). Capture lists what it found of these and
-  leaves them out. It also drops
-  `outputStyle` when it names a custom style (built-ins such as `Explanatory` are kept),
-  since the style file wouldn't be in the profile.
+  leaves them out. Output styles are carried for Claude Code (see
+  [Output styles](#output-styles-output-stylesnamemd)), and `outputStyle` is kept even when it
+  names a style kitbag has no file for.
 - **Encodings.** Capture reads UTF-8 (with or without a byte-order mark) and UTF-16 with a
   byte-order mark. Instructions, rules and commands in any other encoding are skipped with a
   warning. Skill supporting files are copied byte for byte. A UTF-8 byte-order mark at the

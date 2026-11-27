@@ -11,7 +11,8 @@ use crate::edit::block;
 use crate::edit::json::JsonDoc;
 use crate::frontmatter;
 use crate::model::{
-    Agent, Command, McpServer, Profile, Rule, RuleMode, Skill, SkillFile, Transport, is_valid_name,
+    Agent, Command, McpServer, OutputStyle, Profile, Rule, RuleMode, Skill, SkillFile, Transport,
+    is_valid_name,
 };
 use crate::plan_fs::{decode_text, join_rel, read_opt, subdirs, walk_confined, walk_files};
 use crate::policy;
@@ -106,6 +107,30 @@ pub fn write_agent(
         work.changed_items
             .push((target.to_string(), format!("agent {name}")));
         record_file(work, target, path, format!("agent {name}"), content);
+    }
+    Ok(())
+}
+
+/// Write one output style file, noting it for `kitbag status`.
+pub fn write_output_style(
+    work: &mut Work,
+    path: &Path,
+    content: &[u8],
+    opts: &ApplyOptions,
+    target: &str,
+    name: &str,
+) -> Result<()> {
+    let item = format!("output-style {name}");
+    if write_owned(
+        work,
+        path,
+        content,
+        opts,
+        target,
+        &format!("output style '{name}'"),
+    )? {
+        work.changed_items.push((target.to_string(), item.clone()));
+        record_file(work, target, path, item, content);
     }
     Ok(())
 }
@@ -1795,6 +1820,33 @@ pub fn add_agent(cap: &mut Captured, mut a: Agent, target: &str) -> bool {
     }
     a.body = body;
     cap.profile.agents.push(a);
+    true
+}
+
+/// Add a captured output style, redacting secrets; the first one of a name
+/// wins. Returns whether it was added.
+pub fn add_output_style(cap: &mut Captured, mut o: OutputStyle, target: &str) -> bool {
+    if cap.profile.output_styles.iter().any(|x| x.name == o.name) {
+        return false;
+    }
+    let (body, mut kinds) = redact_text(&o.body);
+    redact_opt(&mut o.description, &mut kinds);
+    for v in o.extra.values_mut() {
+        kinds.extend(crate::secrets::redact_json_strings(v));
+    }
+    kinds.dedup();
+    if !kinds.is_empty() {
+        cap.warn(
+            target,
+            format!(
+                "redacted {} from output style '{}'",
+                kinds.join(", "),
+                o.name
+            ),
+        );
+    }
+    o.body = body;
+    cap.profile.output_styles.push(o);
     true
 }
 

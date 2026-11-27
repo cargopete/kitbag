@@ -169,7 +169,7 @@ enum Cmd {
         #[command(flatten)]
         apply: ApplyArgs,
     },
-    /// Turn an MCP server, rule, command, skill or agent off for one tool, or
+    /// Turn an MCP server, rule, command, skill, agent or output style off for one tool, or
     /// all of them, in a profile on this machine (sets 'disabled_on' /
     /// 'targets'; applies nothing, run 'kitbag apply' after)
     #[command(after_help = TOGGLE_HELP)]
@@ -177,7 +177,7 @@ enum Cmd {
         #[command(flatten)]
         args: ToggleArgs,
     },
-    /// Turn an MCP server, rule, command, skill or agent back on for one
+    /// Turn an MCP server, rule, command, skill, agent or output style back on for one
     /// tool, or all of them, in a profile on this machine (applies nothing,
     /// run 'kitbag apply' after)
     #[command(after_help = TOGGLE_HELP)]
@@ -286,8 +286,8 @@ Examples:
 
 #[derive(Args, Debug, Clone)]
 struct ToggleArgs {
-    /// MCP server, rule, command, skill or agent name; with a prefix
-    /// (mcp:, rule:, command:, skill:, agent:) when the name is not unique
+    /// MCP server, rule, command, skill, agent or output style name; with a prefix
+    /// (mcp:, rule:, command:, skill:, agent:, output-style:) when the name is not unique
     item: String,
     /// Profile directory [default: the current directory]
     profile: Option<String>,
@@ -985,7 +985,7 @@ fn cmd_capture(
             level: adapters::Level::Info,
             target: PROFILE_NOTE.to_string(),
             message: format!(
-                "kept rule(s), command(s), skill(s) and agent(s) of the existing profile that no tool has and that name tools in 'targets' / 'disabled_on': {}; pass --prune to drop them",
+                "kept rule(s), command(s), skill(s), agent(s) and output style(s) of the existing profile that no tool has and that name tools in 'targets' / 'disabled_on': {}; pass --prune to drop them",
                 uncaptured_items.join(", ")
             ),
         });
@@ -1014,12 +1014,13 @@ fn cmd_capture(
         println!("  {} {}", paint(DIM, "read"), tildify(s, &env.home));
     }
     println!(
-        "\n  {} MCP server(s), {} rule(s), {} command(s), {} skill(s){}{}{}{}{}",
+        "\n  {} MCP server(s), {} rule(s), {} command(s), {} skill(s){}{}{}{}{}{}",
         p.mcp_servers.len(),
         p.rules.len(),
         p.commands.len(),
         p.skills.len(),
         agent_count(p),
+        output_style_count(p),
         hook_count(p),
         plugin_count(p),
         if p.instructions.is_some() {
@@ -1253,7 +1254,7 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
             "\n{}",
             paint(
                 YELLOW,
-                "Rules, commands, skills and agents removed (disabled for these tools in the profile; kitbag added them there before):"
+                "Rules, commands, skills, agents and output styles removed (disabled for these tools in the profile; kitbag added them there before):"
             )
         );
         for (target, item) in &plan.removed_items {
@@ -1383,6 +1384,7 @@ fn cmd_inspect(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, as_json: boo
     let commands = names(profile.commands.iter().map(|c| &c.name).collect());
     let skills = names(profile.skills.iter().map(|s| &s.name).collect());
     let agents = names(profile.agents.iter().map(|s| &s.name).collect());
+    let output_styles = names(profile.output_styles.iter().map(|s| &s.name).collect());
     let settings = names(profile.settings.keys().collect());
     let hooks: Vec<String> = profile
         .hooks
@@ -1513,6 +1515,7 @@ fn cmd_inspect(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, as_json: boo
             "commit": resolved.commit,
             "instructions": instructions.map(|(bytes, lines)| json!({"bytes": bytes, "lines": lines})),
             "rules": rules, "commands": commands, "skills": skills, "agents": agents,
+            "output_styles": output_styles,
             "settings": settings,
             "hooks": hooks,
             "plugins": plugins,
@@ -1561,6 +1564,7 @@ fn cmd_inspect(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, as_json: boo
     list("commands", &commands);
     list("skills", &skills);
     list("agents", &agents);
+    list("output styles", &output_styles);
     if !hooks.is_empty() {
         println!("  {:<15}", format!("hooks ({})", hooks.len()));
         for h in &hooks {
@@ -2495,6 +2499,18 @@ fn inventory_rows(
                     .as_ref()
                     .map(|p| p.agents.iter().map(|s| s.name.clone()).collect()),
             ),
+            (
+                Feature::OutputStyles,
+                "output-style",
+                profile
+                    .output_styles
+                    .iter()
+                    .map(|s| s.name.clone())
+                    .collect(),
+                present
+                    .as_ref()
+                    .map(|p| p.output_styles.iter().map(|s| s.name.clone()).collect()),
+            ),
         ] {
             if a.supports(env.scope, feature) == adapters::Support::None {
                 continue;
@@ -2535,12 +2551,14 @@ fn inventory_rows(
                 "rule" => Feature::Rules,
                 "command" => Feature::Commands,
                 "skill" => Feature::Skills,
+                "output-style" => Feature::OutputStyles,
                 _ => Feature::Agents,
             };
             let in_tool = present.as_ref().is_some_and(|p| match s.kind {
                 "rule" => p.rules.iter().any(|x| x.name == s.name),
                 "command" => p.commands.iter().any(|x| x.name == s.name),
                 "skill" => p.skills.iter().any(|x| x.name == s.name),
+                "output-style" => p.output_styles.iter().any(|x| x.name == s.name),
                 _ => p.agents.iter().any(|x| x.name == s.name),
             });
             if !in_tool || a.supports(env.scope, feature) == adapters::Support::None {
@@ -2600,6 +2618,15 @@ fn agent_count(p: &Profile) -> String {
         String::new()
     } else {
         format!(", {} agent(s)", p.agents.len())
+    }
+}
+
+/// `, N output style(s)` for a profile with output styles, else nothing.
+fn output_style_count(p: &Profile) -> String {
+    if p.output_styles.is_empty() {
+        String::new()
+    } else {
+        format!(", {} output style(s)", p.output_styles.len())
     }
 }
 
@@ -3348,12 +3375,13 @@ fn cmd_doctor(
                     visible_line(&resolved.origin)
                 );
                 println!(
-                    "  {} MCP server(s), {} rule(s), {} command(s), {} skill(s){}{}{}{}",
+                    "  {} MCP server(s), {} rule(s), {} command(s), {} skill(s){}{}{}{}{}",
                     p.mcp_servers.len(),
                     p.rules.len(),
                     p.commands.len(),
                     p.skills.len(),
                     agent_count(&p),
+                    output_style_count(&p),
                     hook_count(&p),
                     plugin_count(&p),
                     if p.instructions.is_some() {
@@ -3781,7 +3809,7 @@ fn cmd_list_targets(ctx: &Ctx, as_json: bool) -> Result<i32> {
         "detected",
         header
             .iter()
-            .map(|h| format!("{h:<13}"))
+            .map(|h| format!("{h:<14}"))
             .collect::<String>()
     );
     for a in adapters::all() {
@@ -3795,7 +3823,7 @@ fn cmd_list_targets(ctx: &Ctx, as_json: bool) -> Result<i32> {
         };
         let cells: String = Feature::ALL
             .iter()
-            .map(|f| format!("{:<13}", a.supports(env.scope, *f).as_str()))
+            .map(|f| format!("{:<14}", a.supports(env.scope, *f).as_str()))
             .collect();
         println!(
             "  {:<16} {detected} {cells}",

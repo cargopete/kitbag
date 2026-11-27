@@ -13,7 +13,7 @@ use toml_edit::{DocumentMut, Item, Table, value};
 use crate::edit::toml::{json_to_table, json_to_value};
 use crate::frontmatter::{self, glob_list, opt, string};
 use crate::model::{
-    Agent, Command, FORMAT_VERSION, Hook, McpServer, Profile, Rule, Skill, SkillFile,
+    Agent, Command, FORMAT_VERSION, Hook, McpServer, OutputStyle, Profile, Rule, Skill, SkillFile,
     TARGETING_KEYS, Targeting, is_valid_name, portable_name_issues,
 };
 use crate::secrets::{
@@ -398,6 +398,29 @@ pub fn agent_to_markdown(a: &Agent) -> String {
     frontmatter::render(&entries, &a.body)
 }
 
+pub fn output_style_from_markdown(name: &str, text: &str) -> OutputStyle {
+    let doc = frontmatter::parse(text);
+    OutputStyle {
+        name: name.to_string(),
+        description: string(doc.data.get("description")),
+        extra: doc
+            .data
+            .iter()
+            .filter(|(k, v)| k.as_str() != "description" && !v.is_null())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        body: doc.body.trim().to_string(),
+        ..Default::default()
+    }
+}
+
+/// Output style markdown: `description` first, then the other keys as they were.
+pub fn output_style_to_markdown(o: &OutputStyle) -> String {
+    let mut entries: Vec<(&str, Value)> = vec![("description", opt(&o.description))];
+    entries.extend(o.extra.iter().map(|(k, v)| (k.as_str(), v.clone())));
+    frontmatter::render(&entries, &o.body)
+}
+
 pub fn skill_description(files: &[SkillFile]) -> Option<String> {
     let main = files.iter().find(|f| f.path == "SKILL.md")?;
     let text = String::from_utf8_lossy(&main.content);
@@ -674,6 +697,35 @@ fn load_with_limit(dir: &Path, limit: u64, name_hint: Option<&str>) -> Result<Pr
         );
         p.agents.push(agent);
     }
+    // A plugin's `output-styles/` also holds keys only a plugin can use.
+    let styles = if plugin {
+        Vec::new()
+    } else {
+        list_profile_dir(&dir.join("output-styles"))?
+    };
+    for (file, is_dir) in styles {
+        let Some(stem) = file.strip_suffix(".md") else {
+            continue;
+        };
+        if is_dir {
+            continue;
+        }
+        if !is_valid_name(stem) {
+            issues.push(format!("output-styles/{file}: invalid file name"));
+            continue;
+        }
+        let text =
+            read_profile_text(&dir.join("output-styles").join(&file), budget)?.unwrap_or_default();
+        let mut style = output_style_from_markdown(stem, &text);
+        style.targeting = load_targeting(
+            &mut style.extra,
+            "output-style",
+            &format!("output-styles/{file}"),
+            &mut issues,
+            &mut p.warnings,
+        );
+        p.output_styles.push(style);
+    }
     for (name, is_dir) in list_profile_dir(&dir.join("skills"))? {
         if !is_dir {
             continue;
@@ -836,6 +888,12 @@ pub fn profile_files(p: &Profile) -> BTreeMap<String, Vec<u8>> {
             with(agent_to_markdown(a), &a.targeting).into_bytes(),
         );
     }
+    for o in &p.output_styles {
+        out.insert(
+            format!("output-styles/{}.md", o.name),
+            with(output_style_to_markdown(o), &o.targeting).into_bytes(),
+        );
+    }
     for s in &p.skills {
         for f in &s.files {
             let content = match std::str::from_utf8(&f.content) {
@@ -909,6 +967,7 @@ pub fn keep_item_targeting(new: &mut Profile, old: &Profile) -> Vec<String> {
     keep!(commands, "command");
     keep!(skills, "skill");
     keep!(agents, "agent");
+    keep!(output_styles, "output-style");
     kept
 }
 
@@ -932,6 +991,7 @@ pub fn keep_uncaptured_items(new: &mut Profile, old: &Profile) -> Vec<String> {
     keep!(commands, "command");
     keep!(skills, "skill");
     keep!(agents, "agent");
+    keep!(output_styles, "output-style");
     new.sort();
     kept
 }
@@ -1172,6 +1232,18 @@ pub fn scan_for_secrets(p: &Profile) -> Vec<String> {
             check(at.clone(), d, true);
         }
         for v in a.extra.values() {
+            for s in crate::secrets::json_strings(v) {
+                check(at.clone(), s, true);
+            }
+        }
+    }
+    for o in &p.output_styles {
+        let at = format!("output-styles/{}.md", o.name);
+        check(at.clone(), &o.body, true);
+        if let Some(d) = &o.description {
+            check(at.clone(), d, true);
+        }
+        for v in o.extra.values() {
             for s in crate::secrets::json_strings(v) {
                 check(at.clone(), s, true);
             }
