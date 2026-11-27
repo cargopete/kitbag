@@ -1515,10 +1515,14 @@ is installed without `--trust-source` (the settings are plain data and still app
 names each one withheld. `inspect` lists them among what a profile runs. An id that isn't on the
 list above is dropped with a note, so a hand-written profile can't install anything else.
 
-**Undo restores `settings.json` and `keymap.json`, not extensions.** An extension kitbag installed
-stays installed when you undo; kitbag never uninstalls anything, so nothing you already had can go.
-Remove one yourself with `code --uninstall-extension publisher.extension`. (Recording which
-installs were new, to uninstall them safely on undo, is #143.)
+**Undo restores `settings.json` and `keymap.json`, and uninstalls the extensions that apply
+installed.** kitbag records, on the apply's transaction, each extension it newly and successfully
+installed, and `kitbag undo` runs `code --uninstall-extension` for exactly those. One you already
+had, one that failed to install, one withheld by `--trust-source` and one skipped (no `code`, or
+you declined) is never recorded, so undo never removes it. If `code` is not on `PATH` or the
+uninstall fails, undo says so, leaves that extension installed and still restores the files; one you
+already uninstalled yourself is fine. Transactions recorded by older versions have no list, so
+their undo uninstalls nothing.
 `--home` redirects the files but not `code`: `code` lists and installs for whoever runs kitbag.
 
 **Not carried, and why** (official docs checked 2026-11-27):
@@ -1537,7 +1541,7 @@ installs were new, to uninstall them safely on undo, is #143.)
 - VSCodium: its [site](https://vscodium.com/) names no settings path, keybindings path or
   `codium` command. VS Code Insiders: the profiles page says only that its folder is
   `Code - Insiders` (profiles location), not its settings or command, so it is skipped too.
-- Non-default profiles (`User/profiles/<id>/`), workspace `.vscode/settings.json`, Zed's project
+- Non-default profiles (`User/profiles/<id>/`), Zed's project
   keymap (Zed's keybindings docs, checked 2026-11-27, name only the user file
   `~/.config/zed/keymap.json` / `%APPDATA%\Zed\keymap.json`, not a project keymap),
   Continue as an editor contribution beyond its extension id, and the Experimental

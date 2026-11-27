@@ -495,6 +495,48 @@ pub fn install(cli: &Path, spec: &str) -> Result<(), String> {
     }
 }
 
+/// What `code --uninstall-extension` did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Uninstalled {
+    Removed,
+    /// It was not installed any more (the user removed it themselves).
+    Gone,
+}
+
+/// Uninstall one extension (`code --uninstall-extension publisher.extension`).
+/// An id that is no longer in `--list-extensions` counts as already gone.
+pub fn uninstall(cli: &Path, id: &str) -> Result<Uninstalled, String> {
+    if spec_issue(id).is_some() || split_spec(id).1.is_some() {
+        return Err("not a publisher.extension id".to_string());
+    }
+    let out = Command::new(cli)
+        .arg("--uninstall-extension")
+        .arg(id)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run {}: {e}", cli.display()))?;
+    if out.status.success() {
+        return Ok(Uninstalled::Removed);
+    }
+    if let Ok(list) = list_installed(cli)
+        && !list.iter().any(|l| l.eq_ignore_ascii_case(id))
+    {
+        return Ok(Uninstalled::Gone);
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    let first = err.lines().next().unwrap_or("").trim();
+    Err(format!(
+        "{} failed ({}){}",
+        cli.display(),
+        out.status,
+        if first.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", crate::ui::visible_line(first))
+        }
+    ))
+}
+
 /// Plan the extensions of `set` (already allow-listed): which are installed,
 /// which would be installed, or that the CLI is missing.
 pub fn plan_extensions(

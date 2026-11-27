@@ -414,7 +414,7 @@ mod with_stub {
             let installed = sb.path("code.installed");
             fs::write(&installed, preinstalled.join("\n") + "\n").unwrap();
             let script = format!(
-                "#!/bin/sh\necho \"$@\" >> '{log}'\ncase \"$1\" in\n  --list-extensions) cat '{db}';;\n  --install-extension) echo \"$2\" >> '{db}'; echo \"Extension '$2' was successfully installed.\";;\n  *) echo \"unexpected: $*\" >&2; exit 2;;\nesac\n",
+                "#!/bin/sh\necho \"$@\" >> '{log}'\ncase \"$1\" in\n  --list-extensions) cat '{db}';;\n  --install-extension) echo \"${{2%%@*}}\" >> '{db}'; echo \"Extension '$2' was successfully installed.\";;\n  --uninstall-extension) grep -qxF \"$2\" '{db}' || {{ echo \"Extension '$2' is not installed.\" >&2; exit 1; }};  grep -vxF \"$2\" '{db}' > '{db}.tmp'; mv '{db}.tmp' '{db}'; echo \"Extension '$2' was successfully uninstalled!\";;\n  *) echo \"unexpected: $*\" >&2; exit 2;;\nesac\n",
                 log = log.display(),
                 db = installed.display()
             );
@@ -523,7 +523,7 @@ mod with_stub {
     }
 
     #[test]
-    fn apply_lists_every_extension_installs_only_the_missing_and_undo_keeps_them() {
+    fn apply_lists_every_extension_installs_only_the_missing_and_undo_removes_only_those() {
         let sb = Sandbox::empty();
         let stub = Stub::new(&sb, &["continue.continue"]);
         let dir = profile_dir(&sb);
@@ -564,15 +564,20 @@ mod with_stub {
             s.contains("\"chat.agent.maxRequests\": 40") && s.contains("editor.fontSize"),
             "{s}"
         );
-        // Undo restores settings.json and uninstalls nothing.
+        // Undo restores settings.json and uninstalls only what this apply installed.
         let (ok, out) = run(&mut cli(&sb, Some(&stub)), &["undo"]);
         assert!(ok, "{out}");
         assert_eq!(sb.read(super::cli_vscode_settings()), before);
-        assert!(!stub.calls().contains("uninstall"));
+        let calls = stub.calls();
         assert!(
-            fs::read_to_string(&stub.installed)
+            calls.contains("--uninstall-extension saoudrizwan.claude-dev\n"),
+            "{calls}"
+        );
+        assert!(!calls.contains("--uninstall-extension Continue"), "{calls}");
+        assert!(
+            !fs::read_to_string(&stub.installed)
                 .unwrap()
-                .contains("saoudrizwan.claude-dev@3.0.0")
+                .contains("saoudrizwan")
         );
         assert!(out.contains("Undid"), "{out}");
     }
@@ -725,6 +730,116 @@ mod with_stub {
             stub.calls(),
             "",
             "Zed installs its own extensions; no editor command is run"
+        );
+    }
+
+    fn two_ext_profile(sb: &Sandbox) {
+        write(
+            sb,
+            "prof/kitbag.toml",
+            "kitbag = 1\nname = \"p\"\n[editor.vscode]\nextensions = [\"Continue.continue\", \"RooVeterinaryInc.roo-cline\"]\n[editor.vscode.settings]\n\"chat.agent.enabled\" = true\n",
+        );
+    }
+
+    #[test]
+    fn undo_uninstalls_only_what_the_apply_installed() {
+        let sb = Sandbox::empty();
+        let stub = Stub::new(&sb, &["Continue.continue"]);
+        two_ext_profile(&sb);
+        let (ok, out) = run(
+            &mut cli(&sb, Some(&stub)),
+            &["apply", "prof", "--to", "vscode", "--yes"],
+        );
+        assert!(ok, "{out}");
+        let (ok, out) = run(&mut cli(&sb, Some(&stub)), &["undo"]);
+        assert!(ok, "{out}");
+        let calls = stub.calls();
+        assert!(
+            calls.contains("--uninstall-extension RooVeterinaryInc.roo-cline"),
+            "{calls}"
+        );
+        assert!(
+            !calls.contains("--uninstall-extension Continue.continue"),
+            "{calls}"
+        );
+        let db = fs::read_to_string(&stub.installed).unwrap();
+        assert!(db.contains("Continue.continue"), "{db}");
+        assert!(!db.contains("roo-cline"), "{db}");
+        assert!(!sb.path(super::cli_vscode_settings()).exists());
+    }
+
+    #[test]
+    fn undo_without_code_restores_files_and_says_the_extension_stays() {
+        let sb = Sandbox::empty();
+        let stub = Stub::new(&sb, &[]);
+        two_ext_profile(&sb);
+        let (ok, out) = run(
+            &mut cli(&sb, Some(&stub)),
+            &["apply", "prof", "--to", "vscode", "--yes"],
+        );
+        assert!(ok, "{out}");
+        let (_, out) = run(&mut cli(&sb, None), &["undo"]);
+        assert!(out.contains("Undid"), "{out}");
+        assert!(out.contains("`code` is not on PATH"), "{out}");
+        assert!(out.contains("left installed"), "{out}");
+        assert!(out.contains("RooVeterinaryInc.roo-cline"), "{out}");
+        assert!(!sb.path(super::cli_vscode_settings()).exists());
+        assert!(
+            !stub.calls().contains("--uninstall-extension"),
+            "{}",
+            stub.calls()
+        );
+    }
+
+    #[test]
+    fn an_extension_the_user_already_removed_is_fine_on_undo() {
+        let sb = Sandbox::empty();
+        let stub = Stub::new(&sb, &[]);
+        two_ext_profile(&sb);
+        let (ok, out) = run(
+            &mut cli(&sb, Some(&stub)),
+            &["apply", "prof", "--to", "vscode", "--yes"],
+        );
+        assert!(ok, "{out}");
+        fs::write(&stub.installed, "").unwrap();
+        let (ok, out) = run(&mut cli(&sb, Some(&stub)), &["undo"]);
+        assert!(ok, "{out}");
+        assert!(out.contains("already uninstalled"), "{out}");
+    }
+
+    #[test]
+    fn a_withheld_or_declined_install_is_not_recorded_or_uninstalled() {
+        if !has_git() {
+            return;
+        }
+        let sb = Sandbox::empty();
+        let stub = Stub::new(&sb, &[]);
+        let mut p = super::manifest(super::PROFILE).unwrap();
+        p.editor.remove("zed");
+        let url = sb.git_profile("remote", &[("kitbag.toml", &profile_io::manifest_toml(&p))]);
+        // Withheld: no --trust-source.
+        let (ok, out) = run(
+            &mut cli(&sb, Some(&stub)),
+            &["apply", &url, "--to", "vscode", "--yes"],
+        );
+        assert!(ok, "{out}");
+        let (ok, out) = run(&mut cli(&sb, Some(&stub)), &["undo"]);
+        assert!(ok, "{out}");
+        assert!(
+            !stub.calls().contains("--uninstall-extension"),
+            "{}",
+            stub.calls()
+        );
+        // Declined: no terminal and no --yes refuses before anything is recorded.
+        let (ok, _) = run(
+            &mut cli(&sb, Some(&stub)),
+            &["apply", &url, "--to", "vscode", "--trust-source"],
+        );
+        assert!(!ok);
+        assert!(
+            !stub.calls().contains("--install-extension"),
+            "{}",
+            stub.calls()
         );
     }
 }
