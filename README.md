@@ -10,7 +10,7 @@ from the AI coding tools you already use. It stores them as a small, git-friendl
 redacted and applies that profile to any other tool in one step. Claude Code, Cursor,
 OpenAI Codex CLI, Gemini CLI, Claude Desktop, Google Antigravity, opencode (the last two
 for MCP servers and instructions), GitHub Copilot (MCP servers, instructions, rules, prompt files and skills)
-xAI's Grok Build CLI, Windsurf, Zed and Hermes Agent (the last three for MCP servers and instructions) are supported, at user and
+xAI's Grok Build CLI, Windsurf, Zed and Hermes Agent (the last three for MCP servers and instructions; Hermes also for shell hooks) are supported, at user and
 project scope.
 
 > [!IMPORTANT]
@@ -444,7 +444,7 @@ such agents in a local profile.
 
 Hooks are commands a tool runs by itself on an event (before a tool call, when a session
 starts ...). That makes them as sensitive as an MCP server's command, so kitbag carries them
-only when you ask, at every step. **Seven targets carry them**, each in the file its own docs
+only when you ask, at every step. **Eight targets carry them**, each in the file its own docs
 name; the others **warn in the plan that the hooks were not written there** (they are never
 dropped silently):
 
@@ -457,14 +457,13 @@ dropped silently):
 | `grok-build` | `$GROK_HOME/hooks/kitbag.json` (default `~/.grok/`) / `.grok/hooks/kitbag.json` | `hooks/kitbag/` next to it | [hooks](https://docs.x.ai/build/features/hooks) |
 | `antigravity` | `~/.gemini/config/hooks.json` / `.agents/hooks.json`, as a hook named `kitbag` | `~/.gemini/config/hooks/kitbag/` | [hooks](https://antigravity.google/docs/hooks) |
 | `copilot` | `$COPILOT_HOME/hooks/kitbag.json` (default `~/.copilot/`) / `.github/hooks/kitbag.json` | `hooks/kitbag/` next to it | [hooks reference](https://docs.github.com/copilot/reference/hooks-reference) |
-| `claude-desktop`, `opencode`, `windsurf`, `zed`, `hermes` | not carried: warn | none | see below |
+| `hermes` | `$HERMES_HOME/config.yaml` `hooks:` (default `~/.hermes/`), user scope only; shell hooks only | `agent-hooks/kitbag/` next to it | [hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks) |
+| `claude-desktop`, `opencode`, `windsurf`, `zed` | not carried: warn | none | see below |
 
 Claude Desktop has no hook configuration of its own. opencode runs hooks only as
 JavaScript/TypeScript plugins, which kitbag doesn't write. Windsurf's docs now point to Devin
 Desktop's `.devin/hooks.v1.json` and give no user-level path or event list, so its hooks are
-not verified and not written. Zed has no hook file kitbag has verified against its docs. Hermes
-documents [shell hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks)
-in `config.yaml` (and gateway, plugin and outbound hook systems) that kitbag doesn't write yet. Capture reads a Grok Build or Copilot directory's every
+not verified and not written. Zed has no hook file kitbag has verified against its docs. Capture reads a Grok Build or Copilot directory's every
 `*.json`, and every hook of an Antigravity file that isn't `enabled: false`; apply writes
 Grok Build's and Copilot's own `kitbag.json` and Antigravity's own `kitbag` hook, so undo
 removes only that. The tools keep their own approval steps: Codex skips a new or changed hook
@@ -503,6 +502,33 @@ each tool gets only those its docs list (Cursor `failClosed` and `loop_limit`, C
 (with a note), except labels such as `statusMessage`, which are left off. Gemini CLI takes
 `timeout` in milliseconds and Copilot `timeoutSec`; kitbag converts. In a project, Antigravity's docs say nothing about what a hook command runs relative to, so a
 hook that runs a script there is not written (user scope works).
+
+**Hermes Agent** has four hook systems; kitbag carries only its
+[shell hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks), the `hooks:`
+block of `config.yaml`, where each event (`pre_tool_call`, `post_tool_call`, `pre_llm_call`,
+`on_session_start` ...) has a list of `{matcher, command, timeout, fail_closed}` entries. Hermes
+documents no project hook file, so hooks are written at user scope only (at project scope the
+plan says so and writes nothing); `HERMES_HOME` is honoured. The neutral events it has an
+equivalent for are `session-start` (`on_session_start`), `session-end` (`on_session_finalize`,
+the teardown; Hermes's `on_session_end` fires after every turn, so it is `hermes:on_session_end`),
+`prompt-submit` (`pre_llm_call`, which Hermes's docs name as the counterpart of Claude Code's
+`UserPromptSubmit`), `pre-tool`, `post-tool`, `subagent-start`, `subagent-stop` and
+`post-compact` (`post_compaction`); `stop`, `post-tool-failure`, `notification`,
+`permission-request` and `pre-compact` have none and are reported, and its other events are
+`hermes:<event>` (`hermes:post_llm_call`). A matcher is written only for `pre_tool_call` and
+`post_tool_call`, the events Hermes applies it to; its `fail_closed` (and Cursor's `failClosed`)
+is kept. kitbag edits `config.yaml` in place: the entries of an event it adds to are rewritten
+(comments inside that event's list go), and your other events, `hooks_auto_accept`, MCP servers
+and comments stay; a layout it can't edit in place (for example `hooks:` written as a one-line
+flow mapping) is reported and left alone. Scripts go to `~/.hermes/agent-hooks/kitbag/`, the
+directory Hermes's docs suggest, and never to `~/.hermes/hooks/`, where Hermes loads gateway
+hooks. **Hermes asks you to approve each new hook** (`hermes chat` prompts the first time; the
+gateway, cron and CI need `--accept-hooks`, `HERMES_ACCEPT_HOOKS=1` or an entry in
+`shell-hooks-allowlist.json`), and kitbag neither writes that file nor sets `hooks_auto_accept`,
+so applied hooks wait for your approval (`hermes hooks list`). Not carried, and left as they
+are: **outbound webhooks** (`hooks.outbound` in the same block, never overwritten or removed),
+**gateway hooks** (`~/.hermes/hooks/<name>/HOOK.yaml` + `handler.py`) and **plugin hooks**
+(`ctx.register_hook()`); capture warns when it finds any of them.
 
 **Capture** (`kitbag capture --include hooks`). Without the flag, hooks are counted and left
 out, as before. With it, kitbag reads the hooks of every tool in the table above, from the
@@ -1181,7 +1207,8 @@ No further candidates are named here; open an issue for the tool you miss.
   one, since Hermes loads that before `AGENTS.md`, otherwise to `AGENTS.md`, with a warning when
   an `AGENTS.override.md` would shadow it. `.env`, `auth.json` and `mcp-tokens/` are never read
   or written (capture warns when it finds them), and Hermes's skills, memories, sessions and
-  profiles are not carried yet.
+  profiles are not carried yet. Its shell hooks (the `hooks:` block of `config.yaml`) are carried
+  with `--include hooks` / `--apply-hooks` (see Hooks above).
 - **GitHub Copilot** and Claude Code both read a project's `.mcp.json`. kitbag writes it in
   Claude Code's shape for both (no `cwd`, no `tools`; a `cwd` is dropped with a warning), so
   applying both writes each server once, and a server the profile keeps off one of them stays
