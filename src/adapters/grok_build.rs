@@ -9,7 +9,10 @@
 //! * MCP: `[mcp_servers.<name>]` tables in `$GROK_HOME/config.toml` or a
 //!   project's `.grok/config.toml` (a project server replaces a user one of the
 //!   same name). `command`/`args`/`env`/`cwd` for stdio, `url`/`headers` for
-//!   streamable HTTP; `enabled = false` turns one off. Grok expands `${VAR}` and
+//!   streamable HTTP, plus `type = "sse"` (or a URL ending in `/sse`) for SSE;
+//!   `bearer_token_env_var` names a variable holding a bearer token.
+//!   `enabled = false`, or the name in the user config's
+//!   `disabled_mcp_servers`, turns one off. Grok expands `${VAR}` and
 //!   `${VAR:-default}` itself, so references are written as they are.
 //! * Instructions: `$GROK_HOME/AGENTS.md` and `AGENTS.md` in each directory
 //!   from the repo root down (shared with Codex, Cursor, Antigravity and
@@ -24,8 +27,10 @@
 //! * Project files load only in folders the user has trusted.
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use anyhow::Result;
+use regex::Regex;
 use serde_json::{Map, Value, json};
 use toml_edit::Item;
 
@@ -42,7 +47,7 @@ use crate::edit::toml::{
 };
 use crate::model::{McpServer, Profile, Rule, RuleMode, Transport, is_valid_name};
 use crate::profile_io::{command_to_markdown, rule_from_markdown, rule_to_markdown};
-use crate::secrets::{RefStyle, reference};
+use crate::secrets::{RefStyle, reference, sole_ref};
 
 const ID: &str = "grok-build";
 /// Server keys kitbag writes; anything else (timeouts, oauth, setup) is preserved.
@@ -54,8 +59,11 @@ const MANAGED_KEYS: &[&str] = &[
     "url",
     "headers",
     "bearer_token_env_var",
+    "type",
     "enabled",
 ];
+static BEARER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^Bearer\s+(.+)$").expect("valid regex"));
 /// Lines kitbag puts at the top of a rule body to say when it applies; Grok
 /// strips frontmatter from rule files, so this is what the model sees.
 const APPLIES_PREFIX: &str = "_Applies when working with files matching: ";
@@ -183,7 +191,7 @@ fn capture_rules(cap: &mut Captured, dir: &Path) {
 }
 
 /// Render one profile server as a Grok `[mcp_servers.<name>]` table.
-fn grok_server(name: &str, s: &McpServer, work: &mut Work) -> Option<Map<String, Value>> {
+fn grok_server(s: &McpServer) -> Map<String, Value> {
     let mut t = Map::new();
     match s.transport() {
         Transport::Stdio => {
@@ -201,27 +209,40 @@ fn grok_server(name: &str, s: &McpServer, work: &mut Work) -> Option<Map<String,
                 t.insert("cwd".into(), json!(cwd));
             }
         }
-        Transport::Http => {
+        Transport::Http | Transport::Sse => {
             t.insert("url".into(), json!(s.url.clone().unwrap_or_default()));
-            if !s.headers.is_empty() {
-                t.insert("headers".into(), json!(s.headers));
+            if s.transport() == Transport::Sse {
+                t.insert("type".into(), json!("sse"));
             }
-        }
-        Transport::Sse => {
-            work.warn(
-                ID,
-                format!("MCP server '{name}': Grok Build's config.toml takes stdio and streamable HTTP servers; SSE server skipped"),
-            );
-            return None;
+            let mut headers = Map::new();
+            for (k, v) in &s.headers {
+                // `Authorization: Bearer ${VAR}` is Grok's own bearer_token_env_var,
+                // which is what capture reads back.
+                let bearer = BEARER
+                    .captures(v)
+                    .and_then(|c| sole_ref(&c[1]))
+                    .filter(|r| r.fallback.is_none());
+                match bearer {
+                    Some(r) if k.eq_ignore_ascii_case("authorization") => {
+                        t.insert("bearer_token_env_var".into(), json!(r.name));
+                    }
+                    _ => {
+                        headers.insert(k.clone(), json!(v));
+                    }
+                }
+            }
+            if !headers.is_empty() {
+                t.insert("headers".into(), Value::Object(headers));
+            }
         }
     }
     if s.disabled {
         t.insert("enabled".into(), json!(false));
     }
-    Some(t)
+    t
 }
 
-fn import(cap: &mut Captured, name: &str, def: &Map<String, Value>) {
+fn import(cap: &mut Captured, name: &str, def: &Map<String, Value>, listed_off: bool) {
     let mut headers = string_map(def.get("headers"));
     if let Some(var) = str_of(def.get("bearer_token_env_var")) {
         headers
@@ -231,7 +252,7 @@ fn import(cap: &mut Captured, name: &str, def: &Map<String, Value>) {
     let dropped: Vec<&str> = def
         .keys()
         .map(String::as_str)
-        .filter(|k| !MANAGED_KEYS.contains(k))
+        .filter(|k| !MANAGED_KEYS.contains(k) && !["urlTemplate", "url_template"].contains(k))
         .collect();
     if !dropped.is_empty() {
         cap.info(
@@ -245,17 +266,35 @@ fn import(cap: &mut Captured, name: &str, def: &Map<String, Value>) {
     let url = str_of(def.get("url"))
         .or_else(|| str_of(def.get("urlTemplate")))
         .or_else(|| str_of(def.get("url_template")));
+    // Grok's own rule: `type = "sse"`, or a URL ending in /sse, is SSE.
+    let sse = def.get("command").is_none()
+        && (str_of(def.get("type")).is_some_and(|t| t.eq_ignore_ascii_case("sse"))
+            || url.as_deref().is_some_and(|u| u.ends_with("/sse")));
     let s = McpServer {
+        transport: sse.then_some(Transport::Sse),
         command: str_of(def.get("command")),
         args: string_list(def.get("args")),
         env: string_map(def.get("env")),
         cwd: str_of(def.get("cwd")),
         url,
         headers,
-        disabled: def.get("enabled") == Some(&Value::Bool(false)),
+        disabled: listed_off || def.get("enabled") == Some(&Value::Bool(false)),
         ..Default::default()
     };
     import_server(cap, ID, name, s, false);
+}
+
+/// Names in config.toml's top-level `disabled_mcp_servers` (what `grok mcp
+/// disable` writes): Grok keeps those servers off whatever their entry says.
+fn disabled_list(doc: &toml_edit::DocumentMut) -> Vec<String> {
+    doc.get("disabled_mcp_servers")
+        .and_then(Item::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Does `path` (as planned so far) hold this profile's managed instructions block?
@@ -318,10 +357,12 @@ impl Adapter for GrokBuild {
             cap.sources.push(p.config.clone());
             let doc = parse(Some(&text), &p.config)?;
             let servers = doc.get("mcp_servers").map(item_to_json);
+            let off = disabled_list(&doc);
             for (name, def) in
                 server_entries(&mut cap, ID, &p.config, "mcp_servers", servers.as_ref())
             {
-                import(&mut cap, name, def);
+                let listed_off = off.iter().any(|n| n == name);
+                import(&mut cap, name, def, listed_off);
             }
         }
         capture_instructions(&mut cap, &p.instructions, ID)?;
@@ -372,9 +413,7 @@ impl Adapter for GrokBuild {
         let mut wanted: Vec<(String, Map<String, Value>)> = Vec::new();
         for (name, s) in servers_for(profile, ID, work, true) {
             let s = render_server(s, RefStyle::Dollar, env, work);
-            if let Some(t) = grok_server(name, &s, work) {
-                wanted.push((name.clone(), t));
-            }
+            wanted.push((name.clone(), grok_server(&s)));
         }
         for name in skipped_servers(work, ID) {
             let cur = doc
@@ -386,6 +425,15 @@ impl Adapter for GrokBuild {
             {
                 t.remove(&name);
                 changed = true;
+            }
+        }
+        let off = disabled_list(&doc);
+        for (name, want) in &wanted {
+            if want.get("enabled") != Some(&json!(false)) && off.contains(name) {
+                work.warn(
+                    ID,
+                    format!("MCP server '{name}' is listed in disabled_mcp_servers in {}, so Grok Build keeps it off; `grok mcp enable {name}` turns it back on", p.config.display()),
+                );
             }
         }
         if !wanted.is_empty() {

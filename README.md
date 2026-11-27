@@ -130,7 +130,7 @@ How each tool receives `${VAR}` references:
 | Antigravity | resolved value (its docs describe no interpolation); remote servers get `serverUrl`, SSE servers are skipped | yes, unless `--secrets never` |
 | opencode | `{env:VAR}` (expanded by opencode; defaults resolved at apply time); SSE servers are skipped | no |
 | GitHub Copilot | `${VAR}` / `${VAR:-default}` (expanded by Copilot); capture also reads `${env:VAR}` from `.vscode/mcp.json` | no |
-| Grok Build | `${VAR}` / `${VAR:-default}` (expanded by Grok Build); capture also reads `bearer_token_env_var` as an `Authorization` header; SSE servers are skipped | no |
+| Grok Build | `${VAR}` / `${VAR:-default}` (expanded by Grok Build); an `Authorization: Bearer ${VAR}` header is written as `bearer_token_env_var = "VAR"` and read back the same way; SSE servers get `type = "sse"`, and capture reads a server named in `disabled_mcp_servers` as disabled | no |
 
 ## The profile format
 

@@ -1679,10 +1679,12 @@ fn grok_build_apply_user() {
     assert!(cfg.contains("[mcp_servers.github]"), "{cfg}");
     // Grok expands references itself: written as they are, nothing resolved.
     assert!(cfg.contains("GITHUB_TOKEN = \"${GITHUB_TOKEN}\""), "{cfg}");
+    // A `Bearer ${VAR}` header is Grok's bearer_token_env_var.
     assert!(
-        cfg.contains("Authorization = \"Bearer ${LINEAR_API_KEY}\""),
+        cfg.contains("bearer_token_env_var = \"LINEAR_API_KEY\""),
         "{cfg}"
     );
+    assert!(!cfg.contains("Authorization"), "{cfg}");
     assert!(p.sensitive.is_empty() && p.missing_env.is_empty());
 
     let agents = planned(&p, &sb.home().join(".grok/AGENTS.md")).unwrap();
@@ -1810,13 +1812,55 @@ fn grok_build_keeps_env_refs_with_defaults_and_writes_disabled_servers() {
         "{cfg}"
     );
     assert!(cfg.contains("enabled = false"), "{cfg}");
-    assert!(!cfg.contains("events"), "{cfg}");
+    // Grok Build speaks SSE when `type = "sse"`.
     assert!(
-        p.notes
+        cfg.contains("[mcp_servers.events]\nurl = \"https://example.com/sse\"\ntype = \"sse\""),
+        "{cfg}"
+    );
+}
+
+#[test]
+fn grok_build_capture_reads_sse_bearer_and_disabled_list_then_reapplies_cleanly() {
+    let sb = Sandbox::empty();
+    let cfg_path = sb.home().join(".grok/config.toml");
+    std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+    let original = "disabled_mcp_servers = [\"gh\"]\n\n[mcp_servers.linear]\ntype = \"sse\"\nurl = \"https://mcp.linear.app/stream\"\ntool_timeout_sec = 30\n\n[mcp_servers.events]\nurl = \"https://example.com/sse\"\n\n[mcp_servers.api]\nurl = \"https://api.example.com/mcp\"\nbearer_token_env_var = \"API_TOKEN\"\nstartup_timeout_sec = 5\n\n[mcp_servers.gh]\ncommand = \"gh-mcp\"\n";
+    std::fs::write(&cfg_path, original).unwrap();
+    let env = sb.env(Scope::User);
+    let p = capture(&["grok-build"], &env).profile;
+    assert_eq!(p.mcp_servers["linear"].transport(), Transport::Sse);
+    assert_eq!(p.mcp_servers["events"].transport(), Transport::Sse);
+    assert_eq!(p.mcp_servers["api"].transport(), Transport::Http);
+    assert_eq!(
+        p.mcp_servers["api"].headers["Authorization"],
+        "Bearer ${API_TOKEN}"
+    );
+    assert!(p.mcp_servers["gh"].disabled);
+
+    // Applying what was just captured adds `type = "sse"` to the server Grok
+    // only knew as SSE from its URL, and leaves everything else alone.
+    apply(&sb, &p, &["grok-build"], &env);
+    let text = std::fs::read_to_string(&cfg_path).unwrap();
+    assert!(
+        text.contains("bearer_token_env_var = \"API_TOKEN\""),
+        "{text}"
+    );
+    assert!(!text.contains("Authorization"), "{text}");
+    assert!(text.contains("tool_timeout_sec = 30"), "{text}");
+    assert!(text.contains("startup_timeout_sec = 5"), "{text}");
+    assert!(text.contains("disabled_mcp_servers = [\"gh\"]"), "{text}");
+    assert!(plan(&p, &["grok-build"], &env).changes.is_empty());
+
+    // An enabled server Grok keeps off through the list gets a warning.
+    let mut on = p.clone();
+    on.mcp_servers.get_mut("gh").unwrap().disabled = false;
+    let p2 = plan(&on, &["grok-build"], &env);
+    assert!(
+        p2.notes
             .iter()
-            .any(|n| n.message.contains("SSE server skipped")),
+            .any(|n| n.message.contains("disabled_mcp_servers")),
         "{:?}",
-        p.notes
+        p2.notes
     );
 }
 
