@@ -1363,6 +1363,33 @@ fn grok_named(dir: &Path, os: Os) -> Vec<PathBuf> {
     out
 }
 
+/// On Linux, a file named like one of Grok's instruction files in another
+/// case (`agents.md`) isn't read.
+fn grok_wrong_case(r: &mut Report, dir: &Path, os: Os) {
+    if os != Os::Linux {
+        return;
+    }
+    let Ok(rd) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut names: Vec<String> = rd
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    for n in names {
+        if !GROK_NAMES.contains(&n.as_str())
+            && GROK_NAMES.iter().any(|g| g.eq_ignore_ascii_case(&n))
+        {
+            r.skip(
+                &dir.join(&n),
+                format!("wrong name: Grok Build reads only exact names such as AGENTS.md, not {n}"),
+            );
+        }
+    }
+}
+
 fn grok_build(place: &Place) -> Report {
     let mut r = Report::new("grok-build", "Grok Build");
     let env = place.env;
@@ -1478,7 +1505,7 @@ fn grok_build(place: &Place) -> Report {
                 r.skip(&p, "[compat.claude] agents is off");
             }
         }
-        flag_wrong_case(&mut r, place, d, "AGENTS.md");
+        grok_wrong_case(&mut r, d, env.os);
         grok_rules(
             &mut r,
             &mut seen,

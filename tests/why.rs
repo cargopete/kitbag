@@ -539,3 +539,13 @@ fn grok_build_outside_git_reads_only_the_directory() {
     assert!(!out.contains(&disp(&sb.path("plain/AGENTS.md"))), "{out}");
     assert!(out.contains("not inside a git repository"), "{out}");
 }
+
+#[test]
+fn grok_build_reads_agents_md_in_any_of_its_spellings() {
+    let sb = Sandbox::empty();
+    let dir = sb.path("proj");
+    write(&dir.join("Agents.md"), "# mixed case\n");
+    let out = why(&sb, &dir, "grok-build");
+    line_with(&out, &dir.join("Agents.md"), "load 1");
+    assert!(!out.contains("wrong name"), "{out}");
+}
