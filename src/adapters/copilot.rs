@@ -32,8 +32,8 @@
 //!   always on gets `applyTo: "**"`; an on-demand rule gets no `applyTo`.
 //! * Commands: VS Code prompt files, `.github/prompts/<name>.prompt.md`, at
 //!   project scope only (VS Code keeps user prompt files in its profile
-//!   storage, whose path its docs don't give, and Copilot CLI doesn't read
-//!   prompt files).
+//!   storage, whose path its docs don't give, and Copilot CLI's docs don't
+//!   list prompt files among what it reads).
 //! * Skills: `$COPILOT_HOME/skills/<name>/SKILL.md` and
 //!   `.github/skills/<name>/SKILL.md`, the locations both Copilot CLI and
 //!   VS Code list for Copilot.
