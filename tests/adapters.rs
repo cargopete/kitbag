@@ -1119,12 +1119,14 @@ fn opencode_apply_user() {
     assert!(p.sensitive.is_empty());
     let md = planned(&p, &sb.home().join(".config/opencode/AGENTS.md")).unwrap();
     assert!(md.contains("<!-- kitbag:begin team -->") && md.contains("Use British English."));
-    assert!(!md.contains("kitbag:rule"), "rules are not supported yet");
-    assert!(p.notes.iter().any(|n| n.target == "opencode"
-        && n.message.contains("not supported")
-        && n.message.contains("1 rules")
-        && n.message.contains("1 commands")));
-    assert_eq!(p.changes.len(), 2, "{:?}", p.changes);
+    // opencode has no rule files: rules are folded into AGENTS.md.
+    assert!(
+        md.contains("<!-- kitbag:begin team:rules -->") && md.contains("Strict mode."),
+        "{md}"
+    );
+    let cmd = planned(&p, &sb.home().join(".config/opencode/commands/review.md")).unwrap();
+    assert_eq!(cmd, "---\ndescription: Review\n---\n\nReview $ARGUMENTS\n");
+    assert_eq!(p.changes.len(), 3, "{:?}", p.changes);
 }
 
 #[test]
@@ -1319,14 +1321,9 @@ fn opencode_shares_agents_md_with_codex_cursor_and_antigravity() {
     assert_eq!(text.matches("Use British English.").count(), 1, "{text}");
     assert!(plan(&prof, &["opencode"], &env).changes.is_empty());
     assert!(plan(&prof, &["codex", "opencode"], &env).changes.is_empty());
-    // opencode's capture leaves out the rules Codex folded in.
+    // opencode's rules are AGENTS.md, so the rules Codex folded in are captured.
     let r = capture(&["opencode"], &env);
-    assert!(r.profile.rules.is_empty());
-    assert!(
-        r.notes
-            .iter()
-            .any(|n| n.message.contains("were not captured (ts)"))
-    );
+    assert_eq!(r.profile.rules, prof.rules);
     Store::new(sb.state()).undo(None, false).unwrap();
     assert_eq!(std::fs::read_to_string(&agents).unwrap(), "My own notes.\n");
     assert!(!sb.project().join("opencode.json").exists());

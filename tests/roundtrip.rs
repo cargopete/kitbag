@@ -162,6 +162,18 @@ fn claude_code_to_opencode_user() {
     // ${VAR} references go out as {env:VAR} and come back unchanged.
     assert_eq!(b.mcp_servers, a.mcp_servers);
     assert_eq!(b.instructions, a.instructions);
+    // Skills carry over whole; rules come back out of the folded AGENTS.md;
+    // commands keep their prompt (opencode has no `allowed-tools` or `argument-hint`).
+    assert!(!a.skills.is_empty() && !a.rules.is_empty() && !a.commands.is_empty());
+    assert_eq!(b.skills, a.skills);
+    assert_eq!(b.rules, a.rules);
+    let names = |p: &kitbag::model::Profile| -> Vec<String> {
+        p.commands.iter().map(|c| c.name.clone()).collect()
+    };
+    assert_eq!(names(&b), names(&a));
+    for (x, y) in a.commands.iter().zip(&b.commands) {
+        assert_eq!((&x.description, &x.body), (&y.description, &y.body));
+    }
 }
 
 #[test]

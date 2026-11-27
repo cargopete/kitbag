@@ -1,4 +1,4 @@
-//! opencode: MCP servers and instructions.
+//! opencode: MCP servers, instructions, rules, commands, skills and agents.
 //!
 //! * Config: `~/.config/opencode/opencode.json(c)` (`$XDG_CONFIG_HOME/opencode`
 //!   when that is set) at user scope; `opencode.json(c)` or
@@ -19,10 +19,28 @@
 //!   (project, shared with Codex, Cursor and Antigravity). opencode reads
 //!   `~/.claude/CLAUDE.md` / a project's `CLAUDE.md` only while there is no
 //!   `AGENTS.md`; those belong to Claude Code and are not captured here.
-//! * Rules, commands, skills, agents and plugins are not supported yet.
+//! * Rules: opencode has no rule files (its rules are `AGENTS.md`, plus the
+//!   `instructions` list in its config), so profile rules are folded into
+//!   `AGENTS.md` as labelled sections, as Codex does; capture reads them back.
+//!   The same block in a file shared with Codex is written once.
+//! * Commands: `commands/*.md` in the config dir (`~/.config/opencode`) or in
+//!   `.opencode/`; opencode 1's singular `command/` is read too, and written
+//!   to when it is the one that exists. Frontmatter: `description`, `agent`,
+//!   `model` (`provider/model`) and `subagent` (`subtask` in opencode 1); the
+//!   body is the template (`$ARGUMENTS`, `$1`.., `` !`cmd` ``).
+//! * Skills: `skills/<name>/SKILL.md` (`skill/` in opencode 1) in the same
+//!   places. opencode also reads `.claude/skills` and `.agents/skills`.
+//! * Agents: `agents/<name>.md` (`agent/` in opencode 1). The body is the
+//!   system prompt. Only frontmatter keys opencode documents are written;
+//!   keys from other tools (`tools` lists, `permissionMode`, `hooks` ...) are
+//!   left out with a note rather than translated. `mode/` and `modes/` (opencode
+//!   1 primary agents), agents and commands defined inside `opencode.json`
+//!   and plugins are not captured.
 //!
 //! Docs: <https://opencode.ai/docs/config/>, <https://opencode.ai/docs/mcp-servers/>,
-//! <https://opencode.ai/docs/rules/>, <https://opencode.ai/docs/migrate-v1/>.
+//! <https://opencode.ai/docs/rules/>, <https://opencode.ai/docs/commands/>,
+//! <https://opencode.ai/docs/skills/>, <https://opencode.ai/docs/agents/>,
+//! <https://opencode.ai/docs/migrate-v1/>.
 
 use std::path::{Path, PathBuf};
 
@@ -30,12 +48,17 @@ use anyhow::Result;
 use serde_json::{Map, Value, json};
 
 use super::common::{
-    capture_instructions, import_server, merge_json_servers, render_server, server_entries,
-    servers_for, str_of, string_list, string_map, write_instructions,
+    MdKind, add_agent, capture_instructions, capture_markdown_dir, capture_skills_dir, claim_name,
+    import_server, merge_json_servers, name_from_rel, read_text_item, render_server,
+    server_entries, servers_for, str_of, string_list, string_map, write_agent, write_command,
+    write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
-use crate::model::{McpServer, Profile, Transport};
+use crate::frontmatter;
+use crate::model::{Agent, Command, McpServer, Profile, Transport, is_valid_name};
+use crate::plan_fs::{join_rel, walk_files};
+use crate::profile_io::agent_from_markdown;
 use crate::secrets::{RefStyle, normalize_brace_refs};
 use crate::ui::tildify;
 
@@ -54,6 +77,35 @@ const MANAGED_KEYS: &[&str] = &[
     "enabled",
 ];
 
+/// Command frontmatter keys opencode documents besides `description`
+/// (`subtask` is opencode 1's name for `subagent`, `variant` its separate
+/// model variant). Others, such as Claude Code's `allowed-tools`, mean
+/// nothing to opencode and are left out with a note.
+const COMMAND_KEYS: &[&str] = &["agent", "model", "subagent", "subtask", "variant"];
+/// Agent frontmatter keys opencode documents besides `description`: opencode
+/// 2's (`permissions`, `steps`, `disabled`, `request` ...) and opencode 1's
+/// (`permission`, `maxSteps`, `disable`, `temperature`, `top_p`, `options`,
+/// and `tools`, which is a map there). `prompt` and `system` are JSON-only;
+/// in a file the body is the prompt.
+const AGENT_KEYS: &[&str] = &[
+    "mode",
+    "model",
+    "variant",
+    "permissions",
+    "permission",
+    "steps",
+    "maxSteps",
+    "hidden",
+    "color",
+    "disabled",
+    "disable",
+    "request",
+    "temperature",
+    "top_p",
+    "options",
+    "tools",
+];
+
 pub struct OpenCode;
 
 struct Paths {
@@ -63,6 +115,45 @@ struct Paths {
     instructions: PathBuf,
     /// What opencode reads instead of `instructions` while that doesn't exist.
     fallback: PathBuf,
+    /// Where opencode keeps commands, skills and agents.
+    base: PathBuf,
+}
+
+/// A directory of one kind of item: the current plural name, and opencode 1's
+/// singular one, which opencode 2 still reads.
+struct ItemDir {
+    plural: PathBuf,
+    legacy: PathBuf,
+}
+
+impl ItemDir {
+    fn new(base: &Path, plural: &str, legacy: &str) -> Self {
+        ItemDir {
+            plural: base.join(plural),
+            legacy: base.join(legacy),
+        }
+    }
+    /// Where new files go: the plural directory, unless only the singular one
+    /// exists.
+    fn target(&self) -> &Path {
+        if !self.plural.exists() && self.legacy.is_dir() {
+            &self.legacy
+        } else {
+            &self.plural
+        }
+    }
+}
+
+impl Paths {
+    fn commands(&self) -> ItemDir {
+        ItemDir::new(&self.base, "commands", "command")
+    }
+    fn skills(&self) -> ItemDir {
+        ItemDir::new(&self.base, "skills", "skill")
+    }
+    fn agents(&self) -> ItemDir {
+        ItemDir::new(&self.base, "agents", "agent")
+    }
 }
 
 fn config_dir(env: &Env) -> PathBuf {
@@ -79,6 +170,7 @@ fn paths(env: &Env) -> Paths {
                 configs: vec![d.join("opencode.json"), d.join("opencode.jsonc")],
                 instructions: d.join("AGENTS.md"),
                 fallback: env.home.join(".claude").join("CLAUDE.md"),
+                base: d,
             }
         }
         Scope::Project => {
@@ -93,6 +185,7 @@ fn paths(env: &Env) -> Paths {
                 ],
                 instructions: p.join("AGENTS.md"),
                 fallback: p.join("CLAUDE.md"),
+                base: o,
             }
         }
     }
@@ -192,10 +285,15 @@ impl Adapter for OpenCode {
         Feature::ALL.map(|f| {
             (
                 f,
-                if matches!(f, Feature::Mcp | Feature::Instructions) {
-                    Support::Native
-                } else {
-                    Support::None
+                match f {
+                    Feature::Mcp
+                    | Feature::Instructions
+                    | Feature::Commands
+                    | Feature::Skills
+                    | Feature::Agents => Support::Native,
+                    // No rule files: rules are folded into AGENTS.md.
+                    Feature::Rules => Support::Folded,
+                    _ => Support::None,
                 },
             )
         })
@@ -209,7 +307,13 @@ impl Adapter for OpenCode {
             .find(|c| c.exists())
             .unwrap_or(&p.configs[0])
             .clone();
-        vec![("mcp", config), ("instructions", p.instructions)]
+        vec![
+            ("mcp", config),
+            ("instructions", p.instructions.clone()),
+            ("commands", p.commands().target().to_path_buf()),
+            ("skills", p.skills().target().to_path_buf()),
+            ("agents", p.agents().target().to_path_buf()),
+        ]
     }
 
     fn detect(&self, env: &Env) -> bool {
@@ -250,6 +354,25 @@ impl Adapter for OpenCode {
                     format!("ignored 'mcp' in {}: expected an object", file.display()),
                 ),
             }
+            for (keys, what) in [
+                (["commands", "command"], "commands"),
+                (["agents", "agent"], "agents"),
+            ] {
+                let n: usize = keys
+                    .iter()
+                    .filter_map(|k| doc.get(*k).and_then(Value::as_object))
+                    .map(Map::len)
+                    .sum();
+                if n > 0 {
+                    cap.info(
+                        ID,
+                        format!(
+                            "{n} {what} defined in {} not captured; only {what} kept as markdown files are",
+                            tildify(file, &env.home)
+                        ),
+                    );
+                }
+            }
             if doc
                 .get("instructions")
                 .and_then(Value::as_array)
@@ -265,18 +388,37 @@ impl Adapter for OpenCode {
                 );
             }
         }
+        // Rules folded into AGENTS.md (by kitbag, here or for Codex) come back
+        // as rules; opencode has no rule files of its own.
         capture_instructions(&mut cap, &p.instructions, ID)?;
-        // Rules another tool folded into a shared AGENTS.md (Codex) come back
-        // out of capture_instructions; opencode doesn't carry rules yet.
-        if !cap.profile.rules.is_empty() {
-            let names: Vec<String> = cap.profile.rules.drain(..).map(|r| r.name).collect();
-            cap.info(
-                ID,
-                format!(
-                    "rules folded into opencode's AGENTS.md by another tool were not captured ({}); capture that tool for them",
-                    names.join(", ")
-                ),
-            );
+        let commands = p.commands();
+        for dir in [&commands.plural, &commands.legacy] {
+            capture_markdown_dir(&mut cap, dir, ".md", MdKind::Command, ID)?;
+        }
+        let skills = p.skills();
+        for dir in [&skills.plural, &skills.legacy] {
+            capture_skills_dir(&mut cap, dir, ID)?;
+        }
+        let agents = p.agents();
+        for dir in [&agents.plural, &agents.legacy] {
+            capture_agents(&mut cap, dir)?;
+        }
+        for name in ["mode", "modes", "plugin", "plugins"] {
+            let dir = p.base.join(name);
+            if dir.is_dir() {
+                let what = if name.starts_with("mode") {
+                    "opencode 1 primary agents"
+                } else {
+                    "plugins"
+                };
+                cap.info(
+                    ID,
+                    format!(
+                        "{} ({what}) not captured; kitbag doesn't carry them",
+                        tildify(&dir, &env.home)
+                    ),
+                );
+            }
         }
         Ok(cap)
     }
@@ -384,7 +526,13 @@ impl Adapter for OpenCode {
         merge_json_servers(work, &file, key_path, &servers, MANAGED_KEYS, opts, ID)?;
 
         let had_instructions = work.fs.read(&p.instructions)?.is_some();
-        write_instructions(work, &p.instructions, profile, opts, false, ID)?;
+        write_instructions(work, &p.instructions, profile, opts, true, ID)?;
+        if !profile.rules.is_empty() {
+            work.info(
+                ID,
+                "opencode has no rule files (its rules are AGENTS.md); rules were folded into AGENTS.md as labelled sections, with their globs in the label",
+            );
+        }
         if !had_instructions
             && work.fs.read(&p.instructions)?.is_some()
             && work.fs.read(&p.fallback)?.is_some()
@@ -398,6 +546,33 @@ impl Adapter for OpenCode {
                 ),
             );
         }
+        let commands = p.commands();
+        for c in &profile.commands {
+            apply_command(work, commands.target(), c, opts)?;
+        }
+        let skills = p.skills();
+        for s in &profile.skills {
+            if s.description.is_none() {
+                work.info(
+                    ID,
+                    format!(
+                        "skill '{}' has no description; opencode doesn't advertise a skill to the model without one",
+                        s.name
+                    ),
+                );
+            }
+            write_skill(work, &skills.target().join(&s.name), s, opts, ID)?;
+        }
+        if !profile.skills.is_empty() && work.targets.iter().any(|t| t == "claude-code") {
+            work.info(
+                ID,
+                "opencode also reads Claude Code's skills folder (.claude/skills), so these skills are visible to it from there as well",
+            );
+        }
+        let agents = p.agents();
+        for a in &profile.agents {
+            apply_agent(work, agents.target(), a, opts)?;
+        }
         if profile.settings.contains_key(ID) {
             work.info(
                 ID,
@@ -406,6 +581,159 @@ impl Adapter for OpenCode {
         }
         Ok(())
     }
+}
+
+/// Is `model` in opencode's `provider/model[#variant]` form?
+fn opencode_model(model: &Value) -> bool {
+    model.as_str().is_some_and(|m| {
+        m.split_once('/')
+            .is_some_and(|(p, r)| !p.is_empty() && !r.is_empty())
+    })
+}
+
+/// A command as an opencode command file: `description`, then the keys
+/// opencode documents; and the keys that were left out. A `model` that isn't
+/// `provider/model` is another tool's alias (`sonnet`), which opencode can't
+/// resolve, so it is left out rather than guessed at.
+fn opencode_command(c: &Command) -> (String, Vec<String>) {
+    let mut entries: Vec<(&str, Value)> = vec![(
+        "description",
+        c.description.clone().map_or(Value::Null, Value::String),
+    )];
+    let mut dropped = Vec::new();
+    if c.argument_hint.is_some() {
+        dropped.push("argument-hint".to_string());
+    }
+    for (k, v) in &c.extra {
+        if !COMMAND_KEYS.contains(&k.as_str()) {
+            dropped.push(k.clone());
+        } else if k == "model" && !opencode_model(v) {
+            dropped.push(format!("{k} (not provider/model)"));
+        } else {
+            entries.push((k.as_str(), v.clone()));
+        }
+    }
+    (frontmatter::render(&entries, &c.body), dropped)
+}
+
+fn apply_command(work: &mut Work, dir: &Path, c: &Command, opts: &ApplyOptions) -> Result<()> {
+    let (text, dropped) = opencode_command(c);
+    if !dropped.is_empty() {
+        work.info(
+            ID,
+            format!(
+                "command '{}': {} left out of the command file (not an opencode command key, or a value opencode can't use)",
+                c.name,
+                dropped.join(", ")
+            ),
+        );
+    }
+    let path = dir.join(format!("{}.md", c.name));
+    write_command(work, &path, text.as_bytes(), opts, ID, &c.name)
+}
+
+/// An agent as an opencode agent file, and the keys left out: those opencode
+/// doesn't document (another tool's `tools` list, `permissionMode`, `hooks`,
+/// `name` ...), a `tools` that isn't opencode 1's map, and a `model` that
+/// isn't `provider/model`. Nothing is translated.
+fn opencode_agent(a: &Agent) -> (String, Vec<String>) {
+    let mut entries: Vec<(&str, Value)> = vec![(
+        "description",
+        a.description.clone().map_or(Value::Null, Value::String),
+    )];
+    let mut dropped = Vec::new();
+    for (k, v) in &a.extra {
+        let ok = AGENT_KEYS.contains(&k.as_str())
+            && match k.as_str() {
+                "tools" => v.is_object(),
+                "model" => opencode_model(v),
+                _ => true,
+            };
+        if ok {
+            entries.push((k.as_str(), v.clone()));
+        } else {
+            dropped.push(k.clone());
+        }
+    }
+    (frontmatter::render(&entries, &a.body), dropped)
+}
+
+fn apply_agent(work: &mut Work, dir: &Path, a: &Agent, opts: &ApplyOptions) -> Result<()> {
+    let (text, mut dropped) = opencode_agent(a);
+    // opencode takes the agent's name from the file name, so a `name` is not lost.
+    dropped.retain(|k| k != "name");
+    if !dropped.is_empty() {
+        work.warn(
+            ID,
+            format!(
+                "agent '{}': {} left out of the agent file; opencode's agent format has no counterpart that kitbag could carry over (tool lists, permissions and models are not translated between tools)",
+                a.name,
+                dropped.join(", ")
+            ),
+        );
+    }
+    if a.description.is_none() {
+        work.info(
+            ID,
+            format!(
+                "agent '{}' has no description; opencode asks for one on subagents",
+                a.name
+            ),
+        );
+    }
+    if !a.extra.contains_key("mode") {
+        work.info(
+            ID,
+            format!(
+                "agent '{}' has no mode; opencode treats a custom agent without one as a primary agent (add `mode: subagent` for a subagent)",
+                a.name
+            ),
+        );
+    }
+    let path = dir.join(format!("{}.md", a.name));
+    write_agent(work, &path, text.as_bytes(), opts, ID, &a.name)
+}
+
+/// Capture `<dir>/**/*.md` as agents named after the file (folders become part
+/// of the name, as for commands); a README is skipped.
+fn capture_agents(cap: &mut Captured, dir: &Path) -> Result<()> {
+    if cap.escapes(dir, ID) {
+        return Ok(());
+    }
+    let mut seen = std::collections::BTreeMap::new();
+    for rel in walk_files(dir, 500)? {
+        if !rel.ends_with(".md") {
+            continue;
+        }
+        let path = join_rel(dir, &rel);
+        if rel
+            .rsplit('/')
+            .next()
+            .is_some_and(|f| f.eq_ignore_ascii_case("readme.md"))
+        {
+            cap.warn(
+                ID,
+                format!("skipped {}: a README, not an agent", path.display()),
+            );
+            continue;
+        }
+        let name = name_from_rel(&rel, ".md");
+        claim_name(&mut seen, dir, &rel, &name)?;
+        if !is_valid_name(&name) {
+            cap.warn(
+                ID,
+                format!("skipped {}: unsupported file name", path.display()),
+            );
+            continue;
+        }
+        let Some(text) = read_text_item(cap, &path, ID) else {
+            continue;
+        };
+        if add_agent(cap, agent_from_markdown(&name, &text), ID) {
+            cap.sources.push(path);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

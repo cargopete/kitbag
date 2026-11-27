@@ -91,7 +91,7 @@ Starting from scratch? `kitbag init my-profile` writes a commented starter profi
 | `gemini-cli`     | Gemini CLI        | user, project | ✓   | ✓            | folded     | ✓            | ✓      | -      | ✓        |
 | `claude-desktop` | Claude Desktop    | user          | ✓ (local servers) | -  | -          | -            | -      | -      | -        |
 | `antigravity`    | Google Antigravity | user, project | ✓  | ✓            | ✓          | -            | ✓      | -      | -        |
-| `opencode`       | opencode          | user, project | ✓   | ✓            | -          | -            | -      | -      | -        |
+| `opencode`       | opencode          | user, project | ✓   | ✓            | folded     | ✓            | ✓      | ✓      | -        |
 | `copilot`        | GitHub Copilot (CLI, VS Code) | user, project | ✓ | ✓    | ✓          | project      | ✓      | ✓      | -        |
 | `grok-build`     | Grok Build        | user, project | ✓   | ✓            | ✓*         | ✓            | ✓      | -      | -        |
 | `windsurf`       | Windsurf          | user, project | user | ✓           | -          | -            | -      | -      | -        |
@@ -120,7 +120,7 @@ Where things go:
 | Gemini CLI | `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`, `~/.gemini/commands/*.toml`, `~/.gemini/skills/` | `.gemini/settings.json`, `GEMINI.md`, `.gemini/commands/`, `.gemini/skills/` |
 | Claude Desktop | `claude_desktop_config.json` in `~/Library/Application Support/Claude` (macOS), `%APPDATA%\Claude` (Windows), `~/.config/Claude` (Linux) | n/a |
 | Antigravity | `~/.gemini/config/mcp_config.json`, `~/.gemini/GEMINI.md` (the same file and managed block as Gemini CLI); capture also reads `~/.gemini/AGENTS.md` and `~/.gemini/config/{AGENTS,GEMINI}.md`; `~/.gemini/config/rules/*.md`, `~/.gemini/config/skills/` | `.agents/mcp_config.json`, `AGENTS.md` (shared with Codex and Cursor); capture also reads `GEMINI.md` and `.agents/{AGENTS,GEMINI}.md`; `.agents/rules/*.md`, `.agents/skills/` (the same directory as Codex's project skills) |
-| opencode | `~/.config/opencode/opencode.json` or `opencode.jsonc` (`mcp.servers`), `~/.config/opencode/AGENTS.md`; honours `XDG_CONFIG_HOME` | `opencode.json(c)` or `.opencode/opencode.json(c)` (the first that exists, else `opencode.json`), `AGENTS.md` (shared with Codex, Cursor and Antigravity); capture reads every config file there is |
+| opencode | `~/.config/opencode/opencode.json` or `opencode.jsonc` (`mcp.servers`), `~/.config/opencode/{AGENTS.md, commands/*.md, skills/<name>/, agents/*.md}`; honours `XDG_CONFIG_HOME` | `opencode.json(c)` or `.opencode/opencode.json(c)` (the first that exists, else `opencode.json`), `AGENTS.md` (shared with Codex, Cursor and Antigravity), `.opencode/{commands,skills,agents}/`; capture reads every config file there is |
 | Grok Build | `$GROK_HOME/config.toml` (`[mcp_servers.<name>]`, default `~/.grok`), `$GROK_HOME/{AGENTS.md, rules/*.md, commands/*.md, skills/}` | `.grok/config.toml`, `AGENTS.md` (shared with Codex, Cursor, Antigravity and opencode), `.grok/{rules,commands,skills}/`; Grok reads project files only in folders you have trusted |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` (`mcpServers`), `~/.codeium/windsurf/memories/global_rules.md` | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode and Grok Build); capture also reads the legacy `.windsurfrules`; Windsurf's docs describe no project MCP file, so MCP servers are not written at project scope |
 | GitHub Copilot | `$COPILOT_HOME/mcp-config.json` (`mcpServers`, default `~/.copilot`), `$COPILOT_HOME/copilot-instructions.md`, `$COPILOT_HOME/instructions/*.instructions.md`, `$COPILOT_HOME/skills/`, `$COPILOT_HOME/agents/*.agent.md` | `.mcp.json` (shared with Claude Code, written in Claude Code's shape), `.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` (`applyTo`), `.github/prompts/*.prompt.md`, `.github/skills/`, `.github/agents/*.agent.md`; capture also reads `.github/mcp.json`, legacy chat modes in `.github/chatmodes/` and `.vscode/mcp.json` (`servers`), and `disabledMcpServers` from Copilot's `settings.json` |
@@ -985,8 +985,8 @@ Good next candidates: Zed.
   first 32 KiB of `AGENTS.md` by default. kitbag warns about both.
 - **Claude Desktop** has no official Linux build. The `~/.config/Claude` path matches community
   builds.
-- At project scope, Cursor and Codex both read `AGENTS.md`. When both are targeted, Cursor also
-  sees Codex's folded rules section.
+- At project scope, Cursor, Codex and opencode all read `AGENTS.md`. When Cursor is targeted
+  with Codex or opencode, Cursor also sees the folded rules section.
 - **Antigravity** gets rules as files of their own, `rules/<name>.md` under `~/.gemini/config/` or
   `.agents/`, each with the `trigger` Antigravity requires (it silently discards a rule file
   without one): `always_on` for a rule that applies everywhere, `glob` with `globs` (one
@@ -1014,8 +1014,20 @@ Good next candidates: Zed.
   warning; rename it in the profile. opencode reads
   `~/.claude/CLAUDE.md` (or a project's `CLAUDE.md`) only while there is no `AGENTS.md`; the
   plan notes when the `AGENTS.md` kitbag creates takes its place. Files listed under
-  `instructions`, `{file:...}` references and opencode's agents, commands, skills and plugins
-  are not carried yet, and its tool permissions are left alone.
+  `instructions` and `{file:...}` references are not carried, and its tool permissions are left
+  alone. opencode has no rule files (its rules are `AGENTS.md`), so profile rules are folded into
+  `AGENTS.md` as labelled sections, as for Codex (the block is written once when both are
+  targeted), and capture reads them back. Commands are `commands/<name>.md`, skills
+  `skills/<name>/SKILL.md` and agents `agents/<name>.md` in `~/.config/opencode/` or
+  `.opencode/`; opencode 1's singular `command/`, `skill/` and `agent/` are read, and written to
+  when they are the folders that exist. A command keeps `description`, `agent`, `model` and
+  `subagent` (`subtask`); an agent keeps the keys opencode documents (`mode`, `model`,
+  `permissions` / `permission`, `steps`, `hidden`, `color`, ...) and its body is the system
+  prompt. Keys other tools use (`argument-hint`, `allowed-tools`, a `tools` list, `permissionMode`,
+  `hooks`, a `model` alias such as `sonnet`) are left out with a note, never translated. Agents
+  and commands defined inside `opencode.json`, opencode 1's `mode/` agents and plugins are not
+  carried. opencode also reads `.claude/skills`, so with Claude Code targeted too a skill is
+  visible from both folders.
 - **Grok Build** also reads Claude Code's files (`CLAUDE.md`, `.claude/rules`, `.claude/skills`,
   `.claude/commands`, `.mcp.json`) and `~/.agents/skills` by default. The plan notes when the
   same instructions would load twice, and that Codex's folded rules in a shared `AGENTS.md` sit
