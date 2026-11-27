@@ -160,7 +160,10 @@ impl YamlDoc {
             if lead > ind {
                 step.get_or_insert(lead - ind);
             }
-            if lead == ind {
+            // A list written at the key's own indentation (`name:` and, below
+            // it, `- item` lines, the way PyYAML dumps) belongs to that entry.
+            let continues = !entries.is_empty() && is_list_item(line);
+            if lead == ind && !continues {
                 let Some(name) = entry_name(line) else {
                     return Err(format!("line {} is not a `name:` entry", i + 1));
                 };
@@ -301,6 +304,12 @@ fn is_blank_or_comment(line: &str) -> bool {
     t.is_empty() || t.starts_with('#')
 }
 
+/// Is this line a `- item` of a block list?
+fn is_list_item(line: &str) -> bool {
+    let t = line.trim_start_matches(' ');
+    t == "-" || t.starts_with("- ")
+}
+
 fn leading_spaces(line: &str) -> usize {
     line.len() - line.trim_start_matches([' ', '\t']).len()
 }
@@ -395,6 +404,24 @@ fn render_entry(name: &str, def: &Value, indent: usize, step: usize) -> Vec<Stri
 fn emit_value(v: &Value, indent: usize, step: usize, out: &mut Vec<String>) {
     match v {
         Value::Object(m) if !m.is_empty() => emit_map(m, indent, step, out),
+        // A list of mappings (hook entries) as a block list; lists of plain
+        // values stay on the key's line.
+        Value::Array(a)
+            if !a.is_empty()
+                && a.iter()
+                    .all(|x| x.as_object().is_some_and(|m| !m.is_empty())) =>
+        {
+            let pad = " ".repeat(indent);
+            for item in a {
+                let Value::Object(m) = item else { continue };
+                let mut lines = Vec::new();
+                emit_map(m, indent + 2, step, &mut lines);
+                if let Some(first) = lines.first_mut() {
+                    *first = format!("{pad}- {}", first.trim_start_matches(' '));
+                }
+                out.extend(lines);
+            }
+        }
         other => {
             if let Some(last) = out.last_mut() {
                 last.push(' ');
@@ -585,6 +612,51 @@ mod tests {
         }
         assert!(YamlDoc::parse(Some("a: [1\n"), Path::new("c")).is_err());
         assert!(YamlDoc::parse(Some("- a\n"), Path::new("c")).is_err());
+    }
+
+    #[test]
+    fn writes_a_list_of_mappings_as_a_block_list_and_keeps_its_neighbours() {
+        let text = "hooks:\n  pre_tool_call:\n  - command: mine   # mine\n  outbound:\n  - name: ci\n    url: https://x.example\nother: 1\n";
+        let mut d = doc(text);
+        let list = json!([
+            {"command": "mine"},
+            {"command": "/x/check.sh", "matcher": "a|b", "timeout": 5, "fail_closed": true}
+        ]);
+        d.set("hooks", "pre_tool_call", &list).unwrap();
+        d.set(
+            "hooks",
+            "on_session_start",
+            &json!([{"command": "echo hi"}]),
+        )
+        .unwrap();
+        let out = d.render().unwrap();
+        assert_eq!(
+            out,
+            "hooks:\n  pre_tool_call:\n    - command: \"mine\"\n    - command: \"/x/check.sh\"\n      matcher: \"a|b\"\n      timeout: 5\n      fail_closed: true\n  outbound:\n  - name: ci\n    url: https://x.example\n  on_session_start:\n    - command: \"echo hi\"\nother: 1\n"
+        );
+        // Lists of plain values stay on one line.
+        let mut d = doc("a: 1\n");
+        d.set("s", "k", &json!({"args": ["x", "y"]})).unwrap();
+        assert_eq!(
+            d.render().unwrap(),
+            "a: 1\ns:\n  k:\n    args: [\"x\", \"y\"]\n"
+        );
+    }
+
+    #[test]
+    fn a_list_at_the_keys_indent_is_part_of_its_entry_and_crlf_is_kept() {
+        let text =
+            "hooks:\r\n  a:\r\n  - command: x\r\n  - command: y\r\n  b:\r\n  - command: z\r\n";
+        let mut d = doc(text);
+        d.set("hooks", "a", &json!([{"command": "w"}])).unwrap();
+        d.remove("hooks", "b").unwrap();
+        assert_eq!(
+            d.render().unwrap(),
+            "hooks:\r\n  a:\r\n    - command: \"w\"\r\n"
+        );
+        // A list where the section's entries should be is still refused.
+        let d = doc("hooks:\n- a\n");
+        assert!(d.check_editable("hooks").is_err());
     }
 
     #[test]
