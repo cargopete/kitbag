@@ -194,6 +194,26 @@ impl Bundle {
         }
     }
 
+    /// Add `name`, or give it a new value if it is there already (keeping
+    /// where it was captured). Returns whether a value was replaced.
+    pub fn set(&mut self, name: &str, value: Secret, at: &str) -> Result<bool> {
+        if !valid_name(name) {
+            bail!("'{name}' is not a usable variable name");
+        }
+        if let Some(e) = self.entries.get_mut(name) {
+            e.value = value;
+            return Ok(true);
+        }
+        self.entries.insert(
+            name.to_string(),
+            Entry {
+                value,
+                at: at.to_string(),
+            },
+        );
+        Ok(false)
+    }
+
     /// The value of `name`.
     pub fn get(&self, name: &str) -> Option<&Secret> {
         self.entries.get(name).map(|e| &e.value)
@@ -505,12 +525,19 @@ pub fn read_bundle(path: &Path) -> Result<Vec<u8>> {
 /// private to the user on Unix (0600; on Windows the file keeps the access of
 /// the folder it is in). A link in its place is replaced, never written through.
 pub fn write(dir: &Path, bytes: &[u8]) -> Result<PathBuf> {
+    let path = dir.join(FILE);
+    write_to(&path, bytes)?;
+    Ok(path)
+}
+
+/// Write `bytes` (an encrypted bundle) to `path`, as [`write`] does: through
+/// a temporary file in the same directory renamed into place, so a failure
+/// leaves the old file as it was.
+pub fn write_to(path: &Path, bytes: &[u8]) -> Result<()> {
     if !looks_like_age(bytes) {
         bail!("refusing to write a secrets bundle that is not age-encrypted");
     }
-    let path = dir.join(FILE);
-    crate::txn::write_atomic(&path, bytes, Some(0o600))?;
-    Ok(path)
+    crate::txn::write_atomic(path, bytes, Some(0o600))
 }
 
 /// Files in a profile directory that hold secrets in plain text, which a
@@ -694,6 +721,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(write(dir.path(), b"plain").is_err());
         assert!(parse_recipients("not-a-key").is_err());
+    }
+
+    #[test]
+    fn set_adds_or_replaces_and_keeps_the_capture_location() {
+        let mut b = Bundle::default();
+        b.insert("A", Secret::new("fake-one"), "mcp_servers.a.env.A")
+            .unwrap();
+        assert!(b.set("A", Secret::new("fake-two"), "secrets set").unwrap());
+        assert!(
+            !b.set("B", Secret::new("fake-three"), "secrets set")
+                .unwrap()
+        );
+        assert_eq!(b.get("A").unwrap().expose(), "fake-two");
+        assert_eq!(
+            b.names(),
+            [
+                ("A".to_string(), "mcp_servers.a.env.A".to_string()),
+                ("B".to_string(), "secrets set".to_string())
+            ]
+        );
+        assert!(b.set("1A", Secret::new("x"), "secrets set").is_err());
     }
 
     #[test]

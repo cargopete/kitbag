@@ -843,6 +843,32 @@ pub fn run(cli: Cli) -> Result<i32> {
         ),
         Cmd::Secrets { cmd } => match cmd {
             SecretsCmd::List { file, unlock } => secrets_cmd::list(file.as_deref(), &unlock),
+            SecretsCmd::Set {
+                name,
+                file,
+                value_file,
+                secrets_passphrase_file,
+                secrets_identity,
+                secrets_recipient,
+            } => secrets_cmd::set(&secrets_cmd::SetArgs {
+                name: &name,
+                file: file.as_deref(),
+                value_file: &value_file,
+                passphrase_file: secrets_passphrase_file.as_deref(),
+                identities: &secrets_identity,
+                recipients: &secrets_recipient,
+            }),
+            SecretsCmd::Rotate {
+                file,
+                unlock,
+                new_secrets_passphrase_file,
+                new_secrets_recipient,
+            } => secrets_cmd::rotate(
+                file.as_deref(),
+                &unlock,
+                new_secrets_passphrase_file.as_deref(),
+                &new_secrets_recipient,
+            ),
         },
         Cmd::ListTargets { place, json } => cmd_list_targets(&context(home, Some(&place))?, json),
     }
