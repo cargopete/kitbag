@@ -281,6 +281,28 @@ disabled for a tool that is still in it (`apply removes it` or `apply leaves it`
 `capture --force` keeps the `targets` / `disabled_on` of the items it captures again, and keeps
 the profile's items with them that it found in no tool; `--prune` drops those.
 
+**Turning an item off or on from the command line.** `kitbag disable` and `kitbag enable` edit
+that `targets` / `disabled_on` for you, in a profile directory on this machine (not a git source:
+copy it first), and apply nothing; run `kitbag apply` afterwards.
+
+```sh
+kitbag disable github --on codex ~/dotagents      # MCP server 'github' off on Codex only
+kitbag disable skill:review --on cursor,codex     # prefix when a name is used twice
+kitbag enable github --on codex ~/dotagents       # on again there
+kitbag disable deploy                             # off on every tool (profile: the current directory)
+kitbag enable deploy                              # on everywhere again
+```
+
+The item is an MCP server, rule, command, skill or agent; a name that is more than one of them
+needs `mcp:`, `rule:`, `command:`, `skill:` or `agent:` in front, and an unknown name or tool is
+an error (`claude` is read as `claude-code`). Without `--on` an item is turned off on every
+tool, written as a `disabled_on` naming each one (a tool added by a later kitbag is not in it);
+enabling clears the list. Comments and everything else in the file stay as they are, `only` /
+`except` are rewritten as `targets` / `disabled_on`, and the result is checked before the file is
+replaced. Hooks have no per-tool setting and are not handled. Mapping a disabled server to a
+tool's own off switch (`enabled = false` ...) is not done yet: apply still leaves it out of that
+tool.
+
 **Env references.** `${NAME}` takes its value from the environment. `${NAME:-fallback}`
 falls back to a non-secret default (it is written to disk wherever the variable is unset, so
 `doctor` and `apply` flag a fallback that looks like a secret). References work in `command`, `args`, `env`, `cwd`, `url`
@@ -937,6 +959,7 @@ wrapping of their own.
 |---|---|
 | `kitbag init [DIR]` | Write a commented starter profile |
 | `kitbag capture [--from IDS] [-o DIR] [--dry-run] [--force] [--prune] [--include hooks]` | Read the current setup into a profile (secrets redacted). Writes only into a new or empty directory. `--force` replaces an existing profile's files and leaves anything else in the directory alone; the profile's MCP servers (and rules, commands, skills and agents with `targets` / `disabled_on`) found in no tool are kept unless `--prune`. With several tools, one whose config can't be read is reported and the rest are captured |
+| `kitbag disable ITEM [--on IDS] [PROFILE]`, `kitbag enable ...` | Turn an MCP server, rule, command, skill or agent off or on for some tools (default: all) by editing its `targets` / `disabled_on` in a local profile; applies nothing |
 | `kitbag diff <SOURCE> [--to IDS] [--exit-code]` | Show exactly what `apply` would change; never writes |
 | `kitbag apply <SOURCE> [--to IDS] [--yes] [--dry-run] [--apply-hooks]` | Plan, confirm, write with backups; hooks only with `--apply-hooks` (and, from a git source, `--trust-source`) |
 | `kitbag inspect <SOURCE> [--to IDS] [--json]` | What a profile or plugin holds, what in it runs commands, reads env vars, installs executables or connects to the network, and (for the tools in `--to`, default `detected`) which files `apply` would write; never writes or starts anything |

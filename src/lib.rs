@@ -24,6 +24,7 @@ pub mod profile_io;
 pub mod secrets;
 pub mod source;
 pub mod sync;
+pub mod toggle;
 pub mod txn;
 pub mod ui;
 pub mod why;
