@@ -524,10 +524,31 @@ dropped silently):
 | `hermes` | `$HERMES_HOME/config.yaml` `hooks:` (default `~/.hermes/`), user scope only; shell hooks only | `agent-hooks/kitbag/` next to it | [hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks) |
 | `claude-desktop`, `opencode`, `windsurf`, `zed`, `amp`, `cline`, `roo`, `continue` | not carried: warn | none | see below |
 
-Claude Desktop has no hook configuration of its own. opencode runs hooks only as
-JavaScript/TypeScript plugins, which kitbag doesn't write. Windsurf's docs now point to Devin
-Desktop's `.devin/hooks.v1.json` and give no user-level path or event list, so its hooks are
-not verified and not written. Zed, Amp, Roo Code and Continue have no hook file kitbag has verified against their docs, and Cline's hook files are not verified yet, so none of them is written. Capture reads a Grok Build or Copilot directory's every
+**Why the last row is not carried** (official docs re-read 2026-11-27; the plan warns and names
+the reason, nothing is dropped silently):
+
+- **Claude Desktop**: no hook configuration of its own. Claude Code's
+  [hooks docs](https://code.claude.com/docs/en/hooks) say the same hook events fire in the Desktop app, from
+  Claude Code's `settings.json`, which the `claude-code` target carries.
+- **opencode**: hooks exist only as [JavaScript/TypeScript plugins](https://opencode.ai/docs/plugins/);
+  plugins are #12, not written here.
+- **Amp**: event handlers (`amp.on(...)`) exist only in TypeScript/JavaScript
+  [plugins](https://ampcode.com/docs/markdown/customize/plugins) (#12); the manual describes no
+  hook file.
+- **Cline**: its [hooks page](https://docs.cline.bot/customization/hooks) now says only "See details under
+  SDK Plugins". Those are TypeScript code ([SDK plugins](https://docs.cline.bot/sdk/plugins.md): `beforeRun`,
+  `beforeTool` ...), with no hook file, so nothing is written. A `.clinerules/hooks/` /
+  `~/Documents/Cline/Hooks` script layout is described by third-party mirrors and search
+  snippets, but not by the official page kitbag could read today, so it stays unwritten
+  (capture still lists `.clinerules/hooks/` as left behind).
+- **Windsurf**: its hooks page now redirects to Devin Desktop's docs, which name only
+  `.devin/hooks.v1.json` ("in your project or at the user level", no path) and send you to Devin's
+  hooks pages for events. Devin folders are parked in #20: kitbag writes no `.devin/`,
+  `~/.devin/`, `~/.config/devin/` or `hooks.v1.json`, and no Windsurf hook file.
+- **Zed**, **Roo Code**, **Continue**: their docs describe no hooks (Zed's AI docs and
+  `llms.txt`, Roo's docs site map, Continue's config reference), so there is no file to write.
+
+Capture reads a Grok Build or Copilot directory's every
 `*.json`, and every hook of an Antigravity file that isn't `enabled: false`; apply writes
 Grok Build's and Copilot's own `kitbag.json` and Antigravity's own `kitbag` hook, so undo
 removes only that. The tools keep their own approval steps: Codex skips a new or changed hook
@@ -1299,7 +1320,7 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   prompt. Keys other tools use (`argument-hint`, `allowed-tools`, a `tools` list, `permissionMode`,
   `hooks`, a `model` alias such as `sonnet`) are left out with a note, never translated. Agents
   and commands defined inside `opencode.json` and opencode 1's `mode/` agents are not carried
-  (plugins are tracked in #12, hooks in #13). That is everything opencode's docs describe for
+  (plugins are tracked in #12, and so are opencode's hooks, which exist only as plugins). That is everything opencode's docs describe for
   MCP servers, instructions, rules, commands, skills and agents. opencode also reads
   `.claude/skills` and `~/.claude/skills` (and `.agents/skills`, `~/.agents/skills`), so with
   Claude Code targeted too a skill is visible from both folders.
@@ -1308,8 +1329,8 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   same instructions would load twice, and that Codex's folded rules in a shared `AGENTS.md` sit
   next to `.grok/rules/`. Commands are Claude Code style markdown; Grok counts positional
   arguments from `$0`, so kitbag warns about commands that use `$1`-style placeholders. Grok
-  Build agent definitions (`.grok/agents/`), personas, plugins, hooks and settings are not
-  carried yet.
+  Build agent definitions (`.grok/agents/`), personas, plugins and settings are not
+  carried yet; hooks are (see Hooks).
 - **Windsurf** (now also shipped as Devin Desktop) keeps MCP servers in
   `~/.codeium/windsurf/mcp_config.json` and global rules in
   `~/.codeium/windsurf/memories/global_rules.md`; kitbag writes those, and nothing at project
@@ -1334,7 +1355,8 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   it the legacy workspace folder, still read) with their bundled files. Windsurf's docs, now at
   docs.devin.ai, name no user-level rules or skills folder of Windsurf's own, only Devin Desktop's
   `~/.devin/rules/` and `~/.config/devin/skills/`, so rules and skills are not carried at user
-  scope. Agents (#14) and hooks (#13) are not carried yet.
+  scope. Agents (#14) are not carried yet, and hooks are not written: Windsurf's hooks page now
+  redirects to Devin Desktop's docs (see Hooks, #20).
 - **Zed** keeps MCP servers ("context servers") under `context_servers` in `settings.json`, in
   the user config directory and in a project's `.zed/settings.json`; the file may hold comments
   and trailing commas, which are kept, and Zed's own keys on an entry (`timeout`, `oauth`, `source` ...)
@@ -1365,7 +1387,7 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   that declares its own MCP servers (which kitbag leaves out for Amp) would differ between the
   two. Zed's docs name no folder of its own for skills, nor a rules file or a commands folder
   (the Rules Library is the only place they live), so rules and commands are not carried; agents
-  (#14), hooks (#13) and settings are not carried yet. The skills path for Windows is
+  (#14) and settings are not carried yet, and Zed's docs describe no hooks (see Hooks). The skills path for Windows is
   `%USERPROFILE%\.agents\skills` here, which the docs write as `~/.agents/skills/`. The config directory follows Zed's source (`XDG_CONFIG_HOME` on Linux, `~/.config/zed` on
   macOS); `FLATPAK_XDG_CONFIG_HOME` is not honoured.
 - **Hermes Agent** (Nous Research) keeps MCP servers under `mcp_servers` in
@@ -1416,7 +1438,7 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   written (Amp documents no flag), and an SSE server is written as a plain `url` with a warning,
   since Amp has no transport key. Servers defined on ampcode.com (`amp mcp remote`), servers
   bundled in a skill's `mcp.json`, and `oauth` / `includeTools` on an entry are not captured, and
-  capture says so; permissions, hooks and other settings are not carried. Only the settings
+  capture says so; permissions and other settings are not carried, and Amp's hooks exist only as plugins (see Hooks, #12). Only the settings
   file at the project root is used; Amp also searches parent directories. Instructions go to
   `~/.config/amp/AGENTS.md` (Amp also reads `~/.config/AGENTS.md`, which kitbag leaves alone and
   names), and in a project to the file Amp reads: `AGENTS.md`, else `AGENT.md`, else `CLAUDE.md`
@@ -1476,7 +1498,7 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   scope), which belong to other tools and are never written, and the plan says when a skill of the
   same name is in one of them. The name in `SKILL.md` must match the directory name. Rules that an
   older kitbag folded into `kitbag.md` are removed from it on apply (user scope) and still read by
-  capture. Hooks and agents are not carried yet.
+  capture. Agents are not carried yet, and Cline's hooks are not carried (see Hooks).
 - **Roo Code** (the `RooVeterinaryInc.roo-cline` extension) keeps MCP servers under `mcpServers` in
   `mcp_settings.json` in the extension's global storage, and in a project's `.roo/mcp.json`, which
   wins for a server of the same name. Roo's docs don't give the global path; the file name and the
@@ -1510,7 +1532,7 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   them. Roo needs a skill name of 1-64 lowercase letters, digits and single hyphens that matches the
   directory, so a skill with another name is skipped with a warning. Rules that an older kitbag folded
   into `kitbag.md` are removed from it on apply (user scope) and still read by capture. Custom
-  modes, hooks and settings are not carried. A project's servers run what `.roo/mcp.json` says:
+  modes and settings are not carried, and Roo's docs describe no hooks (see Hooks). A project's servers run what `.roo/mcp.json` says:
   kitbag writes no `alwaysAllow`, so Roo's own tool approval applies.
 - **Continue** (VS Code and JetBrains) keeps user settings in `~/.continue/config.yaml`
   (`%USERPROFILE%\.continue\config.yaml` on Windows). kitbag edits it in place: comments, your

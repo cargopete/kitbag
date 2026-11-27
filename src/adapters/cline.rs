@@ -38,7 +38,8 @@
 //!   `.cline/skills/`, where kitbag writes them; capture also reads
 //!   `.clinerules/skills/` and `.agents/skills/` (`~/.agents/skills/` at user
 //!   scope), which kitbag never writes to.
-//! * Hooks and agents are not carried (issues #13 and #14).
+//! * Hooks and agents are not carried (issue #14 for agents). Cline's hooks page now only
+//!   points to its TypeScript SDK plugins (#12), not a hook file (checked 2026-11-27).
 //!
 //! Docs: <https://docs.cline.bot/mcp/mcp-overview>,
 //! <https://docs.cline.bot/getting-started/config>,

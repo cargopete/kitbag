@@ -454,39 +454,41 @@ pub(crate) const HERMES: Format = Format {
     },
 };
 
-/// Targets that have no hook file kitbag writes, with the reason.
+/// Targets that have no hook file kitbag writes, with the reason. Each reason names
+/// what the tool's official docs said when last checked (2026-11-27), so a skip is a
+/// documented decision, not "not looked at".
 const NO_HOOKS: &[(&str, &str)] = &[
     (
         "claude-desktop",
-        "Claude Desktop has no hook configuration of its own (Claude Code's hooks live in its settings.json)",
+        "Claude Desktop has no hook configuration of its own; its docs say Claude Code's hooks (settings.json) fire in the Desktop app too, which the claude-code target carries (checked 2026-11-27)",
     ),
     (
         "opencode",
-        "opencode runs hooks only as JavaScript/TypeScript plugins, which kitbag doesn't write",
+        "opencode runs hooks only as JavaScript/TypeScript plugins, which kitbag doesn't write (plugins are #12; docs checked 2026-11-27)",
     ),
     (
         "windsurf",
-        "Windsurf's hook file location and event names are not verified yet (its docs now point to Devin Desktop's .devin/hooks.v1.json)",
+        "Windsurf's hooks page now redirects to Devin Desktop's docs, which name only .devin/hooks.v1.json and no Windsurf path or event list; kitbag doesn't write .devin files (checked 2026-11-27)",
     ),
     (
         "zed",
-        "kitbag knows of no hook file for Zed (not verified against its docs)",
+        "Zed's docs (zed.dev/docs/ai) describe no hooks for its agent, so there is no hook file to write (checked 2026-11-27)",
     ),
     (
         "amp",
-        "kitbag knows of no hook file for Amp (not verified against its docs)",
+        "Amp's docs describe event handlers only as TypeScript/JavaScript plugins (amp.on(...)), which kitbag doesn't write (plugins are #12; checked 2026-11-27)",
     ),
     (
         "cline",
-        "Cline's hook files are not verified against its docs yet, so kitbag doesn't write them",
+        "Cline's hooks page now only points to its SDK plugins, which are TypeScript code and not written by kitbag (plugins are #12); it documents no hook file (checked 2026-11-27)",
     ),
     (
         "roo",
-        "kitbag knows of no hook file for Roo Code (not verified against its docs)",
+        "Roo Code's docs describe no hooks, so there is no hook file to write (checked 2026-11-27)",
     ),
     (
         "continue",
-        "kitbag knows of no hook file for Continue (its config.yaml reference lists none)",
+        "Continue's docs and config.yaml reference describe no hooks, so there is no hook file to write (checked 2026-11-27)",
     ),
 ];
 
@@ -1952,6 +1954,19 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn every_skip_reason_is_dated_and_none_is_a_guess() {
+        for a in crate::adapters::all() {
+            if let Some(r) = no_hooks_reason(a.id()) {
+                assert!(r.contains("checked 2026-11-27"), "{}: {r}", a.id());
+                assert!(!r.contains("not verified"), "{}: {r}", a.id());
+            }
+        }
+        // Devin's own folders stay unwritten, and the reason says so.
+        let w = no_hooks_reason("windsurf").unwrap();
+        assert!(w.contains("Devin") && w.contains("doesn't write .devin"));
     }
 
     #[test]

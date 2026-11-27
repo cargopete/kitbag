@@ -32,7 +32,9 @@
 //!   read). The docs name no user-level folder of Windsurf's own, only
 //!   `~/.config/devin/skills/` and `~/.agents/skills/`, so at user scope skills
 //!   are not carried.
-//! * Hooks (#13) and agents (#14) are not carried.
+//! * Hooks (#13) are not carried: its hooks page now redirects to Devin Desktop's docs
+//!   (`.devin/hooks.v1.json`), which kitbag does not write (checked 2026-11-27). Agents
+//!   (#14) are not carried.
 //!
 //! Docs: <https://docs.devin.ai/windsurf/plugins/cascade/mcp>,
 //! <https://docs.devin.ai/desktop/cascade/memories>,
