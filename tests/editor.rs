@@ -18,6 +18,8 @@ const VSCODE_SETTINGS: &str = "home/.config/Code/User/settings.json";
 const ZED_KEYMAP: &str = "home/.config/zed/keymap.json";
 
 /// Where the real OS has VS Code's `settings.json` under `KITBAG_HOME`.
+/// Only used by the Unix CLI tests, which stub `code` on PATH.
+#[cfg(unix)]
 fn cli_vscode_settings() -> &'static str {
     if cfg!(target_os = "macos") {
         "home/Library/Application Support/Code/User/settings.json"
@@ -28,6 +30,7 @@ fn cli_vscode_settings() -> &'static str {
     }
 }
 
+#[cfg(unix)]
 fn cli_zed_keymap() -> &'static str {
     if cfg!(windows) {
         "home/AppData/Roaming/Zed/keymap.json"
