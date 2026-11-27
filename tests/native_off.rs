@@ -75,7 +75,6 @@ struct JsonTool {
     flag: (&'static str, Value),
 }
 
-
 fn zed_settings() -> &'static str {
     // The CLI uses the real OS. Under KITBAG_HOME, Zed on Windows writes to
     // <home>/AppData/Roaming/Zed, not ~/.config/zed.
@@ -533,13 +532,9 @@ fn no_overwrite_keeps_a_server_on() {
         .success()
         .stdout(contains("because --no-overwrite was given"));
     assert!(
-        server(
-            &sb.json(zed_settings()),
-            &["context_servers"],
-            "heavy"
-        )
-        .get("enabled")
-        .is_none()
+        server(&sb.json(zed_settings()), &["context_servers"], "heavy")
+            .get("enabled")
+            .is_none()
     );
 }
 
