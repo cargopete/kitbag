@@ -10,7 +10,9 @@
 //!   doesn't manage (`timeout`, `tools`, `auth`, `sampling` ...) are kept.
 //! * Instructions: `$HERMES_HOME/SOUL.md` at user scope, the only file Hermes
 //!   reads from its home that you write (its identity file; there is no global
-//!   AGENTS.md). In a project Hermes loads one context file, the first of
+//!   AGENTS.md). Apply writes a managed block next to what is in it; capture
+//!   reads only that block, never the persona text around it, which is not
+//!   instructions for other tools. In a project Hermes loads one context file, the first of
 //!   `.hermes.md` / `HERMES.md`, `AGENTS.override.md`, `AGENTS.md`, `CLAUDE.md`,
 //!   `.cursorrules`; kitbag writes `.hermes.md` (or `HERMES.md`) when the
 //!   project has one, since it would shadow `AGENTS.md`, and `AGENTS.md`
@@ -31,9 +33,9 @@ use anyhow::Result;
 use serde_json::{Map, Value, json};
 
 use super::common::{
-    capture_instructions, import_server, merge_server_def, note_dropped_server_keys,
-    record_server_write, remove_skipped_server, render_server, server_entries, server_from_json,
-    servers_for, skipped_servers, str_of, write_instructions,
+    capture_instructions, capture_managed_instructions, import_server, merge_server_def,
+    note_dropped_server_keys, record_server_write, remove_skipped_server, render_server,
+    server_entries, server_from_json, servers_for, skipped_servers, str_of, write_instructions,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::yaml::{YamlDoc, parse_map};
@@ -185,13 +187,18 @@ impl Adapter for Hermes {
             }
         }
 
-        let before = cap.profile.instructions.is_some();
-        capture_instructions(&mut cap, &p.instructions, ID)?;
-        if env.scope == Scope::User && !before && cap.profile.instructions.is_some() {
-            cap.info(
-                ID,
-                "captured SOUL.md, Hermes's identity file, as the profile's instructions",
-            );
+        if env.scope == Scope::User {
+            // SOUL.md is Hermes's persona (a fresh install seeds one); its own
+            // text is not instructions for other tools, so only a block kitbag
+            // wrote there is captured.
+            if capture_managed_instructions(&mut cap, &p.instructions, ID)? {
+                cap.info(
+                    ID,
+                    "SOUL.md is Hermes's persona file; only a kitbag-managed block in it is captured as instructions, the rest was left out",
+                );
+            }
+        } else {
+            capture_instructions(&mut cap, &p.instructions, ID)?;
         }
         // Rules folded into a shared file by another target (Codex's AGENTS.md)
         // come back out of capture_instructions.

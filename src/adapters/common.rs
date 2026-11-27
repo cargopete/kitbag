@@ -1255,16 +1255,34 @@ pub fn read_text_item(cap: &mut Captured, path: &Path, target: &str) -> Option<S
 
 /// Read an instructions file: user content plus kitbag-managed blocks, with folded rules recovered.
 pub fn capture_instructions(cap: &mut Captured, path: &Path, target: &str) -> Result<()> {
+    capture_instructions_from(cap, path, target, false).map(|_| ())
+}
+
+/// Like `capture_instructions`, but reads only the kitbag-managed blocks and
+/// leaves the text around them alone. For a file whose own content isn't
+/// portable instructions (Hermes's `SOUL.md`, a persona). Returns whether the
+/// file had content outside a managed block that was left out.
+pub fn capture_managed_instructions(cap: &mut Captured, path: &Path, target: &str) -> Result<bool> {
+    capture_instructions_from(cap, path, target, true)
+}
+
+fn capture_instructions_from(
+    cap: &mut Captured,
+    path: &Path,
+    target: &str,
+    managed_only: bool,
+) -> Result<bool> {
     let Some(text) = read_text_item(cap, path, target) else {
-        return Ok(());
+        return Ok(false);
     };
     if text.trim().is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     cap.sources.push(path.to_path_buf());
     let split = block::split(&text);
+    let skipped = managed_only && !split.outside.is_empty();
     let mut pieces = Vec::new();
-    if !split.outside.is_empty() {
+    if !managed_only && !split.outside.is_empty() {
         pieces.push(split.outside);
     }
     for (_, inner) in split.blocks {
@@ -1278,7 +1296,7 @@ pub fn capture_instructions(cap: &mut Captured, path: &Path, target: &str) -> Re
     }
     let combined = pieces.join("\n\n");
     add_instructions(cap, target, &combined, path);
-    Ok(())
+    Ok(skipped)
 }
 
 /// Redact an optional frontmatter string in place, collecting the kinds found.

@@ -51,7 +51,7 @@ Examples:
 #[command(name = "kitbag", version, about = ABOUT, after_help = AFTER_HELP, propagate_version = true)]
 pub struct Cli {
     /// Treat DIR as the home directory, and ignore CODEX_HOME / CLAUDE_CONFIG_DIR /
-    /// COPILOT_HOME / XDG_CONFIG_HOME / APPDATA (for sandboxes and testing). State
+    /// COPILOT_HOME / HERMES_HOME / XDG_CONFIG_HOME / APPDATA (for sandboxes and testing). State
     /// goes under DIR too unless KITBAG_STATE_DIR is set
     #[arg(long, global = true, value_name = "DIR", env = "KITBAG_HOME")]
     home: Option<PathBuf>,

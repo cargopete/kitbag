@@ -91,10 +91,8 @@ fn capture_user() {
     assert_eq!(p.mcp_servers["events"].transport(), Transport::Sse);
     assert!(p.mcp_servers["time"].disabled);
     assert!(!p.mcp_servers["github"].disabled);
-    assert_eq!(
-        p.instructions.as_deref(),
-        Some("You are a careful, plain-spoken assistant.\n\nKeep diffs small.")
-    );
+    // SOUL.md holds only the persona here, which is not portable instructions.
+    assert_eq!(p.instructions, None);
     let said = |what: &str| r.notes.iter().any(|n| n.message.contains(what));
     assert!(
         said("Hermes-specific keys not captured: timeout"),
@@ -103,7 +101,7 @@ fn capture_user() {
     );
     assert!(said("keys not captured: tools"));
     assert!(said("'linear' signs in with OAuth"));
-    assert!(said("captured SOUL.md"));
+    assert!(said("SOUL.md is Hermes's persona file"));
 }
 
 #[test]
@@ -126,6 +124,58 @@ fn capture_project_reads_agents_md_and_prefers_hermes_md() {
         r.profile.instructions.as_deref(),
         Some("Hermes-only rules.")
     );
+}
+
+/// A fresh Hermes install seeds a SOUL.md persona. A default capture (every
+/// detected tool) must not carry that text into the instructions other tools
+/// would receive, while CLAUDE.md still does.
+#[test]
+fn default_capture_keeps_the_soul_persona_out_of_shared_instructions() {
+    let sb = Sandbox::fixtures();
+    let env = sb.env(Scope::User);
+    let claude = sb.read("home/.claude/CLAUDE.md");
+    let r = capture(&["claude-code", "hermes"], &env);
+    let instructions = r.profile.instructions.clone().unwrap();
+    assert!(!instructions.contains("plain-spoken"), "{instructions}");
+    assert!(
+        !instructions.contains("Keep diffs small."),
+        "{instructions}"
+    );
+    assert!(instructions.contains(claude.trim()), "{instructions}");
+
+    // Applied to Codex and Hermes, the persona doesn't reach AGENTS.md or
+    // anywhere else, and the persona file keeps its own text.
+    let sb2 = Sandbox::empty();
+    let env2 = sb2.env(Scope::User);
+    fs::create_dir_all(sb2.home().join(".hermes")).unwrap();
+    fs::write(sb2.home().join(".hermes/SOUL.md"), "You are the persona.\n").unwrap();
+    let p = apply(&sb2, &r.profile, &["codex", "hermes"], &env2);
+    let codex = planned(&p, &sb2.home().join(".codex/AGENTS.md")).unwrap();
+    assert!(!codex.contains("persona"), "{codex}");
+    let soul = sb2.read("home/.hermes/SOUL.md");
+    assert!(soul.starts_with("You are the persona."));
+    assert!(soul.contains(claude.trim()));
+}
+
+/// Only a block kitbag wrote into SOUL.md is captured; the persona around it
+/// is left out, with a note.
+#[test]
+fn capture_reads_only_the_managed_block_in_soul() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::User);
+    fs::create_dir_all(sb.home().join(".hermes")).unwrap();
+    fs::write(sb.home().join(".hermes/SOUL.md"), "You are the persona.\n").unwrap();
+    let prof = Profile {
+        instructions: Some("Use British English.".into()),
+        ..Profile::default()
+    };
+    apply(&sb, &prof, &["hermes"], &env);
+    let r = capture(&["hermes"], &env);
+    assert_eq!(
+        r.profile.instructions.as_deref(),
+        Some("Use British English.")
+    );
+    assert!(r.notes.iter().any(|n| n.message.contains("persona file")));
 }
 
 #[test]
@@ -223,7 +273,7 @@ fn hermes_home_moves_the_config() {
     env.locations = HashMap::from([("HERMES_HOME".to_string(), other.display().to_string())]);
     let r = capture(&["hermes"], &env);
     assert!(r.profile.mcp_servers.contains_key("time"));
-    assert_eq!(r.profile.instructions.as_deref(), Some("I am the coder."));
+    assert_eq!(r.profile.instructions, None);
 
     let p = plan(&sample(), &["hermes"], &env);
     assert!(
@@ -528,7 +578,9 @@ fn apply_is_idempotent_and_undo_restores_everything() {
         prof.mcp_servers["linear"].url
     );
     assert_eq!(back.mcp_servers["github"].cwd.as_deref(), Some("tools"));
-    assert!(back.instructions.unwrap().contains("Use British English."));
+    let back_instructions = back.instructions.unwrap();
+    assert!(back_instructions.contains("Use British English."));
+    assert!(!back_instructions.contains("plain-spoken"));
     Store::new(sb.state()).undo(None, false).unwrap();
     assert_eq!(sb.read(CONFIG), before_cfg);
     assert_eq!(sb.read(SOUL), before_soul);
