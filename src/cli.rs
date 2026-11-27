@@ -174,7 +174,7 @@ enum Cmd {
             value_name = "DIR",
             num_args = 0..=1,
             default_missing_value = ".",
-            conflicts_with_all = ["source", "scope", "project", "path", "allow_insecure_source", "mcp_tokens"]
+            conflicts_with_all = ["source", "scope", "project", "path", "allow_insecure_source", "require_pin", "mcp_tokens"]
         )]
         why: Option<PathBuf>,
         /// Also estimate the tokens each MCP server's tool definitions take up,
@@ -252,6 +252,19 @@ struct TargetArgs {
     /// the network could tamper with
     #[arg(long)]
     allow_insecure_source: bool,
+    /// Refuse a git source that names no branch, tag or commit: pin it with
+    /// @<sha|tag|branch> or #<ref>
+    #[arg(long)]
+    require_pin: bool,
+}
+
+impl TargetArgs {
+    fn fetch(&self) -> source::FetchOptions {
+        source::FetchOptions {
+            allow_insecure: self.allow_insecure_source,
+            require_pin: self.require_pin,
+        }
+    }
 }
 
 #[derive(Args, Debug, Clone)]
@@ -271,6 +284,10 @@ struct StatusArgs {
     /// the network could tamper with
     #[arg(long)]
     allow_insecure_source: bool,
+    /// Refuse a git source that names no branch, tag or commit: pin it with
+    /// @<sha|tag|branch> or #<ref>
+    #[arg(long)]
+    require_pin: bool,
     /// Exit with status 1 when anything drifted
     #[arg(long)]
     exit_code: bool,
@@ -897,9 +914,9 @@ enum Mode {
 fn load_source(
     src: &str,
     path: Option<&str>,
-    allow_insecure: bool,
+    fetch: source::FetchOptions,
 ) -> Result<(source::Resolved, Profile)> {
-    let resolved = source::resolve(src, path, allow_insecure)?;
+    let resolved = source::resolve(src, path, fetch)?;
     let profile = profile_io::load_named(&resolved.dir, &resolved.name_hint)?;
     for w in &profile.warnings {
         eprintln!("{} {}", paint(YELLOW, "warning:"), visible_line(w));
@@ -1059,7 +1076,7 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
 }
 
 fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) -> Result<i32> {
-    let (resolved, profile) = load_source(src, t.path.as_deref(), t.allow_insecure_source)?;
+    let (resolved, profile) = load_source(src, t.path.as_deref(), t.fetch())?;
     let targets = select_targets(&t.to, &ctx.env, "to")?;
     let (profile, mut plan) = plan_apply(ctx, &resolved, profile, &targets, a, &BTreeSet::new())?;
     if matches!(mode, Mode::Diff { .. }) {
@@ -1667,7 +1684,14 @@ fn cmd_status(ctx: &Ctx, src: Option<&str>, s: &StatusArgs) -> Result<i32> {
     let mut rows: Vec<StatusRow> = Vec::new();
     match src {
         Some(src) => {
-            let (resolved, profile) = load_source(src, s.path.as_deref(), s.allow_insecure_source)?;
+            let (resolved, profile) = load_source(
+                src,
+                s.path.as_deref(),
+                source::FetchOptions {
+                    allow_insecure: s.allow_insecure_source,
+                    require_pin: s.require_pin,
+                },
+            )?;
             let targets = select_targets(s.to.as_deref().unwrap_or("detected"), env, "to")?;
             let loaded = profile.clone();
             let (profile, plan) = plan_apply(
@@ -1799,7 +1823,7 @@ fn cmd_status(ctx: &Ctx, src: Option<&str>, s: &StatusArgs) -> Result<i32> {
 
 fn cmd_sync(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, s: &SyncArgs) -> Result<i32> {
     let env = &ctx.env;
-    let (resolved, loaded) = load_source(src, t.path.as_deref(), t.allow_insecure_source)?;
+    let (resolved, loaded) = load_source(src, t.path.as_deref(), t.fetch())?;
     if resolved.remote && s.from.is_some() {
         bail!(
             "--from can't be used with a git source: kitbag can't write edits back into a repository it cloned. Clone it, sync the local directory with --from, then commit and push"
@@ -2283,7 +2307,7 @@ fn cmd_doctor(
     if let Some(src) = src {
         println!("\n{}", paint(BOLD, "Profile"));
         // Not load_source: doctor lists the profile's warnings itself.
-        let loaded = source::resolve(src, t.path.as_deref(), t.allow_insecure_source)
+        let loaded = source::resolve(src, t.path.as_deref(), t.fetch())
             .and_then(|r| profile_io::load_named(&r.dir, &r.name_hint).map(|p| (r, p)));
         match loaded {
             Err(e) => {
