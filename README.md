@@ -435,12 +435,14 @@ dropped silently):
 | `grok-build` | `$GROK_HOME/hooks/kitbag.json` (default `~/.grok/`) / `.grok/hooks/kitbag.json` | `hooks/kitbag/` next to it | [hooks](https://docs.x.ai/build/features/hooks) |
 | `antigravity` | `~/.gemini/config/hooks.json` / `.agents/hooks.json`, as a hook named `kitbag` | `~/.gemini/config/hooks/kitbag/` | [hooks](https://antigravity.google/docs/hooks) |
 | `copilot` | `$COPILOT_HOME/hooks/kitbag.json` (default `~/.copilot/`) / `.github/hooks/kitbag.json` | `hooks/kitbag/` next to it | [hooks reference](https://docs.github.com/copilot/reference/hooks-reference) |
-| `claude-desktop`, `opencode`, `windsurf` | not carried: warn | none | see below |
+| `claude-desktop`, `opencode`, `windsurf`, `zed`, `hermes` | not carried: warn | none | see below |
 
 Claude Desktop has no hook configuration of its own. opencode runs hooks only as
 JavaScript/TypeScript plugins, which kitbag doesn't write. Windsurf's docs now point to Devin
 Desktop's `.devin/hooks.v1.json` and give no user-level path or event list, so its hooks are
-not verified and not written. Capture reads a Grok Build or Copilot directory's every
+not verified and not written. Zed has no hook file kitbag has verified against its docs. Hermes
+documents [shell hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks)
+in `config.yaml` (and gateway, plugin and outbound hook systems) that kitbag doesn't write yet. Capture reads a Grok Build or Copilot directory's every
 `*.json`, and every hook of an Antigravity file that isn't `enabled: false`; apply writes
 Grok Build's and Copilot's own `kitbag.json` and Antigravity's own `kitbag` hook, so undo
 removes only that. The tools keep their own approval steps: Codex skips a new or changed hook

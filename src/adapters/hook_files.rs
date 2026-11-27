@@ -334,6 +334,10 @@ const NO_HOOKS: &[(&str, &str)] = &[
         "Claude Desktop has no hook configuration of its own (Claude Code's hooks live in its settings.json)",
     ),
     (
+        "hermes",
+        "Hermes documents shell hooks in config.yaml (and gateway, plugin and outbound hook systems) that kitbag doesn't write yet",
+    ),
+    (
         "opencode",
         "opencode runs hooks only as JavaScript/TypeScript plugins, which kitbag doesn't write",
     ),
