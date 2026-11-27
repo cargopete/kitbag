@@ -223,10 +223,6 @@ impl Adapter for VsCode {
                 );
             }
             work.extensions.extend(plans);
-            work.info(
-                ID,
-                "extensions installed by this apply stay installed when it is undone ('kitbag undo' restores settings.json only); remove one with `code --uninstall-extension publisher.extension`",
-            );
         }
         work.info(
             ID,

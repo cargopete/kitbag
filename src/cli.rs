@@ -1686,7 +1686,7 @@ fn confirm_installs(plan: &Plan, yes: bool) -> Result<bool> {
     }
     println!();
     let ok = confirm(&format!(
-        "Install {} extension(s)? They run code in the editor, and 'kitbag undo' does not remove them.",
+        "Install {} extension(s)? They run code in the editor, and 'kitbag undo' uninstalls the ones this apply installs.",
         pending_installs(plan)
     ))?;
     if !ok {
@@ -1697,27 +1697,34 @@ fn confirm_installs(plan: &Plan, yes: bool) -> Result<bool> {
 
 /// Install the extensions the plan lists as to be installed, after the files
 /// are written. False when one failed (the others are still tried).
-fn install_extensions(plan: &Plan) -> bool {
+fn install_extensions(plan: &Plan) -> (bool, Vec<String>) {
     let todo: Vec<&crate::editor::ExtensionPlan> = plan
         .extensions
         .iter()
         .filter(|e| e.state == crate::editor::ExtState::Install)
         .collect();
     if todo.is_empty() {
-        return true;
+        return (true, Vec::new());
     }
     let Some(cli) = crate::editor::find_cli() else {
         println!(
             "{} `code` is not on PATH; no extension was installed",
             paint(YELLOW, "warning:")
         );
-        return false;
+        return (false, Vec::new());
     };
     let mut all = true;
+    let mut installed = Vec::new();
     for e in todo {
         let name = visible_line(&crate::editor::describe_extension(&e.spec)).into_owned();
         match crate::editor::install(&cli, &e.spec) {
-            Ok(()) => println!("{} extension {name}", paint(GREEN, "Installed")),
+            Ok(()) => {
+                println!("{} extension {name}", paint(GREEN, "Installed"));
+                let id = crate::editor::split_spec(&e.spec).0.to_string();
+                if !installed.contains(&id) {
+                    installed.push(id);
+                }
+            }
             Err(why) => {
                 all = false;
                 println!(
@@ -1727,7 +1734,39 @@ fn install_extensions(plan: &Plan) -> bool {
             }
         }
     }
-    all
+    (all, installed)
+}
+
+/// [`install_extensions`], then record what it newly installed on the
+/// transaction `tx_id` (already written) so `kitbag undo` can uninstall it.
+/// With no transaction (the files already matched), one with no files is
+/// written for the purpose.
+fn install_and_record(ctx: &Ctx, plan: &Plan, tx_id: Option<&str>, desc: &str) -> Result<bool> {
+    let (ok, installed) = install_extensions(plan);
+    if installed.is_empty() {
+        return Ok(ok);
+    }
+    let store = Store::new(&ctx.state_dir);
+    let id = match tx_id {
+        Some(id) => id.to_string(),
+        None => {
+            store
+                .commit_from(
+                    &[],
+                    desc,
+                    &plan.targets,
+                    &crate::txn::WriteOptions::default(),
+                    None,
+                )?
+                .id
+        }
+    };
+    store.record_extensions(&id, &installed)?;
+    println!(
+        "Recorded {} installed extension(s); 'kitbag undo {id}' uninstalls them.",
+        installed.len()
+    );
+    Ok(ok)
 }
 
 /// An MCP server as `inspect` shows it: redacted as capture would redact
@@ -2549,6 +2588,7 @@ fn present(
         }
         // The files already match, but the source moved: remember the commit
         // in a transaction with no files, so `status` stops calling it drift.
+        let mut files_free_tx: Option<String> = None;
         if matches!(mode, Mode::Apply { dry_run: false, .. })
             && !plan.targets.is_empty()
             && plan.withheld.is_empty()
@@ -2572,6 +2612,7 @@ fn present(
                 &crate::txn::WriteOptions::default(),
                 Some(git),
             )?;
+            files_free_tx = Some(tx.id.clone());
             println!(
                 "Recorded commit {} for {}; no files changed. Undo with {}",
                 visible_line(commit),
@@ -2589,7 +2630,13 @@ fn present(
                 record(None)?;
                 return Ok(1);
             }
-            let ok = install_extensions(plan);
+            let desc = format!(
+                "apply {} -> {} ({}), files unchanged, extensions installed",
+                resolved.origin,
+                plan.targets.join(", "),
+                where_
+            );
+            let ok = install_and_record(ctx, plan, files_free_tx.as_deref(), &desc)?;
             record(None)?;
             return Ok(i32::from(!ok));
         }
@@ -2652,7 +2699,8 @@ fn present(
                 source: resolved.source.clone(),
                 commit: c.clone(),
             });
-            match engine::commit_from(plan, &desc, &ctx.state_dir, git)? {
+            let tx_written = engine::commit_from(plan, &desc, &ctx.state_dir, git)?;
+            match &tx_written {
                 Some(tx) => {
                     record(Some(&tx.id))?;
                     println!(
@@ -2670,7 +2718,13 @@ fn present(
                     write_token_stores(tokens)?;
                 }
             }
-            Ok(i32::from(!install_extensions(plan)))
+            let tx_id = tx_written.as_ref().map(|t| t.id.clone());
+            Ok(i32::from(!install_and_record(
+                ctx,
+                plan,
+                tx_id.as_deref(),
+                &desc,
+            )?))
         }
     }
 }
@@ -3730,8 +3784,9 @@ fn cmd_undo(ctx: &Ctx, id: Option<&str>, force: bool) -> Result<i32> {
             tildify(&t.path, &ctx.env.home)
         );
     }
+    let failed = uninstall_recorded(&tx.extensions);
     if done.refused.is_empty() {
-        Ok(0)
+        Ok(i32::from(failed))
     } else {
         println!(
             "\n{} {} file(s) are no longer where kitbag wrote them, so undo didn't touch them (--force doesn't change this). Check them by hand.",
@@ -3740,6 +3795,44 @@ fn cmd_undo(ctx: &Ctx, id: Option<&str>, force: bool) -> Result<i32> {
         );
         Ok(1)
     }
+}
+
+/// Uninstall the extensions the undone apply installed (only those). A
+/// missing `code` or a failure leaves the extension installed and says so.
+/// True when one was left.
+fn uninstall_recorded(ids: &[String]) -> bool {
+    if ids.is_empty() {
+        return false;
+    }
+    let Some(cli) = crate::editor::find_cli() else {
+        println!(
+            "{} `code` is not on PATH; left installed: {}. Remove with `code --uninstall-extension publisher.extension`.",
+            paint(YELLOW, "warning:"),
+            visible_line(&ids.join(", "))
+        );
+        return true;
+    };
+    let mut left = false;
+    for id in ids {
+        let name = visible_line(id).into_owned();
+        match crate::editor::uninstall(&cli, id) {
+            Ok(crate::editor::Uninstalled::Removed) => {
+                println!("  {}  extension {name}", paint(DIM, "uninstalled"));
+            }
+            Ok(crate::editor::Uninstalled::Gone) => println!(
+                "  {}  extension {name} (already uninstalled)",
+                paint(DIM, "unchanged")
+            ),
+            Err(why) => {
+                left = true;
+                println!(
+                    "  {}  extension {name} left installed: {why}",
+                    paint(YELLOW, "warning")
+                );
+            }
+        }
+    }
+    left
 }
 
 fn cmd_history(ctx: &Ctx, as_json: bool) -> Result<i32> {

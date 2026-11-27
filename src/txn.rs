@@ -67,6 +67,11 @@ pub struct Transaction {
     /// kitbag 0.1.6 and older.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<GitCommit>,
+    /// Extension ids (`publisher.extension`) this apply newly and successfully
+    /// installed, so undo can uninstall exactly those. Missing in transactions
+    /// recorded by kitbag 0.1.11 and older.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<String>,
 }
 
 /// The commit a git source was applied at.
@@ -364,6 +369,25 @@ impl Store {
         )
     }
 
+    /// Add the extension ids an apply installed after its files were written
+    /// to the already-saved transaction `id`.
+    pub fn record_extensions(&self, id: &str, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self
+            .list()?
+            .into_iter()
+            .find(|t| t.id == id)
+            .ok_or_else(|| anyhow::anyhow!("transaction {id} not found"))?;
+        for i in ids {
+            if !tx.extensions.contains(i) {
+                tx.extensions.push(i.clone());
+            }
+        }
+        self.save(&tx)
+    }
+
     fn create_private_dir(path: &Path) -> Result<()> {
         fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
         #[cfg(unix)]
@@ -417,6 +441,7 @@ impl Store {
             entries: Vec::new(),
             created_dirs: Vec::new(),
             git,
+            extensions: Vec::new(),
         };
         Self::create_private_dir(&self.backups())?;
         Self::create_private_dir(&self.tx_dir(&tx.id))?;
