@@ -1,6 +1,7 @@
 //! Per-tool targeting of MCP servers (`targets` / `disabled_on`): servers are
 //! only applied where the profile enables them, and a server kitbag applied
-//! to a tool earlier is removed from it once the profile disables it there.
+//! to a tool earlier is removed from it, or turned off with the tool's own flag
+//! where it has one, once the profile disables it there.
 
 mod common;
 
@@ -181,7 +182,7 @@ fn older_and_newer_profiles_still_load() {
 }
 
 #[test]
-fn disabling_removes_what_kitbag_applied_and_undo_restores_it() {
+fn disabling_removes_or_turns_off_what_kitbag_applied_and_undo_restores_it() {
     let sb = Sandbox::empty();
     write_profile(&sb, "p", &profile("shared", ""));
     apply(&sb, "p", "claude-code,cursor,codex");
@@ -195,48 +196,68 @@ fn disabling_removes_what_kitbag_applied_and_undo_restores_it() {
         "p",
         &profile("shared", "disabled_on = [\"cursor\", \"codex\"]\n"),
     );
+    // Cursor has no switch for a server, so its entry goes; Codex has
+    // `enabled = false`, so its entry stays.
     sb.cli()
         .args(["diff", "p", "--to", "claude-code,cursor,codex"])
         .assert()
         .success()
         .stdout(
             contains("MCP servers removed (disabled for these tools in the profile")
-                .and(contains("heavy  (cursor, codex)")),
+                .and(contains("heavy  (cursor)"))
+                .and(contains("MCP servers turned off (disabled for these tools"))
+                .and(contains("heavy  (codex)")),
         );
     sb.cli()
         .args(["status", "p", "--to", "cursor"])
         .assert()
         .success()
         .stdout(contains("mcp heavy").and(contains("apply removes it")));
+    sb.cli()
+        .args(["status", "p", "--to", "codex"])
+        .assert()
+        .success()
+        .stdout(contains("mcp heavy").and(contains("apply turns it off")));
 
     let out = apply(&sb, "p", "claude-code,cursor,codex");
     assert!(out.contains("MCP server 'heavy' removed from"), "{out}");
+    assert!(out.contains("MCP server 'heavy' turned off in"), "{out}");
     assert!(!cursor_has(&sb, "heavy"));
     assert!(cursor_has(&sb, "light"));
     let codex = sb.read(CODEX);
-    assert!(!codex.contains("heavy"), "{codex}");
+    let table = codex.split("[mcp_servers.heavy]").nth(1).unwrap();
+    let table = table.split("\n[").next().unwrap();
+    assert!(table.contains("enabled = false"), "{codex}");
     assert!(codex.contains("[mcp_servers.light]"), "{codex}");
     assert!(sb.json(CLAUDE)["mcpServers"].get("heavy").is_some());
 
-    // Applying again has nothing left to do.
+    // Applying again has nothing left to do, and status agrees.
     let out = apply(&sb, "p", "claude-code,cursor,codex");
     assert!(out.contains("Up to date"), "{out}");
+    assert!(!out.contains("left in place"), "{out}");
+    sb.cli()
+        .args(["status", "p", "--to", "codex"])
+        .assert()
+        .success()
+        .stdout(contains("apply turns it off").not());
 
-    // Undo puts the removed servers back, byte for byte.
+    // Undo puts everything back, byte for byte.
     sb.cli().arg("undo").assert().success();
     assert_eq!(sb.read(CURSOR), cursor_before);
     assert_eq!(sb.read(CODEX), codex_before);
 
-    // After the undo the earlier record stands again, so a re-apply removes them again.
+    // After the undo the earlier record stands again, so a re-apply does it again.
     apply(&sb, "p", "claude-code,cursor,codex");
     assert!(!cursor_has(&sb, "heavy"));
-    assert!(!sb.read(CODEX).contains("heavy"));
+    assert!(sb.read(CODEX).contains("enabled = false"));
 
-    // Enabling it again is an ordinary addition.
+    // Enabling it again is an ordinary addition (Cursor) and clears the flag (Codex).
     write_profile(&sb, "p", &profile("shared", ""));
-    let out = apply(&sb, "p", "cursor");
+    let out = apply(&sb, "p", "cursor,codex");
     assert!(out.contains("MCP servers added or changed"), "{out}");
     assert!(cursor_has(&sb, "heavy"));
+    assert!(!sb.read(CODEX).contains("enabled"), "{}", sb.read(CODEX));
+    assert_eq!(sb.read(CODEX), codex_before);
 }
 
 #[test]
@@ -283,8 +304,8 @@ fn edited_servers_and_other_profiles_servers_are_left_alone() {
     );
     assert!(cursor_has(&sb, "heavy"));
     assert!(
-        !sb.read(CODEX).contains("heavy"),
-        "codex was unchanged, so it goes"
+        sb.read(CODEX).contains("enabled = false"),
+        "codex was unchanged, so it is turned off"
     );
 
     // A different profile that disables it doesn't remove what "shared" applied.
@@ -491,12 +512,12 @@ fn antigravity_servers_can_be_disabled_and_undone() {
     );
     let out = apply(&sb, "p", "antigravity,cursor");
     assert!(
-        out.contains("MCP server 'heavy' removed from ~")
+        out.contains("MCP server 'heavy' turned off in ~")
             && out.contains("disabled for antigravity in the profile"),
         "{out}"
     );
     let ag = sb.json(AG);
-    assert!(ag["mcpServers"].get("heavy").is_none(), "{ag}");
+    assert_eq!(ag["mcpServers"]["heavy"]["disabled"], true, "{ag}");
     assert!(ag["mcpServers"].get("light").is_some(), "{ag}");
     assert!(cursor_has(&sb, "heavy"));
 

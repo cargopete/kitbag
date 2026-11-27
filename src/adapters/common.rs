@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::{ApplyOptions, Captured, Env, SecretsMode, Work};
 use crate::edit::block;
@@ -696,6 +696,36 @@ pub fn merge_json_servers(
     opts: &ApplyOptions,
     target: &str,
 ) -> Result<()> {
+    merge_json_servers_off(work, (path, key_path), servers, managed, opts, target, None)
+}
+
+/// `disabled: true`, the flag Cline, Roo Code, Antigravity and opencode 2 use.
+pub fn set_disabled_true(def: &mut Map<String, Value>) {
+    def.insert("disabled".into(), json!(true));
+}
+
+/// `enabled: false`, the flag Zed, Hermes Agent and opencode 1 use.
+pub fn set_enabled_false(def: &mut Map<String, Value>) {
+    def.insert("enabled".into(), json!(false));
+}
+
+/// A tool's flag for a server it keeps off: how to set it on an entry, and
+/// how to spell it in notes.
+pub type OffFlag<'a> = (SetOff<'a>, &'a str);
+
+/// [`merge_json_servers`] for a tool that has a flag for a server that is
+/// off (`off`): a server the profile disables for the tool is turned off
+/// with it, where kitbag added the entry and nobody edited it, instead of
+/// being removed (see [`off_skipped_server`]). Without `off` it is removed.
+pub fn merge_json_servers_off(
+    work: &mut Work,
+    (path, key_path): (&Path, &[&str]),
+    servers: &[(String, Value)],
+    managed: &[&str],
+    opts: &ApplyOptions,
+    target: &str,
+    off: Option<OffFlag>,
+) -> Result<()> {
     let skipped = skipped_servers(work, target);
     if servers.is_empty() && skipped.is_empty() {
         return Ok(());
@@ -710,9 +740,15 @@ pub fn merge_json_servers(
     let existing = doc.object(key_path);
     let mut changed = false;
     for name in &skipped {
-        if remove_skipped_server(work, opts, target, path, name, existing.get(name)) {
-            let mut full: Vec<&str> = key_path.to_vec();
-            full.push(name);
+        let mut full: Vec<&str> = key_path.to_vec();
+        full.push(name);
+        if let Some(off) = off {
+            let cur = existing.get(name);
+            if let Some(def) = off_skipped_server(work, opts, target, path, name, cur, off) {
+                doc.set(&full, &def);
+                changed = true;
+            }
+        } else if remove_skipped_server(work, opts, target, path, name, existing.get(name)) {
             doc.remove(&full);
             changed = true;
         }
@@ -871,6 +907,40 @@ pub fn skipped_servers(work: &Work, target: &str) -> Vec<String> {
         .collect()
 }
 
+/// [`skipped_servers`], taken out of the plan's list so the generic merge
+/// leaves them alone: for a tool whose servers are switched off by a list
+/// (see [`sync_off_list`]), not by removing the entry.
+pub fn take_skipped_servers(work: &mut Work, target: &str) -> Vec<String> {
+    let names = skipped_servers(work, target);
+    work.skipped_servers.retain(|(t, _)| t != target);
+    names
+}
+
+/// Mark the captured servers that the array at `key` of the JSON file `path`
+/// names (a tool's own list of servers it keeps off) as disabled.
+pub fn mark_disabled_from_list(
+    cap: &mut Captured,
+    path: &Path,
+    key: &[&str],
+    target: &str,
+) -> Result<()> {
+    let Some(text) = cap.read_config(path, target)? else {
+        return Ok(());
+    };
+    let doc = JsonDoc::parse(Some(&text), path)?;
+    let names = string_list(doc.get(key).as_ref());
+    if names.is_empty() {
+        return Ok(());
+    }
+    cap.sources.push(path.to_path_buf());
+    for n in names {
+        if let Some(s) = cap.profile.mcp_servers.get_mut(&n) {
+            s.disabled = true;
+        }
+    }
+    Ok(())
+}
+
 /// Note that the plan writes server `name` to `path` as `def`, or removes it (`None`).
 pub fn record_server_write(
     work: &mut Work,
@@ -884,6 +954,7 @@ pub fn record_server_write(
         path: path.to_path_buf(),
         name: name.to_string(),
         hash: def.map(crate::sync::entry_hash),
+        off: false,
     });
     if def.is_none() {
         work.removed_servers
@@ -891,24 +962,20 @@ pub fn record_server_write(
     }
 }
 
-/// Should server `name`, which the profile disables for `target`, be removed
-/// from `path`, where its entry is `current`? Only if an earlier apply of the
-/// same profile (same name and source) put it there and it is unchanged
-/// since; anything else (added by hand, by another profile, or edited) stays,
-/// and the plan says why. A profile from a git source also needs the opt-in
-/// for adding servers; without it the removal is held back. A removal is
-/// noted and recorded.
-pub fn remove_skipped_server(
-    work: &mut Work,
+/// Why server `name`, which the profile disables for `target`, must stay as
+/// it is in `path`, where its entry is `current`: `None` when kitbag may
+/// change it. Only an entry an earlier apply of the same profile (same name
+/// and source) put there, unchanged since, is kitbag's to change; anything
+/// else (added by hand, by another profile, or edited) stays, and the plan
+/// says why.
+fn skipped_keep_reason(
+    work: &Work,
     opts: &ApplyOptions,
     target: &str,
     path: &Path,
     name: &str,
-    current: Option<&Value>,
-) -> bool {
-    let Some(current) = current else {
-        return false;
-    };
+    current: &Value,
+) -> Option<String> {
     let real = work
         .fs
         .real_path(path)
@@ -921,7 +988,7 @@ pub fn remove_skipped_server(
     let remote = opts.git_removals.is_some();
     let file = crate::ui::tildify(path, &work.home);
     let disabled = format!("MCP server '{name}' is disabled for {target} in the profile");
-    let keep = match rec {
+    match rec {
         None => Some(format!(
             "{disabled}, but kitbag has no record of adding it to {file}, so it was left in place; remove it by hand if you don't want it"
         )),
@@ -946,22 +1013,59 @@ pub fn remove_skipped_server(
             "kept MCP server '{name}' in {file}, disabled for {target} in the profile, because --no-overwrite was given"
         )),
         Some(_) => None,
+    }
+}
+
+/// A profile from a git source needs the opt-in for changing servers; without
+/// it the change is held back, warned about and listed in the plan. Returns
+/// `true` when it is held back.
+fn held_back_from_git(
+    work: &mut Work,
+    opts: &ApplyOptions,
+    target: &str,
+    path: &Path,
+    name: &str,
+    what: &str,
+) -> bool {
+    if opts.git_removals.as_ref().is_none_or(|a| a.allows(name)) {
+        return false;
+    }
+    let file = crate::ui::tildify(path, &work.home);
+    work.warn(
+        target,
+        format!(
+            "MCP server '{name}' is disabled for {target} in the profile, but the profile comes from a git source, so it was not {what} in {file} (pass --allow-git-mcp {name} to do it)"
+        ),
+    );
+    work.withheld_removals
+        .push((target.to_string(), name.to_string()));
+    true
+}
+
+/// Should server `name`, which the profile disables for `target`, be removed
+/// from `path`, where its entry is `current`? Only if `skipped_keep_reason`
+/// finds nothing against it. A profile from a git source also needs the
+/// opt-in for changing servers; without it the removal is held back. A
+/// removal is noted and recorded.
+pub fn remove_skipped_server(
+    work: &mut Work,
+    opts: &ApplyOptions,
+    target: &str,
+    path: &Path,
+    name: &str,
+    current: Option<&Value>,
+) -> bool {
+    let Some(current) = current else {
+        return false;
     };
-    if let Some(msg) = keep {
+    if let Some(msg) = skipped_keep_reason(work, opts, target, path, name, current) {
         work.warn(target, msg);
         return false;
     }
-    if opts.git_removals.as_ref().is_some_and(|a| !a.allows(name)) {
-        work.warn(
-            target,
-            format!(
-                "{disabled}, but the profile comes from a git source, so it was not removed from {file} (pass --allow-git-mcp {name} to remove it)"
-            ),
-        );
-        work.withheld_removals
-            .push((target.to_string(), name.to_string()));
+    if held_back_from_git(work, opts, target, path, name, "removed from") {
         return false;
     }
+    let file = crate::ui::tildify(path, &work.home);
     work.info(
         target,
         format!(
@@ -970,6 +1074,214 @@ pub fn remove_skipped_server(
     );
     record_server_write(work, target, path, name, None);
     true
+}
+
+/// Sets the tool's own "off" flag on a server entry (`disabled: true`,
+/// `enabled: false` ...).
+pub type SetOff<'a> = &'a dyn Fn(&mut Map<String, Value>);
+
+/// Server `name` is disabled for `target` in the profile, and the tool
+/// switches a server off with a flag on its entry: instead of removing the
+/// entry kitbag added, return it with the flag set (`flag` names it for the
+/// note), for the caller to write. `None` when there is nothing to do: no
+/// entry, one that is off already (nothing is said, a second apply is up to
+/// date), or one kitbag may not change (see `skipped_keep_reason`). Turning
+/// the flag off again is the normal apply of the server, since the flag is
+/// one of the keys kitbag manages. The change is noted and recorded.
+pub fn off_skipped_server(
+    work: &mut Work,
+    opts: &ApplyOptions,
+    target: &str,
+    path: &Path,
+    name: &str,
+    current: Option<&Value>,
+    (set_off, flag): OffFlag,
+) -> Option<Value> {
+    let current = current?;
+    let mut off = current.as_object()?.clone();
+    set_off(&mut off);
+    let off = Value::Object(off);
+    if &off == current {
+        return None;
+    }
+    if let Some(msg) = skipped_keep_reason(work, opts, target, path, name, current) {
+        work.warn(target, msg);
+        return None;
+    }
+    if held_back_from_git(work, opts, target, path, name, "turned off in") {
+        return None;
+    }
+    let file = crate::ui::tildify(path, &work.home);
+    work.info(
+        target,
+        format!(
+            "MCP server '{name}' turned off in {file}: disabled for {target} in the profile (kitbag added it there before; the entry stays with {flag})"
+        ),
+    );
+    record_server_write(work, target, path, name, Some(&off));
+    work.turned_off_servers
+        .push((target.to_string(), name.to_string()));
+    Some(off)
+}
+
+/// Where a tool lists the servers it keeps off, by name.
+pub struct OffList<'a> {
+    pub path: &'a Path,
+    /// The array of server names, e.g. `["disabledMcpjsonServers"]` or
+    /// `["mcp", "excluded"]`.
+    pub key: &'a [&'a str],
+    /// Spells the list for notes.
+    pub label: &'a str,
+}
+
+/// For a tool that switches a server off by listing its name (Claude Code's
+/// `disabledMcpjsonServers`, Gemini CLI's `mcp.excluded`, Copilot CLI's
+/// `disabledMcpServers`) rather than with a flag on the entry.
+///
+/// * A server the profile disables for `target`, whose entry (in `entries`
+///   under `entries_key`) an earlier apply wrote and nobody edited, stays
+///   where it is and its name goes into the list.
+/// * A server the profile enables (`enabled`), whose name the list holds
+///   because an earlier apply of this profile put it there (the record says
+///   so), has the name taken out again.
+///
+/// Names the user listed themselves are never touched. Call after the
+/// entries are merged, so the entries are the ones the plan leaves.
+pub fn sync_off_list(
+    work: &mut Work,
+    opts: &ApplyOptions,
+    target: &str,
+    (entries, entries_key): (&Path, &[&str]),
+    list: &OffList,
+    skipped: &[String],
+    enabled: &[String],
+) -> Result<()> {
+    if skipped.is_empty() && enabled.is_empty() {
+        return Ok(());
+    }
+    let present = match work.fs.read(entries)? {
+        Some(text) => JsonDoc::parse(Some(&text), entries)?.object(entries_key),
+        None => Map::new(),
+    };
+    let list_text = work.fs.read(list.path)?;
+    if list_text.is_none() && skipped.iter().all(|n| !present.contains_key(n)) {
+        return Ok(());
+    }
+    let mut doc = JsonDoc::parse(list_text.as_deref(), list.path)?;
+    let mut names = string_list(doc.get(list.key).as_ref());
+    let original = names.clone();
+    let real = work
+        .fs
+        .real_path(entries)
+        .unwrap_or_else(|_| entries.to_path_buf());
+    let list_file = crate::ui::tildify(list.path, &work.home);
+    for name in skipped {
+        let Some(cur) = present.get(name) else {
+            continue;
+        };
+        if names.contains(name) {
+            continue;
+        }
+        if let Some(msg) = skipped_keep_reason(work, opts, target, entries, name, cur) {
+            work.warn(target, msg);
+            continue;
+        }
+        if held_back_from_git(work, opts, target, entries, name, "turned off in") {
+            continue;
+        }
+        names.push(name.clone());
+        work.info(
+            target,
+            format!(
+                "MCP server '{name}' turned off: disabled for {target} in the profile, so its name was added to {} in {list_file} (kitbag added the server before; its entry stays)",
+                list.label
+            ),
+        );
+        work.server_writes.push(super::ServerWrite {
+            target: target.to_string(),
+            path: entries.to_path_buf(),
+            name: name.clone(),
+            hash: Some(crate::sync::entry_hash(cur)),
+            off: true,
+        });
+        work.turned_off_servers
+            .push((target.to_string(), name.clone()));
+    }
+    for name in enabled {
+        if !names.contains(name) {
+            continue;
+        }
+        let Some(cur) = present.get(name) else {
+            continue;
+        };
+        let Some(rec) = opts
+            .applied_servers
+            .iter()
+            .find(|r| r.target == target && r.path == real && &r.name == name && r.off)
+        else {
+            continue;
+        };
+        if rec.profile != work.profile || rec.source != opts.source {
+            work.warn(
+                target,
+                format!(
+                    "MCP server '{name}' is enabled for {target} in the profile, but {} in {list_file} lists it and was put there by a profile '{}'{}, so it was left off",
+                    list.label,
+                    rec.profile,
+                    rec.source
+                        .as_ref()
+                        .map(|s| format!(" from {s}"))
+                        .unwrap_or_default()
+                ),
+            );
+            continue;
+        }
+        if !opts.overwrite {
+            work.warn(
+                target,
+                format!(
+                    "kept MCP server '{name}' in {} in {list_file}, enabled for {target} in the profile, because --no-overwrite was given",
+                    list.label
+                ),
+            );
+            continue;
+        }
+        names.retain(|n| n != name);
+        work.info(
+            target,
+            format!(
+                "MCP server '{name}' turned on again: enabled for {target} in the profile, so its name was taken out of {} in {list_file}",
+                list.label
+            ),
+        );
+        // A change to review, like any server the plan switches on.
+        work.changed_servers
+            .push((target.to_string(), name.clone()));
+        work.server_writes.push(super::ServerWrite {
+            target: target.to_string(),
+            path: entries.to_path_buf(),
+            name: name.clone(),
+            hash: Some(crate::sync::entry_hash(cur)),
+            off: false,
+        });
+    }
+    if names != original {
+        if names.is_empty() {
+            // Leave no empty `mcp: {}` behind.
+            let mut key = list.key;
+            while !key.is_empty() {
+                if key.len() < list.key.len() && doc.get(key).is_some_and(|v| v != json!({})) {
+                    break;
+                }
+                doc.remove(key);
+                key = &key[..key.len() - 1];
+            }
+        } else {
+            doc.set(list.key, &json!(names));
+        }
+        work.fs.write(list.path, doc.render())?;
+    }
+    Ok(())
 }
 
 /// For a config file that `target` shares with `sharer` (the project

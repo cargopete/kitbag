@@ -30,8 +30,8 @@ use anyhow::Result;
 use serde_json::{Map, Value, json};
 
 use super::common::{
-    Resolver, capture_instructions, import_server, merge_json_servers, server_entries,
-    server_from_json, servers_for, write_instructions,
+    Resolver, capture_instructions, import_server, merge_json_servers_off, server_entries,
+    server_from_json, servers_for, set_enabled_false, write_instructions,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Os, Scope, Support, Work};
 use crate::edit::json::parse_value;
@@ -305,14 +305,14 @@ impl Adapter for Zed {
                 ),
             );
         }
-        merge_json_servers(
+        merge_json_servers_off(
             work,
-            &file,
-            &["context_servers"],
+            (&file, &["context_servers"]),
             &servers,
             MANAGED_KEYS,
             opts,
             ID,
+            Some((&set_enabled_false, "enabled: false")),
         )?;
         if env.scope == Scope::Project && !servers.is_empty() {
             work.info(

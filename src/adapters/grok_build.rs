@@ -36,9 +36,9 @@ use toml_edit::Item;
 
 use super::common::{
     MdKind, add_rule, capture_instructions, capture_markdown_dir, capture_skills_dir,
-    import_server, merge_server_def, read_text_item, record_server_write, remove_skipped_server,
-    render_server, server_entries, servers_for, skipped_servers, str_of, string_list, string_map,
-    write_instructions, write_skill,
+    import_server, merge_server_def, off_skipped_server, read_text_item, record_server_write,
+    render_server, server_entries, servers_for, set_enabled_false, skipped_servers, str_of,
+    string_list, string_map, write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::keep_line_endings;
@@ -422,10 +422,22 @@ impl Adapter for GrokBuild {
                 .get("mcp_servers")
                 .and_then(|t| t.get(&name))
                 .map(item_to_json);
-            if remove_skipped_server(work, opts, ID, &p.config, &name, cur.as_ref())
-                && let Some(t) = doc.get_mut("mcp_servers").and_then(Item::as_table_like_mut)
+            if off_skipped_server(
+                work,
+                opts,
+                ID,
+                &p.config,
+                &name,
+                cur.as_ref(),
+                (&set_enabled_false, "enabled = false"),
+            )
+            .is_some()
+                && let Some(t) = doc
+                    .get_mut("mcp_servers")
+                    .and_then(|t| t.get_mut(&name))
+                    .and_then(Item::as_table_like_mut)
             {
-                t.remove(&name);
+                t.insert("enabled", toml_edit::value(false));
                 changed = true;
             }
         }

@@ -49,9 +49,9 @@ use serde_json::{Map, Value, json};
 
 use super::common::{
     MdKind, add_agent, capture_instructions, capture_markdown_dir, capture_skills_dir, claim_name,
-    import_server, merge_json_servers, name_from_rel, read_text_item, render_server,
-    server_entries, servers_for, str_of, string_list, string_map, write_agent, write_command,
-    write_instructions, write_skill,
+    import_server, merge_json_servers_off, name_from_rel, read_text_item, render_server,
+    server_entries, servers_for, set_disabled_true, set_enabled_false, str_of, string_list,
+    string_map, write_agent, write_command, write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
@@ -523,7 +523,19 @@ impl Adapter for OpenCode {
             Layout::Servers => &["mcp", "servers"],
             Layout::Legacy => &["mcp"],
         };
-        merge_json_servers(work, &file, key_path, &servers, MANAGED_KEYS, opts, ID)?;
+        let (set_off, flag): (fn(&mut Map<String, Value>), &str) = match layout {
+            Layout::Servers => (set_disabled_true, "disabled: true"),
+            Layout::Legacy => (set_enabled_false, "enabled: false"),
+        };
+        merge_json_servers_off(
+            work,
+            (&file, key_path),
+            &servers,
+            MANAGED_KEYS,
+            opts,
+            ID,
+            Some((&set_off, flag)),
+        )?;
 
         let had_instructions = work.fs.read(&p.instructions)?.is_some();
         write_instructions(work, &p.instructions, profile, opts, true, ID)?;

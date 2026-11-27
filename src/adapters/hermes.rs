@@ -43,8 +43,9 @@ use serde_json::{Map, Value, json};
 
 use super::common::{
     capture_instructions, capture_managed_instructions, import_server, merge_server_def,
-    note_dropped_server_keys, record_server_write, remove_skipped_server, render_server,
-    server_entries, server_from_json, servers_for, skipped_servers, str_of, write_instructions,
+    note_dropped_server_keys, off_skipped_server, record_server_write, render_server,
+    server_entries, server_from_json, servers_for, set_enabled_false, skipped_servers, str_of,
+    write_instructions,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::yaml::{YamlDoc, parse_map};
@@ -488,8 +489,16 @@ fn merge_yaml_servers(
     }
     let existing = doc.entries(SECTION);
     for name in &skipped {
-        if remove_skipped_server(work, opts, ID, path, name, existing.get(name)) {
-            doc.remove(SECTION, name)?;
+        if let Some(def) = off_skipped_server(
+            work,
+            opts,
+            ID,
+            path,
+            name,
+            existing.get(name),
+            (&set_enabled_false, "enabled: false"),
+        ) {
+            doc.set(SECTION, name, &def)?;
         }
     }
     for (name, def) in servers {

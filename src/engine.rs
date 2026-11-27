@@ -45,6 +45,8 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
     let tolerant = targets.len() > 1;
     let mut failures = Vec::new();
     let mut read = 0;
+    // Per server, the tools that have it on and those that keep it off.
+    let mut off_state: BTreeMap<String, (Vec<String>, Vec<String>)> = BTreeMap::new();
     for a in targets {
         if !a.scopes().contains(&env.scope) {
             out.notes.push(note(
@@ -75,7 +77,15 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
             }
         }
         let merged = &mut out.profile;
-        for (n, s) in c.profile.mcp_servers {
+        for (n, mut s) in c.profile.mcp_servers {
+            // Whether each tool has the server switched off is kept apart, so
+            // tools that disagree don't make the servers "differ".
+            let st = off_state.entry(n.clone()).or_default();
+            if std::mem::take(&mut s.disabled) {
+                st.1.push(a.id().to_string());
+            } else {
+                st.0.push(a.id().to_string());
+            }
             match merged.mcp_servers.get(&n) {
                 None => {
                     out.redactions.extend(c.redactions.iter().filter(|r| r.server.as_ref() == Some(&n)).cloned());
@@ -170,6 +180,21 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
                 .map(|f| format!("\n  - {f}"))
                 .collect::<String>()
         );
+    }
+    // Off in every tool that has it: disabled. Off in some only: off for just
+    // those tools, which is what `disabled_on` says.
+    for (n, (on, off)) in off_state {
+        let Some(s) = out.profile.mcp_servers.get_mut(&n) else {
+            continue;
+        };
+        if off.is_empty() {
+            continue;
+        }
+        if on.is_empty() {
+            s.disabled = true;
+        } else {
+            s.disabled_on = off;
+        }
     }
     dedupe_env_vars(&mut out);
     out.profile.sort();
@@ -282,6 +307,9 @@ pub struct Plan {
     /// MCP servers the plan removes from a tool, because the profile now
     /// disables them there (`targets` / `disabled_on`).
     pub removed_servers: Vec<ServerReview>,
+    /// MCP servers the plan keeps in a tool but turns off there, with the
+    /// tool's own flag or list, because the profile now disables them there.
+    pub turned_off_servers: Vec<ServerReview>,
     /// MCP servers a profile from a git source would remove from a tool, held
     /// back like additions until `--allow-git-mcp` names them.
     pub withheld_removals: Vec<ServerReview>,
@@ -440,6 +468,7 @@ pub fn plan(
         .collect();
     let servers = review_servers(profile, &work.changed_servers);
     let removed_servers = review_servers(profile, &work.removed_servers);
+    let turned_off_servers = review_servers(profile, &work.turned_off_servers);
     let withheld_removals = review_servers(profile, &work.withheld_removals);
     let server_writes: Vec<ServerWrite> = work
         .server_writes
@@ -575,6 +604,7 @@ pub fn plan(
         held_back,
         changed_items: work.changed_items,
         removed_servers,
+        turned_off_servers,
         withheld_removals,
         server_writes,
         hook_writes,

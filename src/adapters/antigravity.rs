@@ -47,9 +47,9 @@ use serde_json::{Map, Value, json};
 
 use super::common::{
     Resolver, add_rule, capture_instructions, capture_skills_dir, claim_name, import_server,
-    merge_json_servers, name_from_rel, read_text_item, server_entries, server_from_json,
-    servers_for, skill_with_required_frontmatter, str_of, write_instructions, write_rule,
-    write_skill,
+    merge_json_servers_off, name_from_rel, read_text_item, server_entries, server_from_json,
+    servers_for, set_disabled_true, skill_with_required_frontmatter, str_of, write_instructions,
+    write_rule, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
@@ -383,14 +383,14 @@ impl Adapter for Antigravity {
                 ),
             );
         }
-        merge_json_servers(
+        merge_json_servers_off(
             work,
-            &p.mcp,
-            &["mcpServers"],
+            (&p.mcp, &["mcpServers"]),
             &servers,
             MANAGED_KEYS,
             opts,
             ID,
+            Some((&set_disabled_true, "disabled: true")),
         )?;
         // Same file and block id as Gemini CLI at user scope: applying both
         // plans the same block twice, which leaves one copy.

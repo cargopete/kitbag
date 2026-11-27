@@ -254,10 +254,20 @@ pub struct ServerRecord {
     pub source: Option<String>,
     /// [`entry_hash`] of the entry as written; `None` when the apply removed it.
     pub hash: Option<String>,
+    /// The apply left the entry as it was and turned the server off through a
+    /// setting of the tool's own (a name in a list, see
+    /// [`crate::adapters::common::sync_off_list`]), so a later apply that
+    /// enables it again takes the name out of that list.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub off: bool,
     /// The transaction that wrote it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tx: Option<String>,
     pub at_ms: u128,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// A hash of one server entry (JSON, or a Codex table as JSON) that doesn't
@@ -367,6 +377,7 @@ fn record_servers(
             profile: profile.to_string(),
             source: plan.source.clone(),
             hash: w.hash.clone(),
+            off: w.off,
             tx: Some(tx.to_string()),
             at_ms: now,
         });

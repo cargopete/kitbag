@@ -617,7 +617,7 @@ impl Adapter for Copilot {
     ) -> Result<()> {
         let p = paths(env);
         match env.scope {
-            Scope::User => apply_user_servers(profile, env, opts, work, &p.mcp)?,
+            Scope::User => apply_user_servers(profile, env, opts, work, &p.mcp, &p.settings)?,
             Scope::Project => apply_project_servers(profile, env, opts, work, &p.mcp)?,
         }
 
@@ -798,6 +798,7 @@ fn apply_user_servers(
     opts: &ApplyOptions,
     work: &mut Work,
     path: &Path,
+    settings: &Path,
 ) -> Result<()> {
     let existing: Map<String, Value> = match work.fs.read(path)? {
         Some(text) => parse_value(Some(&text), path)?
@@ -847,6 +848,12 @@ fn apply_user_servers(
         }
         servers.push((name.clone(), Value::Object(def)));
     }
+    // Copilot CLI's `disabledMcpServers` (in its settings.json) lists servers
+    // that are "configured but not started": a server the profile disables
+    // here goes in it and its entry stays. (A project has no such switch
+    // kitbag can write without touching a file shared with the team, so there
+    // the entry is removed.)
+    let skipped = super::common::take_skipped_servers(work, ID);
     merge_json_servers(
         work,
         path,
@@ -855,6 +862,20 @@ fn apply_user_servers(
         MANAGED_KEYS,
         opts,
         ID,
+    )?;
+    let enabled: Vec<String> = servers.iter().map(|(n, _)| n.clone()).collect();
+    super::common::sync_off_list(
+        work,
+        opts,
+        ID,
+        (path, &["mcpServers"]),
+        &super::common::OffList {
+            path: settings,
+            key: &["disabledMcpServers"],
+            label: "disabledMcpServers",
+        },
+        &skipped,
+        &enabled,
     )
 }
 
