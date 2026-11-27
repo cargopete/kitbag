@@ -407,7 +407,7 @@ impl Adapter for Amp {
     fn scopes(&self) -> &'static [Scope] {
         &[Scope::User, Scope::Project]
     }
-    fn support(&self, _scope: Scope) -> [(Feature, Support); 7] {
+    fn support(&self, _scope: Scope) -> [(Feature, Support); 8] {
         Feature::ALL.map(|f| {
             let s = match f {
                 Feature::Mcp | Feature::Instructions | Feature::Skills => Support::Native,

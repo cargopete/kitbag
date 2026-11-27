@@ -221,7 +221,7 @@ impl Adapter for ContinueIde {
     fn scopes(&self) -> &'static [Scope] {
         &[Scope::User, Scope::Project]
     }
-    fn support(&self, scope: Scope) -> [(Feature, Support); 7] {
+    fn support(&self, scope: Scope) -> [(Feature, Support); 8] {
         Feature::ALL.map(|f| {
             let s = match f {
                 Feature::Mcp | Feature::Instructions => Support::Native,

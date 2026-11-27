@@ -224,7 +224,7 @@ fn disabling_removes_what_kitbag_applied_and_undo_restores_it() {
             .assert()
             .success()
             .stdout(
-                contains("Rules, commands, skills and agents removed")
+                contains("Rules, commands, skills, agents and output styles removed")
                     .and(contains(format!("{}  (claude-code)", k.label()))),
             );
         sb.cli()
@@ -375,7 +375,7 @@ fn a_remote_profile_lists_the_removal_in_the_plan() {
         let (ok, out, err) = run(&sb, &["diff", &v2, "--to", "claude-code"]);
         assert!(ok, "{out}{err}");
         assert!(
-            out.contains("Rules, commands, skills and agents removed")
+            out.contains("Rules, commands, skills, agents and output styles removed")
                 && out.contains(&k.label())
                 && out.contains("delete"),
             "{}: {out}",

@@ -170,15 +170,16 @@ fn two_files_that_flatten_to_one_name_are_an_error() {
 }
 
 #[test]
-fn output_styles_and_plugins_are_still_listed_as_not_carried() {
+fn output_styles_are_not_listed_as_left_behind_any_more() {
     let sb = Sandbox::empty();
     fs::create_dir_all(sb.path("home/.claude/agents")).unwrap();
     fs::create_dir_all(sb.path("home/.claude/output-styles")).unwrap();
     fs::write(sb.path("home/.claude/agents/reviewer.md"), REVIEWER).unwrap();
     fs::write(sb.path("home/.claude/output-styles/terse.md"), "Terse.\n").unwrap();
     let out = capture(&sb, false);
-    assert!(out.contains("1 output style"), "{out}");
+    assert!(!out.contains("not carried by kitbag"), "{out}");
     assert!(!out.contains("subagent"), "{out}");
+    assert!(sb.path("captured/output-styles/terse.md").exists());
 }
 
 #[test]

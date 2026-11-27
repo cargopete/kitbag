@@ -184,7 +184,7 @@ impl Adapter for Cursor {
     fn scopes(&self) -> &'static [Scope] {
         &[Scope::User, Scope::Project]
     }
-    fn support(&self, scope: Scope) -> [(Feature, Support); 7] {
+    fn support(&self, scope: Scope) -> [(Feature, Support); 8] {
         let file_rules = if scope == Scope::Project {
             Support::Native
         } else {
@@ -197,6 +197,7 @@ impl Adapter for Cursor {
             (Feature::Commands, Support::Native),
             (Feature::Skills, Support::Native),
             (Feature::Agents, Support::Native),
+            (Feature::OutputStyles, Support::None),
             (Feature::Settings, Support::None),
         ]
     }

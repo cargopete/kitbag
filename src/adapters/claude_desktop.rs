@@ -57,7 +57,7 @@ impl Adapter for ClaudeDesktop {
     fn scopes(&self) -> &'static [Scope] {
         &[Scope::User]
     }
-    fn support(&self, _scope: Scope) -> [(Feature, Support); 7] {
+    fn support(&self, _scope: Scope) -> [(Feature, Support); 8] {
         Feature::ALL.map(|f| {
             (
                 f,
