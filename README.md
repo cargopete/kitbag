@@ -1596,6 +1596,52 @@ What keeps a profile portable:
 - **Secrets travel separately.** The profile holds `${VAR}` references; set the variables on
   each machine (`kitbag doctor ~/dotfiles/kitbag` lists the ones that are unset).
 
+## Applying on a remote host over SSH
+
+For an SSH remote-development box, a devcontainer you can `ssh` into, or a cloud VM, whose
+home has none of your setup, add `--remote` to `apply` or `diff`:
+
+```sh
+kitbag diff  ~/dotagents --remote you@devbox --to claude-code --exit-code
+kitbag apply ~/dotagents --remote you@devbox --to claude-code
+```
+
+kitbag runs your own `ssh` (your `~/.ssh/config`, agent, jump hosts and known-hosts checks apply
+as when you type `ssh you@devbox`; kitbag adds no options, stores no credentials and asks for
+no password). It copies the profile to a private temporary directory on the host, runs the
+kitbag there to show you the plan and diff in your terminal, asks you to confirm (`--yes` skips
+that; `--dry-run` stops after the plan), applies, and removes the copy. `diff --remote` shows
+what `apply` would change there and writes nothing; with `--exit-code` it exits 1 when there is
+a difference. The apply is recorded in the **host's** state directory, so you revert it on the
+host: `ssh you@devbox kitbag undo` (the path of the kitbag it used is printed after an apply).
+
+Which kitbag runs on the host: `--remote-kitbag PATH` if you give one; otherwise `kitbag` on its
+`PATH`, or in `~/.local/bin` or `~/.cargo/bin` (where `install.sh` and `cargo install` put it,
+though a non-interactive ssh shell often lacks them on `PATH`). If there is none, kitbag stops and
+says so. Only with `--remote-download` does it fetch this version's release (the same
+`kitbag-<target>.tar.gz` that `install.sh` uses, for the host's OS and CPU) onto the host, check it
+against the published `kitbag-<target>.sha256` and unpack and run it only if they match (a missing,
+malformed or mismatching checksum stops it); that copy is deleted afterwards, so install kitbag on
+the host if you want `undo` there later. The download runs on the host and needs `curl` or `wget`,
+`tar` and `sha256sum` or `shasum` there.
+
+What is sent, and what is not:
+
+- The profile's files, except `.git`, `.env` and `.env.*` files and symlinks. No resolved
+  secret ever leaves this machine: the profile holds `${VAR}` references, the host's kitbag
+  resolves them from the host's own environment (so set the variables there; `--secrets never`
+  keeps them as references in the tools that can't read them), and a profile that holds what looks
+  like a literal secret is refused (nothing is sent; replace it with a `${VAR}` reference). There is
+  no option to send values.
+- Only the host name given to `--remote` reaches `ssh`; one starting with `-` is refused.
+
+Limits of this first version: the source must be a profile or plugin directory on this machine
+(not a git URL; clone it first), at user scope (`--project` is not mapped to a path on the host, so
+SSH remote-development workspaces and devcontainer paths are not handled yet), and not on Windows.
+`--home` and `KITBAG_HOME` only affect this machine. The host's history records the temporary
+directory as the apply's source, so `kitbag status SOURCE` and `sync` there can't compare against
+it. Sending secrets themselves is not offered; an encrypted bundle is tracked in #9.
+
 ## Which instruction files does a tool load?
 
 `kitbag doctor --why [DIR]` lists, per tool, the instruction files it reads when started in
@@ -1701,8 +1747,8 @@ wrapping of their own.
 | `kitbag init [DIR]` | Write a commented starter profile |
 | `kitbag capture [--from IDS] [-o DIR] [--dry-run] [--force] [--prune] [--include hooks,memory]` | Read the current setup into a profile (secrets redacted). Writes only into a new or empty directory. `--force` replaces an existing profile's files and leaves anything else in the directory alone; the profile's MCP servers (and rules, commands, skills and agents with `targets` / `disabled_on`) found in no tool are kept unless `--prune`. With several tools, one whose config can't be read is reported and the rest are captured |
 | `kitbag disable ITEM [--on IDS] [PROFILE]`, `kitbag enable ...` | Turn an MCP server, rule, command, skill, agent or output style off or on for some tools (default: all) by editing its `targets` / `disabled_on` in a local profile; applies nothing |
-| `kitbag diff <SOURCE> [--to IDS] [--exit-code]` | Show exactly what `apply` would change; never writes |
-| `kitbag apply <SOURCE> [--to IDS] [--yes] [--dry-run] [--apply-hooks]` | Plan, confirm, write with backups; hooks only with `--apply-hooks` (and, from a git source, `--trust-source`) |
+| `kitbag diff <SOURCE> [--to IDS] [--exit-code] [--remote HOST]` | Show exactly what `apply` would change; never writes. With `--remote`, on that host over ssh ([details](#applying-on-a-remote-host-over-ssh)) |
+| `kitbag apply <SOURCE> [--to IDS] [--yes] [--dry-run] [--apply-hooks] [--remote HOST [--remote-kitbag PATH \| --remote-download]]` | Plan, confirm, write with backups; hooks only with `--apply-hooks` (and, from a git source, `--trust-source`). With `--remote`, copies the profile to the host over ssh and applies it there, with the host's own undo |
 | `kitbag inspect <SOURCE> [--to IDS] [--json]` | What a profile or plugin holds, what in it runs commands, reads env vars, installs executables or connects to the network, and (for the tools in `--to`, default `detected`) which files `apply` would write; never writes or starts anything |
 | `kitbag status [SOURCE] [--to IDS] [--exit-code [--strict]] [--json]` | Which managed instructions and rules differ from the profile, or changed since the last apply; never writes |
 | `kitbag sync <SOURCE> [--to IDS] [--from ID [--adopt] \| --overwrite]` | Apply without overwriting instructions edited in a tool; pull an edit back with `--from`, and what is only in that tool with `--adopt` |

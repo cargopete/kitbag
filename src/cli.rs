@@ -19,6 +19,7 @@ use crate::model::{McpServer, Profile, Transport, slugify};
 use crate::plan_fs::read_text_opt;
 use crate::policy;
 use crate::profile_io::{self, MANIFEST};
+use crate::remote;
 use crate::schema;
 use crate::secrets::{RefStyle, RenderState, render_refs};
 use crate::source;
@@ -126,6 +127,8 @@ enum Cmd {
         dry_run: bool,
         #[command(flatten)]
         apply: ApplyArgs,
+        #[command(flatten)]
+        remote: RemoteArgs,
     },
     /// Show exactly what 'apply' would change (never writes)
     Diff {
@@ -135,6 +138,8 @@ enum Cmd {
         targets: TargetArgs,
         #[command(flatten)]
         apply: ApplyArgs,
+        #[command(flatten)]
+        remote: RemoteArgs,
         /// Exit with status 1 when there are differences (for CI drift checks)
         #[arg(long)]
         exit_code: bool,
@@ -350,6 +355,32 @@ impl TargetArgs {
             require_pin: self.require_pin,
         }
     }
+}
+
+/// Run on another machine over ssh instead of this one.
+#[derive(Args, Debug, Clone, Default)]
+struct RemoteArgs {
+    /// Run on this host over ssh (`user@host`, as you would give `ssh`): the
+    /// profile is copied to a temporary directory there, the kitbag there
+    /// plans and applies it, and 'kitbag undo' on that host reverts it.
+    /// Uses your ssh config and agent; only `${VAR}` references are sent, never
+    /// their values. Local directory profiles only; user scope; not Windows
+    #[arg(long, value_name = "HOST")]
+    remote: Option<String>,
+    /// With --remote: path of kitbag on the host (default: kitbag on its PATH,
+    /// else ~/.local/bin or ~/.cargo/bin)
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "remote",
+        conflicts_with = "remote_download"
+    )]
+    remote_kitbag: Option<String>,
+    /// With --remote: if the host has no kitbag, download this version's release
+    /// there from GitHub, check it against the published SHA-256 and only then
+    /// run it (it is removed afterwards; install it there to keep 'undo')
+    #[arg(long, requires = "remote")]
+    remote_download: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -672,25 +703,51 @@ pub fn run(cli: Cli) -> Result<i32> {
             yes,
             dry_run,
             apply,
-        } => cmd_apply(
-            &context(home, Some(&targets.place))?,
-            &source,
-            &targets,
-            &apply,
-            Mode::Apply { yes, dry_run },
-        ),
+            remote,
+        } => {
+            if let Some(host) = remote.remote.clone() {
+                return cmd_remote(
+                    &host,
+                    &remote,
+                    &source,
+                    &targets,
+                    &apply,
+                    remote::Flow::Apply { yes, dry_run },
+                );
+            }
+            cmd_apply(
+                &context(home, Some(&targets.place))?,
+                &source,
+                &targets,
+                &apply,
+                Mode::Apply { yes, dry_run },
+            )
+        }
         Cmd::Diff {
             source,
             targets,
             apply,
             exit_code,
-        } => cmd_apply(
-            &context(home, Some(&targets.place))?,
-            &source,
-            &targets,
-            &apply,
-            Mode::Diff { exit_code },
-        ),
+            remote,
+        } => {
+            if let Some(host) = remote.remote.clone() {
+                return cmd_remote(
+                    &host,
+                    &remote,
+                    &source,
+                    &targets,
+                    &apply,
+                    remote::Flow::Diff { exit_code },
+                );
+            }
+            cmd_apply(
+                &context(home, Some(&targets.place))?,
+                &source,
+                &targets,
+                &apply,
+                Mode::Diff { exit_code },
+            )
+        }
         Cmd::Inspect {
             source,
             targets,
@@ -1313,6 +1370,90 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
             )
         );
     }
+}
+
+/// `apply --remote` / `diff --remote`: run on another machine over ssh.
+fn cmd_remote(
+    host: &str,
+    r: &RemoteArgs,
+    src: &str,
+    t: &TargetArgs,
+    a: &ApplyArgs,
+    flow: remote::Flow,
+) -> Result<i32> {
+    if cfg!(windows) {
+        bail!("--remote is not supported on Windows yet; run kitbag from WSL or on a Unix machine");
+    }
+    remote::validate_host(host)?;
+    if t.place.scope == Some(Scope::Project) || t.place.project.is_some() {
+        bail!(
+            "--remote applies at user scope only for now; --project and --scope project are not supported with it"
+        );
+    }
+    let (resolved, profile) = load_source(src, t.path.as_deref(), t.fetch())?;
+    if resolved.remote {
+        bail!(
+            "--remote takes a profile directory on this machine, not a git URL: the host would \
+             treat a copy as a trusted local profile. Clone it first and pass the directory"
+        );
+    }
+    // Only references leave this machine: a literal secret in the profile
+    // would be copied as it is, so refuse rather than send it.
+    let found = profile_io::scan_for_secrets(&profile);
+    if !found.is_empty() {
+        let list: Vec<String> = found
+            .iter()
+            .map(|f| format!("  {}", visible_line(&crate::secrets::mask_line(f))))
+            .collect();
+        bail!(
+            "not sending this profile: it holds what looks like a literal secret. Replace it \
+             with a ${{VAR}} reference (kitbag capture does that) and set VAR on the host:\n{}",
+            list.join("\n")
+        );
+    }
+    // The tool-side options the host's kitbag should see, as it would here.
+    let mut args = vec!["--to".to_string(), t.to.clone()];
+    if t.place.scope == Some(Scope::User) {
+        args.extend(["--scope".to_string(), "user".to_string()]);
+    }
+    if a.no_overwrite {
+        args.push("--no-overwrite".into());
+    }
+    if let Some(mode) = a.secrets {
+        use clap::ValueEnum;
+        if let Some(v) = mode.to_possible_value() {
+            args.extend(["--secrets".to_string(), v.get_name().to_string()]);
+        }
+    }
+    if a.apply_hooks {
+        args.push("--apply-hooks".into());
+    }
+    if matches!(
+        flow,
+        remote::Flow::Apply {
+            yes: false,
+            dry_run: false
+        }
+    ) && !std::io::stdin().is_terminal()
+    {
+        bail!(
+            "not writing without confirmation in a non-interactive session; review with 'kitbag diff --remote', then pass --yes"
+        );
+    }
+    let remote = remote::Remote {
+        ssh: "ssh".to_string(),
+        host: host.to_string(),
+        kitbag: r.remote_kitbag.clone(),
+        download: r.remote_download,
+    };
+    remote::run(
+        &remote,
+        &resolved.dir,
+        &resolved.name_hint,
+        &args,
+        flow,
+        &confirm,
+    )
 }
 
 fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) -> Result<i32> {
