@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The README and the `antigravity` adapter notes no longer say Antigravity's hooks aren't carried (they have been since hooks landed for it), and the workflows note names the two global directories Google's migration guide scans. Checked against Antigravity's current docs (MCP, rules, skills, workflows): MCP servers, instructions, rules and skills at user and project scope are what they document, and its workflows are deprecated in favour of skills with two conflicting global directories, so the `antigravity` target is complete for its design; agents, hooks and plugins are tracked in #14, #13 and #12 (#27).
+
 ## [0.1.9] - 2026-11-27
 
 ### Added
