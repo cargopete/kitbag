@@ -9,6 +9,7 @@ All notable changes to this project are documented here. The format follows
 ### Added
 
 - The `vscode` editor target now works at project scope: the same allow-listed AI settings are captured from and merged into the project's `.vscode/settings.json` (created if missing), without touching `User/settings.json`, and no extension is listed or installed at project scope (#144)
+- Memory capture and apply follow Claude Code's `autoMemoryDirectory` (docs re-read 2026-11-28, code.claude.com/docs/en/memory). The setting is read from the managed policy file, the project's `.claude/settings.local.json` and `settings.json`, and the user's `settings.json` (only to find the directory; those files are not carried), `~/` is expanded, and a value that is neither absolute nor `~/`-prefixed is skipped with a note. `capture --include memory` saves that directory's notes as `memory/claude-code/auto-memory-directory/`; `apply` adds the notes that aren't there to the directory the setting names on the target when it exists, never overwriting a differing note, and never writes into the managed-policy folder. A directory chosen by a repository's project or local settings file is neither read nor written while `permissions.blockReadsOutsideWorkingDirectories` is on, as Claude Code loads and saves no auto memory there. The default `~/.claude/projects/<project>/memory/` layout is unchanged. (#140)
 
 ## [0.1.11] - 2026-11-28
 

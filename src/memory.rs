@@ -30,7 +30,12 @@
 //!   so notes are keyed by that folder name, which is a local key. Apply writes
 //!   only into a project folder that already exists here with that name, and
 //!   never changes a note that is there. `autoMemoryDirectory` (a custom
-//!   location) is not followed. `CLAUDE.local.md` is documented as personal
+//!   location, read from managed, local, project or user `settings.json`,
+//!   absolute or `~/`) is followed: its notes are kept under the scope
+//!   `auto-memory-directory` and applied to the directory in effect on the
+//!   target, if that exists; a directory a repository's settings file chose
+//!   is skipped while `permissions.blockReadsOutsideWorkingDirectories` is on.
+//!   `CLAUDE.local.md` is documented as personal
 //!   project *instructions*, not memory; kitbag's instructions code is
 //!   unchanged and it is not carried here.
 //! * Codex, <https://learn.chatgpt.com/docs/customization/memories> (was
@@ -187,6 +192,113 @@ fn hermes_dir(env: &Env) -> PathBuf {
         .unwrap_or_else(|| env.home.join(".hermes"))
 }
 
+/// Profile scope for notes kept in a custom `autoMemoryDirectory`. The
+/// directory itself holds `MEMORY.md` and the topic files; the scope is not a
+/// project folder name, so it maps to whatever directory is in effect on the
+/// machine the profile is applied to.
+pub const CUSTOM_SCOPE: &str = "auto-memory-directory";
+
+/// Where Claude Code's managed (policy) settings file is, read-only here.
+/// `KITBAG_MANAGED_SETTINGS_DIR` replaces the system folder (tests, odd installs).
+fn managed_settings(env: &Env) -> PathBuf {
+    if let Some(d) = env
+        .vars
+        .get("KITBAG_MANAGED_SETTINGS_DIR")
+        .filter(|v| !v.is_empty())
+    {
+        return PathBuf::from(d).join("managed-settings.json");
+    }
+    match env.os {
+        crate::adapters::Os::Linux => PathBuf::from("/etc/claude-code/managed-settings.json"),
+        crate::adapters::Os::MacOs => {
+            PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.json")
+        }
+        crate::adapters::Os::Windows => {
+            PathBuf::from(r"C:\Program Files\ClaudeCode\managed-settings.json")
+        }
+    }
+}
+
+/// What the settings say about a custom auto memory directory.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CustomDir {
+    /// `autoMemoryDirectory` is not set in any scope.
+    Unset,
+    /// The directory Claude Code uses.
+    Dir(PathBuf),
+    /// Set, but not followed; the reason is for the plan's notes.
+    Skipped(String),
+}
+
+/// Resolve `autoMemoryDirectory` from the documented scopes, highest
+/// precedence first: managed policy, the project's `settings.local.json` and
+/// `settings.json`, then the user's `settings.json`. (`--settings` is not
+/// something kitbag can see.) `read` gives a file's text, if there is one.
+/// The project is the one kitbag runs in. These files are only read to find
+/// the directory; none is written or carried.
+pub fn custom_dir(env: &Env, read: &dyn Fn(&Path) -> Option<String>) -> CustomDir {
+    // (file, supplied by the repository)
+    let files = [
+        (managed_settings(env), false),
+        (
+            env.project.join(".claude").join("settings.local.json"),
+            true,
+        ),
+        (env.project.join(".claude").join("settings.json"), true),
+        (claude_dir(env).join("settings.json"), false),
+    ];
+    let mut dir: Option<(serde_json::Value, bool, PathBuf)> = None;
+    let mut block: Option<bool> = None;
+    for (path, repo) in files {
+        let Some(text) = read(&path) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}'))
+        else {
+            continue;
+        };
+        if let (None, Some(d)) = (&dir, v.get("autoMemoryDirectory")) {
+            dir = Some((d.clone(), repo, path.clone()));
+        }
+        if block.is_none() {
+            block = v
+                .get("permissions")
+                .and_then(|p| p.get("blockReadsOutsideWorkingDirectories"))
+                .and_then(|b| b.as_bool());
+        }
+    }
+    let Some((value, repo, from)) = dir else {
+        return CustomDir::Unset;
+    };
+    let Some(raw) = value.as_str() else {
+        return CustomDir::Skipped(format!(
+            "autoMemoryDirectory in {} is not a string, so it is not followed",
+            from.display()
+        ));
+    };
+    if repo && block == Some(true) {
+        return CustomDir::Skipped(format!(
+            "autoMemoryDirectory in {} is chosen by a repository's settings file and permissions.blockReadsOutsideWorkingDirectories is on: Claude Code loads and saves no auto memory there, so kitbag does not read or write it",
+            from.display()
+        ));
+    }
+    let resolved = if let Some(rest) = raw.strip_prefix("~/") {
+        Some(crate::plan_fs::join_rel(
+            &env.home,
+            rest.trim_end_matches('/'),
+        ))
+    } else if Path::new(raw).is_absolute() {
+        Some(PathBuf::from(raw))
+    } else {
+        None
+    };
+    match resolved {
+        Some(p) => CustomDir::Dir(p),
+        None => CustomDir::Skipped(format!(
+            "autoMemoryDirectory \"{raw}\" in {} is not an absolute path and does not start with ~/, so it is not followed (the default project memory folders are used)",
+            from.display()
+        )),
+    }
+}
+
 /// Sorted names of the real directories directly in `dir`.
 fn subdirs(dir: &Path) -> Vec<String> {
     let mut out: Vec<String> = std::fs::read_dir(dir)
@@ -316,6 +428,21 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, out: &mut CaptureResult) -> 
                         continue;
                     }
                     sink.read_dir(CLAUDE, &p, "", &mem, None);
+                }
+                match custom_dir(env, &|p| crate::plan_fs::read_text_opt(p).ok().flatten()) {
+                    CustomDir::Unset => {}
+                    CustomDir::Skipped(why) => sink.out.notes.push(info(CLAUDE, format!("memory: {why}"))),
+                    CustomDir::Dir(d) if d.is_dir() => {
+                        sink.out.notes.push(info(
+                            CLAUDE,
+                            format!("memory: following autoMemoryDirectory {}", d.display()),
+                        ));
+                        sink.read_dir(CLAUDE, CUSTOM_SCOPE, "", &d, None);
+                    }
+                    CustomDir::Dir(d) => sink.out.notes.push(info(
+                        CLAUDE,
+                        format!("memory: autoMemoryDirectory {} doesn't exist, nothing to capture from it", d.display()),
+                    )),
                 }
                 if sink.count.contains_key(CLAUDE) {
                     sink.out.notes.push(info(
@@ -493,7 +620,10 @@ pub fn plan(profile: &Profile, applied: &[String], env: &Env, work: &mut Work) -
 
 fn plan_claude(files: &[&SkillFile], env: &Env, work: &mut Work) -> Result<()> {
     let projects = claude_dir(env).join("projects");
+    let custom = custom_dir(env, &|p| work.fs.read(p).ok().flatten());
+    let managed_dir = managed_settings(env).parent().map(Path::to_path_buf);
     let (mut wrote, mut same, mut kept, mut missing) = (0, 0, Vec::new(), BTreeMap::new());
+    let mut unfollowed: BTreeMap<String, usize> = BTreeMap::new();
     let mut index_stale = false;
     for f in files {
         let Some((_, project, rel)) = split(&f.path) else {
@@ -509,12 +639,44 @@ fn plan_claude(files: &[&SkillFile], env: &Env, work: &mut Work) -> Result<()> {
             );
             continue;
         }
-        let dir = projects.join(project);
-        if !work.fs.exists(&dir) {
-            *missing.entry(project.to_string()).or_insert(0) += 1;
-            continue;
-        }
-        let dest = crate::plan_fs::join_rel(&dir.join("memory"), rel);
+        let base = if project == CUSTOM_SCOPE {
+            match &custom {
+                CustomDir::Dir(d) if managed_dir.as_ref().is_some_and(|m| d.starts_with(m)) => {
+                    *unfollowed
+                        .entry(
+                            "it is in the managed-policy folder, which kitbag never writes"
+                                .to_string(),
+                        )
+                        .or_insert(0) += 1;
+                    continue;
+                }
+                CustomDir::Dir(d) if work.fs.exists(d) => d.clone(),
+                CustomDir::Dir(d) => {
+                    *unfollowed
+                        .entry(format!("{} doesn't exist here", d.display()))
+                        .or_insert(0) += 1;
+                    continue;
+                }
+                CustomDir::Skipped(why) => {
+                    *unfollowed.entry(why.clone()).or_insert(0) += 1;
+                    continue;
+                }
+                CustomDir::Unset => {
+                    *unfollowed
+                        .entry("no autoMemoryDirectory is set here".to_string())
+                        .or_insert(0) += 1;
+                    continue;
+                }
+            }
+        } else {
+            let dir = projects.join(project);
+            if !work.fs.exists(&dir) {
+                *missing.entry(project.to_string()).or_insert(0) += 1;
+                continue;
+            }
+            dir.join("memory")
+        };
+        let dest = crate::plan_fs::join_rel(&base, rel);
         match work.fs.read_bytes(&dest)? {
             Some(cur) if cur == f.content => same += 1,
             Some(_) => {
@@ -537,6 +699,12 @@ fn plan_claude(files: &[&SkillFile], env: &Env, work: &mut Work) -> Result<()> {
                 "memory: {n} note(s) for project folder '{project}' not written: {} has no such folder here (Claude Code makes it the first time it runs in that project)",
                 projects.display()
             ),
+        );
+    }
+    for (why, n) in &unfollowed {
+        work.info(
+            CLAUDE,
+            format!("memory: {n} note(s) from a custom autoMemoryDirectory not written: {why}"),
         );
     }
     if !kept.is_empty() {
