@@ -233,7 +233,7 @@ pub fn with_omitted_paragraphs(inner: &str, old: &str, outside: &str) -> String 
     }
     let mut out: Vec<String> = paragraphs(inner).collect();
     let mut pos = 0;
-    for p in &old {
+    for (k, p) in old.iter().enumerate() {
         if omitted(p) {
             if !out.contains(p) {
                 out.insert(pos, p.clone());
@@ -241,8 +241,9 @@ pub fn with_omitted_paragraphs(inner: &str, old: &str, outside: &str) -> String 
             }
         } else if let Some(j) = out.iter().skip(pos).position(|x| x == p) {
             pos += j + 1;
-        } else if pos < out.len() {
-            // Edited (or removed) in the block: assume it was edited in place.
+        } else if pos < out.len() && !old[k + 1..].contains(&out[pos]) {
+            // Edited in the block: assume in place. (Removed, when the next
+            // paragraph there is one of the old ones still to come.)
             pos += 1;
         }
     }
@@ -495,6 +496,19 @@ mod tests {
         assert_eq!(
             with_omitted_paragraphs("New first.\n\nBe brief.\n\nUse tabs.", old, outside),
             "New first.\n\nBe brief.\n\nMy note.\n\nUse tabs."
+        );
+        // A paragraph deleted in the block doesn't move the others.
+        assert_eq!(
+            with_omitted_paragraphs("B.\n\nC.", "A.\n\nB.\n\nM.\n\nC.", "M."),
+            "B.\n\nM.\n\nC."
+        );
+        assert_eq!(
+            with_omitted_paragraphs(
+                "Bravo.\n\nDelta.",
+                "Alpha.\n\nBravo.\n\nCharlie.\n\nDelta.",
+                "Charlie."
+            ),
+            "Bravo.\n\nCharlie.\n\nDelta."
         );
         // Nothing left out: the block text as it is.
         assert_eq!(

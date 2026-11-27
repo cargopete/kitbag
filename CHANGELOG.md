@@ -15,7 +15,7 @@ All notable changes to this project are documented here. The format follows
 ### Fixed
 
 - `kitbag sync PROFILE --from <target>` no longer drops from the profile the paragraphs of its instructions that the tool's file also has outside kitbag's block. Apply leaves those out of the block so they aren't repeated, and pulling the block back took only what was inside it, so they were dropped from the profile and from the other tools. Now they are kept, in their order.
-- `sync` no longer says a held-back rule or block was "edited in the tool since the last apply" when kitbag never wrote it there; it says the tool already has its own, different copy.
+- `sync` no longer says a held-back rule file was "edited in the tool since the last apply" when kitbag has no record of writing it; it says the tool already has its own, different copy there.
 
 ## [0.1.5] - 2026-11-26
 

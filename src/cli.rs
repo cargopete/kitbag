@@ -1948,9 +1948,10 @@ fn cmd_sync(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, s: &SyncArgs) -
         let never_applied = !last
             .get(&(i.target.clone(), i.path.clone(), i.block.clone()))
             .is_some_and(|r| r.matches(env));
-        let message = if never_applied && i.current.is_some() {
+        // A block's markers show kitbag wrote it, whatever the records say.
+        let message = if never_applied && i.block.is_none() && i.current.is_some() {
             format!(
-                "{} in {} was not synced: the tool already has its own, different copy there, which kitbag never wrote. Compare the two; pull the tool's copy into the profile with --from {}, or replace it with --overwrite (backed up; 'kitbag undo' restores it)",
+                "{} in {} was not synced: the tool already has its own, different copy there, and kitbag has no record of writing it. Compare the two; pull the tool's copy into the profile with --from {}, or replace it with --overwrite (backed up; 'kitbag undo' restores it)",
                 held_label(&i.item),
                 tildify(&i.path, &env.home),
                 i.target
