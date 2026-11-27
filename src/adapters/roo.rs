@@ -1,5 +1,5 @@
-//! Roo Code (the VS Code extension `RooVeterinaryInc.roo-cline`): MCP servers
-//! and instructions.
+//! Roo Code (the VS Code extension `RooVeterinaryInc.roo-cline`): MCP servers,
+//! instructions, rules, commands and skills.
 //!
 //! * MCP, user: `mcp_settings.json` in the extension's `settings/` folder of
 //!   the editor's global storage (`<user data>/User/globalStorage/
@@ -22,14 +22,33 @@
 //! * Instructions: a managed block in `~/.roo/rules/kitbag.md` (Roo reads every
 //!   file in `~/.roo/rules/`, alphabetically), and `AGENTS.md` at the project
 //!   root, which Roo reads and which is shared with Codex, Cursor,
-//!   Antigravity, opencode, Grok Build and Windsurf. Rules are folded into
-//!   the same block as labelled sections. Roo's own rule files
-//!   (`.roo/rules/`, `.roo/rules-<mode>/`, `.roorules`) are not read; capture
-//!   says so.
-//! * Custom modes, commands, skills, hooks and settings are not carried.
+//!   Antigravity, opencode, Grok Build and Windsurf. Instructions only:
+//!   profile rules are files of their own (below), and `kitbag` is not a
+//!   usable rule name at user scope.
+//! * Rules: `<name>.md` in `~/.roo/rules/` and a project's `.roo/rules/`
+//!   (Roo reads those folders recursively; capture takes every `*.md`
+//!   under them). The docs describe no frontmatter for them, so none is
+//!   written: a rule with globs, or an on-demand one, loads every time, with
+//!   a first line saying when it applies. Mode-specific rules
+//!   (`rules-<mode>/`, `.roorules-<mode>`) and `.roorules` are not captured
+//!   and not written; capture lists them. Roo falls back to `.roorules` only
+//!   while `.roo/rules/` is empty, so kitbag creates no empty folder, and
+//!   warns when its first rule file there would hide a `.roorules`.
+//! * Commands: `<name>.md` in `~/.roo/commands/` and `.roo/commands/`, with
+//!   `description`, `argument-hint` and `mode` frontmatter (Roo's docs list
+//!   those three; the file name is the command name).
+//! * Skills: `<name>/SKILL.md` in `~/.roo/skills/` and `.roo/skills/`, where
+//!   kitbag writes them; capture also reads the cross-agent `~/.agents/skills/`
+//!   and `.agents/skills/`, which kitbag never writes to. Mode-specific
+//!   `skills-<mode>/` folders are listed by capture, not read. Roo needs the
+//!   name to be 1-64 lowercase letters, digits and hyphens (no leading,
+//!   trailing or doubled hyphen) and to match the folder.
+//! * Custom modes, hooks and settings are not carried (hooks: issue #13).
 //!
 //! Docs: <https://roocodeinc.github.io/Roo-Code/features/mcp/using-mcp-in-roo>,
-//! <https://roocodeinc.github.io/Roo-Code/features/custom-instructions>.
+//! <https://roocodeinc.github.io/Roo-Code/features/custom-instructions>,
+//! <https://roocodeinc.github.io/Roo-Code/features/skills>,
+//! <https://roocodeinc.github.io/Roo-Code/features/slash-commands>.
 
 use std::path::PathBuf;
 
@@ -37,12 +56,16 @@ use anyhow::Result;
 use serde_json::{Map, Value, json};
 
 use super::common::{
-    capture_instructions, import_server, merge_json_servers, note_unread_rule_files, render_server,
-    server_entries, server_from_json, servers_for, write_instructions,
+    add_command, add_rule, capture_instructions, capture_md_files, capture_skills_dir,
+    import_server, merge_json_servers, note_uncaptured, render_server, rule_from_lead_line,
+    rule_lead_line, server_entries, server_from_json, servers_for, skill_name_mismatch,
+    skill_with_required_frontmatter, write_command, write_instructions, write_rule, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Os, Scope, Support, Work};
 use crate::edit::json::parse_value;
-use crate::model::{Profile, Transport};
+use crate::frontmatter;
+use crate::model::{Command, Profile, Rule, RuleMode, Transport};
+use crate::profile_io::command_from_markdown;
 use crate::secrets::RefStyle;
 
 const ID: &str = "roo";
@@ -119,22 +142,76 @@ fn instructions_file(env: &Env) -> PathBuf {
     }
 }
 
-/// `rules/` and the mode-specific `rules-<mode>/` next to it, at this scope.
-fn rule_dirs(env: &Env) -> Vec<PathBuf> {
-    let base = match env.scope {
+/// `.roo/` at this scope.
+fn roo_dir(env: &Env) -> PathBuf {
+    match env.scope {
         Scope::User => env.home.join(".roo"),
         Scope::Project => env.project.join(".roo"),
-    };
-    let mut out = vec![base.join("rules")];
-    if let Ok(names) = crate::plan_fs::subdirs(&base) {
-        out.extend(
-            names
-                .into_iter()
-                .filter(|n| n.starts_with("rules-"))
-                .map(|n| base.join(n)),
-        );
     }
-    out
+}
+
+fn rules_dir(env: &Env) -> PathBuf {
+    roo_dir(env).join("rules")
+}
+
+fn commands_dir(env: &Env) -> PathBuf {
+    roo_dir(env).join("commands")
+}
+
+/// The skills folders Roo reads at this scope, kitbag's own first, then the
+/// cross-agent `.agents/skills/`.
+fn skills_dirs(env: &Env) -> Vec<PathBuf> {
+    let agents = match env.scope {
+        Scope::User => env.home.join(".agents"),
+        Scope::Project => env.project.join(".agents"),
+    };
+    vec![roo_dir(env).join("skills"), agents.join("skills")]
+}
+
+/// Folders next to `base/<prefix>` named `<prefix>-<mode>`.
+fn mode_dirs(base: &std::path::Path, prefix: &str) -> Vec<PathBuf> {
+    let lead = format!("{prefix}-");
+    crate::plan_fs::subdirs(base)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| n.starts_with(&lead))
+        .map(|n| base.join(n))
+        .collect()
+}
+
+/// A profile rule as a Roo rule file: plain markdown, with a first line saying
+/// when the rule applies if it isn't always on.
+fn roo_rule(r: &Rule) -> String {
+    let body = r.body.trim();
+    match rule_lead_line(r) {
+        Some(lead) => format!("{lead}\n\n{body}\n"),
+        None => format!("{body}\n"),
+    }
+}
+
+/// A profile command as a Roo command file.
+fn roo_command(c: &Command) -> String {
+    let mode = c.extra.get("mode").and_then(Value::as_str);
+    frontmatter::render(
+        &[
+            ("description", frontmatter::opt(&c.description)),
+            ("argument-hint", frontmatter::opt(&c.argument_hint)),
+            ("mode", mode.map_or(Value::Null, |m| json!(m))),
+        ],
+        &c.body,
+    )
+}
+
+/// Roo's rule for a skill name.
+fn valid_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && !name.contains("--")
 }
 
 impl Adapter for Roo {
@@ -153,8 +230,11 @@ impl Adapter for Roo {
     fn support(&self, _scope: Scope) -> [(Feature, Support); 7] {
         Feature::ALL.map(|f| {
             let s = match f {
-                Feature::Mcp | Feature::Instructions => Support::Native,
-                Feature::Rules => Support::Folded,
+                Feature::Mcp
+                | Feature::Instructions
+                | Feature::Rules
+                | Feature::Commands
+                | Feature::Skills => Support::Native,
                 _ => Support::None,
             };
             (f, s)
@@ -165,6 +245,9 @@ impl Adapter for Roo {
         vec![
             ("mcp", mcp_file(env)),
             ("instructions", instructions_file(env)),
+            ("rules", rules_dir(env)),
+            ("commands", commands_dir(env)),
+            ("skills", skills_dirs(env)[0].clone()),
         ]
     }
 
@@ -232,16 +315,114 @@ impl Adapter for Roo {
         }
 
         let own = instructions_file(env);
-        capture_instructions(&mut cap, &own, ID)?;
-        for dir in rule_dirs(env) {
-            note_unread_rule_files(&mut cap, ID, &dir, Some(&own), &env.home);
-        }
-        if env.scope == Scope::Project && env.project.join(".roorules").is_file() {
-            cap.info(
+        let base = roo_dir(env);
+
+        // Rule files first: one of them beats a stale copy of the same rule
+        // folded into the instructions file by an older kitbag.
+        let rules = rules_dir(env);
+        capture_md_files(
+            &mut cap,
+            &rules,
+            ".md",
+            false,
+            Some(&own),
+            ID,
+            &mut |cap, name, text, path| {
+                cap.sources.push(path.to_path_buf());
+                if cap.profile.rules.iter().any(|r| r.name == name) {
+                    cap.info(
+                        ID,
+                        format!(
+                            "{} has the name of a rule already captured and was skipped",
+                            path.display()
+                        ),
+                    );
+                    return;
+                }
+                cap.rule_files.push((name.to_string(), path.to_path_buf()));
+                add_rule(cap, rule_from_lead_line(name, text), ID);
+            },
+        )?;
+        note_uncaptured(
+            &mut cap,
+            ID,
+            &rules,
+            &env.home,
+            "kitbag reads only *.md rule files",
+            &|rel| rel.ends_with(".md") || crate::plan_fs::join_rel(&rules, rel) == own,
+        );
+        for dir in mode_dirs(&base, "rules") {
+            note_uncaptured(
+                &mut cap,
                 ID,
-                "a .roorules file was not read: kitbag doesn't carry Roo's own rule files yet",
+                &dir,
+                &env.home,
+                "mode-specific rules, which kitbag has no mapping for",
+                &|_| false,
             );
         }
+        if env.scope == Scope::Project {
+            for name in std::fs::read_dir(&env.project)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with(".roorules-"))
+            {
+                cap.info(
+                    ID,
+                    format!("{name} was not captured: kitbag has no mapping for Roo's modes"),
+                );
+            }
+            if env.project.join(".roorules").is_file() {
+                cap.info(
+                    ID,
+                    "a .roorules file was not read: kitbag carries the files in .roo/rules/, and Roo reads .roorules only while that folder is empty",
+                );
+            }
+        }
+
+        let commands = commands_dir(env);
+        capture_md_files(
+            &mut cap,
+            &commands,
+            ".md",
+            false,
+            None,
+            ID,
+            &mut |cap, name, text, path| {
+                cap.sources.push(path.to_path_buf());
+                add_command(cap, command_from_markdown(name, text), ID);
+            },
+        )?;
+        note_uncaptured(
+            &mut cap,
+            ID,
+            &commands,
+            &env.home,
+            "kitbag reads only *.md command files",
+            &|rel| rel.ends_with(".md"),
+        );
+
+        let skills = skills_dirs(env);
+        for dir in &skills {
+            capture_skills_dir(&mut cap, dir, ID)?;
+        }
+        let agents = skills[1].parent().map(std::path::Path::to_path_buf);
+        for base in [Some(base.clone()), agents].into_iter().flatten() {
+            for dir in mode_dirs(&base, "skills") {
+                note_uncaptured(
+                    &mut cap,
+                    ID,
+                    &dir,
+                    &env.home,
+                    "mode-specific skills, which kitbag has no mapping for",
+                    &|_| false,
+                );
+            }
+        }
+
+        capture_instructions(&mut cap, &own, ID)?;
         Ok(cap)
     }
 
@@ -328,8 +509,118 @@ impl Adapter for Roo {
         }
 
         // At project scope this is AGENTS.md, with the same block id as Codex,
-        // Cursor, Antigravity, opencode, Windsurf and Grok Build.
-        write_instructions(work, &instructions_file(env), profile, opts, true, ID)?;
+        // Cursor, Antigravity, opencode, Windsurf and Grok Build. Rules are
+        // files of their own, so at user scope (a file only kitbag writes) the
+        // copy an older kitbag folded into the instructions is removed; in
+        // AGENTS.md it is left to the other targets that fold.
+        let own = instructions_file(env);
+        let user = env.scope == Scope::User;
+        let without_rules;
+        let (instr_profile, fold) = if user {
+            without_rules = Profile {
+                rules: Vec::new(),
+                ..profile.clone()
+            };
+            (&without_rules, true)
+        } else {
+            (profile, false)
+        };
+        write_instructions(work, &own, instr_profile, opts, fold, ID)?;
+
+        let rules = rules_dir(env);
+        let mut hides_roorules = false;
+        for r in &profile.rules {
+            let file = format!("{}.md", r.name);
+            if user && file == RULES_FILE {
+                work.warn(
+                    ID,
+                    format!(
+                        "rule '{}' skipped: its file is where kitbag writes the instructions",
+                        r.name
+                    ),
+                );
+                continue;
+            }
+            match r.mode() {
+                RuleMode::Globs => work.info(
+                    ID,
+                    format!("rule '{}' is file-scoped in the profile; Roo Code's docs describe no file-scoped rules, so it always loads, with a line saying which files it is for", r.name),
+                ),
+                RuleMode::OnDemand => work.info(
+                    ID,
+                    format!("rule '{}' is on-demand in the profile; Roo Code has no on-demand rules, so it always loads", r.name),
+                ),
+                RuleMode::Always => {}
+            }
+            let path = rules.join(&file);
+            // Roo reads `.roorules` only while `.roo/rules/` has no files.
+            if !user
+                && work
+                    .fs
+                    .read_bytes(&env.project.join(".roorules"))?
+                    .is_some()
+                && crate::plan_fs::walk_files(&rules, 1)?.is_empty()
+            {
+                hides_roorules = true;
+            }
+            write_rule(work, &path, roo_rule(r).as_bytes(), opts, ID, &r.name)?;
+        }
+        if hides_roorules {
+            work.warn(
+                ID,
+                "this project has a .roorules file, which Roo Code reads only while .roo/rules/ is empty; the rule files kitbag writes there make Roo ignore it (move its content into a rule file, or apply without the rules)",
+            );
+        }
+        if !user && !profile.rules.is_empty() && work.targets.iter().any(|t| t == "codex") {
+            work.info(
+                ID,
+                "Codex folds the rules into the shared AGENTS.md, and Roo Code reads that file as well as .roo/rules/, so in this project Roo sees the rules twice",
+            );
+        }
+
+        for c in &profile.commands {
+            if let Some(m) = c.extra.get("mode").and_then(Value::as_str) {
+                work.info(
+                    ID,
+                    format!("command '{}': its mode '{m}' is written as Roo Code's `mode`, which switches Roo to that mode before the command runs; check it names a Roo mode", c.name),
+                );
+            }
+            let path = commands_dir(env).join(format!("{}.md", c.name));
+            write_command(work, &path, roo_command(c).as_bytes(), opts, ID, &c.name)?;
+        }
+
+        let skills = skills_dirs(env);
+        for s in &profile.skills {
+            if !valid_skill_name(&s.name) {
+                work.warn(
+                    ID,
+                    format!("skill '{}' skipped: Roo Code needs a name of 1-64 lowercase letters, digits and single hyphens, not starting or ending with one", s.name),
+                );
+                continue;
+            }
+            let s = skill_with_required_frontmatter(s);
+            if let Some(w) = skill_name_mismatch(&s) {
+                work.warn(ID, w);
+            }
+            // `.roo/skills` wins over `.agents/skills` for a name in both, so
+            // another tool's copy there is not touched, but it is shadowed.
+            if let Some(other) = skills.get(1)
+                && work
+                    .fs
+                    .read_bytes(&other.join(&s.name).join("SKILL.md"))?
+                    .is_some()
+            {
+                work.info(
+                    ID,
+                    format!(
+                        "skill '{}' also exists in {}; Roo Code prefers the copy in .roo/skills/, which is the one kitbag writes",
+                        s.name,
+                        crate::ui::tildify(&other.join(&s.name), &env.home)
+                    ),
+                );
+            }
+            write_skill(work, &skills[0].join(&s.name), &s, opts, ID)?;
+        }
         if profile.settings.contains_key(ID) {
             work.info(
                 ID,

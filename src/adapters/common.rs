@@ -1,7 +1,7 @@
 //! Building blocks shared by adapters.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use serde_json::{Map, Value};
@@ -11,7 +11,7 @@ use crate::edit::block;
 use crate::edit::json::JsonDoc;
 use crate::frontmatter;
 use crate::model::{
-    Agent, Command, McpServer, Profile, Rule, Skill, SkillFile, Transport, is_valid_name,
+    Agent, Command, McpServer, Profile, Rule, RuleMode, Skill, SkillFile, Transport, is_valid_name,
 };
 use crate::plan_fs::{decode_text, join_rel, read_opt, subdirs, walk_confined, walk_files};
 use crate::policy;
@@ -1453,15 +1453,51 @@ pub fn capture_markdown_dir(
     kind: MdKind,
     target: &str,
 ) -> Result<()> {
+    capture_md_files(
+        cap,
+        dir,
+        ext,
+        false,
+        None,
+        target,
+        &mut |cap, name, text, path| {
+            cap.sources.push(path.to_path_buf());
+            match kind {
+                MdKind::Rule => {
+                    cap.rule_files.push((name.to_string(), path.to_path_buf()));
+                    add_rule(cap, rule_from_markdown(name, text), target)
+                }
+                MdKind::Command => add_command(cap, command_from_markdown(name, text), target),
+            }
+        },
+    )
+}
+
+/// Walk `<dir>/**/*.<ext>` (only the files directly in `dir` when `flat`),
+/// read each one and hand `(name, text, path)` to `each`. `skip` is a file to
+/// leave out (the one kitbag writes instructions to). Names come from the
+/// relative path as for [`capture_markdown_dir`].
+pub fn capture_md_files(
+    cap: &mut Captured,
+    dir: &Path,
+    ext: &str,
+    flat: bool,
+    skip: Option<&Path>,
+    target: &str,
+    each: &mut dyn FnMut(&mut Captured, &str, &str, &Path),
+) -> Result<()> {
     if cap.escapes(dir, target) {
         return Ok(());
     }
     let mut seen = std::collections::BTreeMap::new();
     for rel in walk_files(dir, 500)? {
-        if !rel.ends_with(ext) {
+        if !rel.ends_with(ext) || (flat && rel.contains('/')) {
             continue;
         }
         let path = join_rel(dir, &rel);
+        if skip == Some(path.as_path()) {
+            continue;
+        }
         let Some(text) = read_text_item(cap, &path, target) else {
             continue;
         };
@@ -1474,16 +1510,128 @@ pub fn capture_markdown_dir(
             );
             continue;
         }
-        cap.sources.push(path.clone());
-        match kind {
-            MdKind::Rule => {
-                cap.rule_files.push((name.clone(), path.clone()));
-                add_rule(cap, rule_from_markdown(&name, &text), target)
-            }
-            MdKind::Command => add_command(cap, command_from_markdown(&name, &text), target),
-        }
+        each(cap, &name, &text, &path);
     }
     Ok(())
+}
+
+/// Say which files under `dir` capture left behind: those for which `taken`
+/// (given the `/`-separated path relative to `dir`) is false. `why` finishes
+/// "were not captured (...)". Silent when there are none.
+pub fn note_uncaptured(
+    cap: &mut Captured,
+    target: &str,
+    dir: &Path,
+    home: &Path,
+    why: &str,
+    taken: &dyn Fn(&str) -> bool,
+) {
+    if cap.escapes(dir, target) {
+        return;
+    }
+    let Ok(files) = walk_files(dir, 200) else {
+        return;
+    };
+    let left: Vec<String> = files.into_iter().filter(|rel| !taken(rel)).collect();
+    if left.is_empty() {
+        return;
+    }
+    cap.info(
+        target,
+        format!(
+            "{} file(s) in {} were not captured ({why}): {}",
+            left.len(),
+            crate::ui::tildify(dir, home),
+            left.join(", ")
+        ),
+    );
+}
+
+const APPLIES_PREFIX: &str = "_Applies when working with files matching: ";
+const ON_DEMAND_LINE: &str = "_Use when relevant to the task._";
+
+/// The first line of a rule file for a tool without file-scoped rules, saying
+/// when the rule applies; none for an always-on rule.
+pub fn rule_lead_line(r: &Rule) -> Option<String> {
+    match r.mode() {
+        RuleMode::Globs => Some(format!(
+            "{APPLIES_PREFIX}{}_",
+            r.globs
+                .iter()
+                .map(|g| format!("`{g}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        RuleMode::OnDemand => Some(ON_DEMAND_LINE.to_string()),
+        RuleMode::Always => None,
+    }
+}
+
+/// A rule file's text as a rule, reading back the line [`rule_lead_line`] wrote.
+pub fn rule_from_lead_line(name: &str, text: &str) -> Rule {
+    let mut r = rule_from_markdown(name, text);
+    let body = r.body.clone();
+    let first = body.lines().next().unwrap_or_default();
+    let globs = first
+        .strip_prefix(APPLIES_PREFIX)
+        .and_then(|g| g.strip_suffix('_'))
+        .and_then(|g| g.strip_prefix('`')?.strip_suffix('`'))
+        .map(|g| g.split("`, `").map(str::to_string).collect::<Vec<_>>())
+        .filter(|g| g.iter().all(|x| !x.is_empty() && !x.contains('`')));
+    if let (Some(globs), true) = (globs, r.globs.is_empty()) {
+        r.globs = globs;
+        r.body = body[first.len()..].trim().to_string();
+    } else if first == ON_DEMAND_LINE && r.globs.is_empty() && r.always_apply.is_none() {
+        r.always_apply = Some(false);
+        r.body = body[first.len()..].trim().to_string();
+    }
+    r
+}
+
+/// The directory of `dirs` that already has `file` (as planned), else the first.
+/// For tools that read several layouts of one kind of file: a rule that is
+/// already in the older layout is updated there instead of copied.
+pub fn dir_holding(work: &Work, dirs: &[PathBuf], file: &str) -> Result<PathBuf> {
+    for d in dirs {
+        if work.fs.read_bytes(&d.join(file)).ok().flatten().is_some() {
+            return Ok(d.clone());
+        }
+    }
+    Ok(dirs[0].clone())
+}
+
+/// Tell the user when skill `name`, about to be written to `dirs[0]`, also
+/// exists in another of the `dirs` the tool reads, where the tool may see two.
+pub fn note_shadowed_skill(work: &mut Work, target: &str, dirs: &[PathBuf], name: &str) {
+    for d in dirs.iter().skip(1) {
+        if work
+            .fs
+            .read_bytes(&d.join(name).join("SKILL.md"))
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            let shown = crate::ui::tildify(&d.join(name), &work.home);
+            work.info(
+                target,
+                format!("skill '{name}' also exists in {shown}, which is not kitbag's; the tool reads both folders and may see two copies"),
+            );
+        }
+    }
+}
+
+/// A warning when a skill's `SKILL.md` names itself something other than its
+/// directory, which Cline and Roo Code both require to match.
+pub fn skill_name_mismatch(skill: &Skill) -> Option<String> {
+    let text = String::from_utf8_lossy(&skill.main_file()?.content).into_owned();
+    let doc = frontmatter::parse(&text);
+    let name = frontmatter::string(doc.data.get("name"))?;
+    (name != skill.name).then(|| {
+        format!(
+            "skill '{}': the name in its SKILL.md is '{name}', but the name must match the directory name, so the tool may not load it",
+            skill.name
+        )
+    })
 }
 
 /// Capture every `<dir>/<name>/SKILL.md` skill with its supporting files.

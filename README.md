@@ -10,7 +10,7 @@ from the AI coding tools you already use. It stores them as a small, git-friendl
 redacted and applies that profile to any other tool in one step. Claude Code, Cursor,
 OpenAI Codex CLI, Gemini CLI, Claude Desktop, Google Antigravity, opencode (the last two
 for MCP servers and instructions), GitHub Copilot (MCP servers, instructions, rules, prompt files and skills)
-xAI's Grok Build CLI, Windsurf, Zed, Hermes Agent, Amp, Cline, Roo Code and Continue (the last seven for MCP servers and instructions; Hermes also for shell hooks, Amp also for skills, Continue also for project rules and, at user scope, commands) are supported, at user and
+xAI's Grok Build CLI, Windsurf, Zed, Hermes Agent, Amp, Cline, Roo Code and Continue (the last seven for MCP servers and instructions; Hermes also for shell hooks, Amp also for skills, Continue also for project rules and, at user scope, commands, Cline and Roo Code also for rules, commands and skills) are supported, at user and
 project scope.
 
 > [!IMPORTANT]
@@ -103,8 +103,8 @@ preview with `kitbag diff github:cargopete/dotagents --to all`.
 | `zed`            | Zed               | user, project | ✓   | ✓            | -          | -            | -      | -      | -        |
 | `hermes`         | Hermes Agent      | user, project | user | ✓           | -          | -            | -      | -      | -        |
 | `amp`            | Amp               | user, project | ✓   | ✓            | -          | as skills    | ✓      | -      | -        |
-| `cline`          | Cline             | user, project | user | ✓           | folded     | -            | -      | -      | -        |
-| `roo`            | Roo Code (alias: `roo-code`) | user, project | ✓ | ✓    | folded     | -            | -      | -      | -        |
+| `cline`          | Cline             | user, project | user | ✓           | ✓          | ✓            | ✓      | -      | -        |
+| `roo`            | Roo Code (alias: `roo-code`) | user, project | ✓ | ✓    | ✓          | ✓            | ✓      | -      | -        |
 | `continue`       | Continue          | user, project | ✓   | ✓            | project    | user         | -      | -      | -        |
 
 `claude` is accepted as an alias for `claude-code` wherever a target id is given (`--to`,
@@ -137,8 +137,8 @@ Where things go:
 | Zed | `settings.json` in `~/.config/zed` (macOS), `$XDG_CONFIG_HOME/zed` or `~/.config/zed` (Linux), `%APPDATA%\Zed` (Windows) (`context_servers`), and `AGENTS.md` next to it (Zed's personal instructions) | `.zed/settings.json` (`context_servers`; Zed starts these only in a trusted worktree); instructions go to the first of `.rules`, `.cursorrules`, `.windsurfrules`, `.clinerules`, `.github/copilot-instructions.md`, `AGENT.md` and `AGENTS.md` that exists, since Zed reads only that one, and to `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build and Windsurf) when none does |
 | Hermes Agent | `$HERMES_HOME/config.yaml` (`mcp_servers`, default `~/.hermes`), `$HERMES_HOME/SOUL.md` (Hermes's identity file, the only global file it reads for instructions; capture reads only a kitbag-managed block in it) | `.hermes.md` or `HERMES.md` when the project has one (Hermes loads it before `AGENTS.md`), otherwise `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf and Grok Build); Hermes documents no project MCP file, so MCP servers are not written at project scope |
 | Amp | `~/.config/amp/settings.json` or `settings.jsonc` (`amp.mcpServers`; `%USERPROFILE%\.config\amp` on Windows), `~/.config/amp/AGENTS.md`, `~/.config/agents/skills/<name>/` | `.amp/settings.json` or `settings.jsonc` (`amp.mcpServers`; Amp asks you to approve these servers, `amp mcp approve`), `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf, Grok Build and Hermes), or `AGENT.md` / `CLAUDE.md` when that is the file Amp reads, `.agents/skills/<name>/` |
-| Cline | `~/.cline/data/settings/cline_mcp_settings.json` (`mcpServers`; `CLINE_MCP_SETTINGS_PATH` names the file, `CLINE_DATA_DIR` replaces `~/.cline/data`, `CLINE_DIR` replaces `~/.cline`), `~/.cline/rules/kitbag.md` (a managed block in a file of its own; Cline reads every file in that directory) | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build, Windsurf and Zed); Cline's docs describe no project MCP file, so MCP servers are not written at project scope |
-| Roo Code | `mcp_settings.json` in `<editor user data>/User/globalStorage/rooveterinaryinc.roo-cline/settings/` (`mcpServers`; the editor is VS Code, else VS Code Insiders, VSCodium or Cursor, whichever has the extension's folder: `~/.config/Code` or `$XDG_CONFIG_HOME/Code` on Linux, `~/Library/Application Support/Code` on macOS, `%APPDATA%\Code` on Windows), `~/.roo/rules/kitbag.md` (a managed block in a file of its own; Roo reads every file in that directory) | `.roo/mcp.json` (`mcpServers`; wins over the user file for a server of the same name), `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build, Windsurf and Zed) |
+| Cline | `~/.cline/data/settings/cline_mcp_settings.json` (`mcpServers`; `CLINE_MCP_SETTINGS_PATH` names the file, `CLINE_DATA_DIR` replaces `~/.cline/data`, `CLINE_DIR` replaces `~/.cline`), `~/.cline/rules/kitbag.md` (instructions: a managed block in a file of its own; Cline reads every file in that directory), `~/.cline/rules/<name>.md`, `~/.cline/workflows/<name>.md`, `~/.cline/skills/<name>/`; capture also reads `~/Documents/Cline/Rules/`, `~/Cline/Rules/`, `~/Documents/Cline/Workflows/` and `~/.agents/skills/` | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build, Windsurf and Zed), `.cline/rules/<name>.md`, `.cline/workflows/<name>.md`, `.cline/skills/<name>/`; capture also reads the older `.clinerules/` (rules, `workflows/`, `skills/`) and `.agents/skills/`; Cline's docs describe no project MCP file, so MCP servers are not written at project scope |
+| Roo Code | `mcp_settings.json` in `<editor user data>/User/globalStorage/rooveterinaryinc.roo-cline/settings/` (`mcpServers`; the editor is VS Code, else VS Code Insiders, VSCodium or Cursor, whichever has the extension's folder: `~/.config/Code` or `$XDG_CONFIG_HOME/Code` on Linux, `~/Library/Application Support/Code` on macOS, `%APPDATA%\Code` on Windows), `~/.roo/rules/kitbag.md` (instructions: a managed block in a file of its own; Roo reads every file in that directory), `~/.roo/rules/<name>.md`, `~/.roo/commands/<name>.md`, `~/.roo/skills/<name>/`; capture also reads `~/.agents/skills/` | `.roo/mcp.json` (`mcpServers`; wins over the user file for a server of the same name), `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build, Windsurf and Zed), `.roo/rules/<name>.md`, `.roo/commands/<name>.md`, `.roo/skills/<name>/`; capture also reads `.agents/skills/` |
 | Continue | `~/.continue/config.yaml` (`%USERPROFILE%\.continue\config.yaml` on Windows): `mcpServers`, for instructions a `kitbag-instructions` entry of `rules`, and for commands the `prompts` list | `.continue/mcpServers/*.yaml` (a server already defined in one of those files is edited there, new ones go to `kitbag.yaml`; JSON files there are read, not written), `.continue/rules/<name>.md`, and the instructions in `.continue/rules/kitbag-instructions.md`; `AGENTS.md` is not used, since Continue's docs don't mention it |
 | GitHub Copilot | `$COPILOT_HOME/mcp-config.json` (`mcpServers`, default `~/.copilot`), `$COPILOT_HOME/copilot-instructions.md`, `$COPILOT_HOME/instructions/*.instructions.md`, `$COPILOT_HOME/skills/`, `$COPILOT_HOME/agents/*.agent.md` | `.mcp.json` (shared with Claude Code, written in Claude Code's shape), `.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` (`applyTo`), `.github/prompts/*.prompt.md`, `.github/skills/`, `.github/agents/*.agent.md`; capture also reads `.github/mcp.json`, legacy chat modes in `.github/chatmodes/` and `.vscode/mcp.json` (`servers`), and `disabledMcpServers` from Copilot's `settings.json` |
 
@@ -1285,9 +1285,25 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   dropped with a warning. Nothing else in the data directory is read: it also holds the provider
   settings, with API keys. Instructions go in a managed block in `~/.cline/rules/kitbag.md`, one of
   the global rules directories Cline reads, and to `AGENTS.md` in a project (Cline's docs list it);
-  rules are folded into the same block as sections. Rule files you keep yourself
-  (`~/Documents/Cline/Rules/`, `.clinerules/`, `.cline/rules/`, with their `paths` frontmatter) are not
-  read or written, and capture lists them. Workflows, skills, hooks and agents are not carried yet.
+  only instructions go there, so `kitbag` can't be a rule name at user scope. Rules are files of
+  their own: `<name>.md` in `~/.cline/rules/` and `.cline/rules/`. A rule with globs gets a `paths`
+  list in YAML frontmatter, the one conditional Cline documents; any other rule is plain markdown, and
+  an on-demand rule (Cline has none) is written always-on with a first line saying when to use it.
+  Capture reads the `*.md` files directly in `~/.cline/rules/`, `~/Documents/Cline/Rules/`,
+  `~/Cline/Rules/`, `.cline/rules/` and `.clinerules/` (a `paths: []` rule, which never applies, is
+  skipped) and lists what it leaves: nested or non-markdown files, and `.clinerules/hooks/`. It does not
+  take `.cursorrules`, `.windsurfrules` or `AGENTS.md`, which Cline also detects but which belong to
+  other tools. A rule that already exists in one of the other folders is updated there instead of
+  copied. Commands are Cline's workflows: `<name>.md` in `~/.cline/workflows/` and `.cline/workflows/`
+  (read also from `~/Documents/Cline/Workflows/` and `.clinerules/workflows/`), plain markdown with
+  the prompt as the body. Cline's docs name those folders but describe no file format, so kitbag writes
+  no frontmatter and a command's description and argument hint are not carried. Skills are
+  `<name>/SKILL.md` directories in `~/.cline/skills/` and `.cline/skills/`, the only folders kitbag
+  writes; capture also reads `.clinerules/skills/` and `.agents/skills/` (`~/.agents/skills/` at user
+  scope), which belong to other tools and are never written, and the plan says when a skill of the
+  same name is in one of them. The name in `SKILL.md` must match the directory name. Rules that an
+  older kitbag folded into `kitbag.md` are removed from it on apply (user scope) and still read by
+  capture. Hooks and agents are not carried yet.
 - **Roo Code** (the `RooVeterinaryInc.roo-cline` extension) keeps MCP servers under `mcpServers` in
   `mcp_settings.json` in the extension's global storage, and in a project's `.roo/mcp.json`, which
   wins for a server of the same name. Roo's docs don't give the global path; the file name and the
@@ -1302,11 +1318,27 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   `timeout`, `watchPaths` and `disabledTools` on an entry are kept. References are written as
   `${env:VAR}`, which Roo expands (its docs show it in `args`; its source expands the whole entry),
   so no secret is written. Instructions go in a managed block in `~/.roo/rules/kitbag.md` (Roo reads
-  every file in that directory) and to `AGENTS.md` in a project (Roo reads it by default); rules are
-  folded into the same block. Roo's own rule files (`.roo/rules/`, `.roo/rules-<mode>/`,
-  `.roorules`), custom modes, commands, skills and hooks are not carried yet; capture lists the
-  rule files it left. A project's servers run what `.roo/mcp.json` says: kitbag writes no
-  `alwaysAllow`, so Roo's own tool approval applies.
+  every file in that directory) and to `AGENTS.md` in a project (Roo reads it by default); only
+  instructions go there, so `kitbag` can't be a rule name at user scope. Rules are files of their own:
+  `<name>.md` in `~/.roo/rules/` and `.roo/rules/`, which Roo reads recursively (capture takes every
+  `*.md` under them, a sub-folder's name joined to the file's). Roo's docs describe no frontmatter for
+  rules, so none is written: a rule with globs, or an on-demand one, loads every time, with a first
+  line saying when it applies (`_Applies when working with files matching: ..._`), which capture reads
+  back into the rule's globs. Roo uses a project's `.roorules` only while `.roo/rules/` is empty, so
+  kitbag never creates an empty `.roo/rules/`, and warns when its rule files would hide a `.roorules`.
+  Mode-specific rules (`rules-<mode>/`, `.roorules-<mode>`) and `.roorules` are not captured or
+  written (kitbag has no notion of Roo's modes), and capture lists them. Commands are
+  `<name>.md` in `~/.roo/commands/` and `.roo/commands/` with `description`, `argument-hint` and
+  `mode` frontmatter, the three keys Roo documents; the file name is the command name. A `mode` is
+  Roo's own key (it names a Roo mode), so capture keeps it with the command and the plan says when it
+  is written. Skills are `<name>/SKILL.md` directories in `~/.roo/skills/` and `.roo/skills/`, the
+  only folders kitbag writes; capture also reads the cross-agent `~/.agents/skills/` and
+  `.agents/skills/`, never written, and lists mode-specific `skills-<mode>/` folders without reading
+  them. Roo needs a skill name of 1-64 lowercase letters, digits and single hyphens that matches the
+  directory, so a skill with another name is skipped with a warning. Rules that an older kitbag folded
+  into `kitbag.md` are removed from it on apply (user scope) and still read by capture. Custom
+  modes, hooks and settings are not carried. A project's servers run what `.roo/mcp.json` says:
+  kitbag writes no `alwaysAllow`, so Roo's own tool approval applies.
 - **Continue** (VS Code and JetBrains) keeps user settings in `~/.continue/config.yaml`
   (`%USERPROFILE%\.continue\config.yaml` on Windows). kitbag edits it in place: comments, your
   models, prompts and other keys stay, and only the `mcpServers` entries it writes (and one
