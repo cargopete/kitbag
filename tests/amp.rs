@@ -7,7 +7,7 @@ use std::fs;
 
 use common::*;
 use kitbag::adapters::{Os, Scope, SecretsMode};
-use kitbag::model::{McpServer, Profile, Rule, Transport};
+use kitbag::model::{Command, McpServer, Profile, Rule, Skill, SkillFile, Targeting, Transport};
 use kitbag::profile_io;
 use kitbag::txn::Store;
 use serde_json::{Value, json};
@@ -728,5 +728,340 @@ fn list_targets_names_amp() {
         .unwrap();
     assert_eq!(amp["support"]["mcp"], "native");
     assert_eq!(amp["support"]["instructions"], "native");
-    assert_eq!(amp["support"]["skills"], "-");
+    assert_eq!(amp["support"]["skills"], "native");
+    assert_eq!(amp["support"]["commands"], "folded");
+    assert_eq!(amp["support"]["rules"], "-");
+}
+
+// ---- skills ----
+
+const SKILL: &str =
+    "---\nname: pdf-tools\ndescription: Work with PDF files\n---\n\nUse the script.\n";
+
+fn put(sb: &Sandbox, rel: &str, text: &str) {
+    let p = sb.path(rel);
+    fs::create_dir_all(p.parent().unwrap()).unwrap();
+    fs::write(p, text).unwrap();
+}
+
+fn skill_named(text: &str, name: &str) -> String {
+    text.replace("pdf-tools", name)
+}
+
+fn skill_profile(name: &str, text: &str, extra: &[(&str, &str)]) -> Profile {
+    let mut p = Profile::new("team");
+    let mut files = vec![SkillFile {
+        path: "SKILL.md".into(),
+        content: text.as_bytes().to_vec(),
+        executable: false,
+    }];
+    for (path, body) in extra {
+        files.push(SkillFile {
+            path: (*path).into(),
+            content: body.as_bytes().to_vec(),
+            executable: false,
+        });
+    }
+    p.skills.push(Skill {
+        name: name.into(),
+        description: Some("Work with PDF files".into()),
+        files,
+        ..Default::default()
+    });
+    p
+}
+
+fn note_text(r: &kitbag::engine::CaptureResult) -> String {
+    r.notes
+        .iter()
+        .map(|n| n.message.clone())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn user_skill_round_trips_through_the_agents_skills_folder() {
+    let sb = Sandbox::empty();
+    put(&sb, "home/.config/agents/skills/pdf-tools/SKILL.md", SKILL);
+    put(
+        &sb,
+        "home/.config/agents/skills/pdf-tools/scripts/extract.py",
+        "print('x')\n",
+    );
+    let r = capture(&["amp"], &sb.env(Scope::User));
+    let s = &r.profile.skills[0];
+    assert_eq!(s.name, "pdf-tools");
+    assert_eq!(s.description.as_deref(), Some("Work with PDF files"));
+    assert!(s.files.iter().any(|f| f.path == "scripts/extract.py"));
+
+    let other = Sandbox::empty();
+    let env = other.env(Scope::User);
+    apply(&other, &r.profile, &["amp"], &env);
+    assert_eq!(
+        other.read("home/.config/agents/skills/pdf-tools/SKILL.md"),
+        SKILL
+    );
+    assert_eq!(
+        other.read("home/.config/agents/skills/pdf-tools/scripts/extract.py"),
+        "print('x')\n"
+    );
+    // Nothing goes to Claude Code's or Amp's other folders.
+    assert!(!other.path("home/.claude").exists());
+    assert!(!other.path("home/.config/amp/skills").exists());
+    assert!(!other.path("home/.agents").exists());
+    // A second apply is up to date, and undo removes what was written.
+    assert!(plan(&r.profile, &["amp"], &env).changes.is_empty());
+    Store::new(other.state()).undo(None, false).unwrap();
+    assert!(!other.path("home/.config/agents/skills/pdf-tools").exists());
+}
+
+#[test]
+fn project_skill_round_trips_through_agents_skills() {
+    let sb = Sandbox::empty();
+    put(&sb, "project/.agents/skills/pdf-tools/SKILL.md", SKILL);
+    put(
+        &sb,
+        "project/.agents/skills/pdf-tools/references/notes.md",
+        "Notes.\n",
+    );
+    let r = capture(&["amp"], &sb.env(Scope::Project));
+    assert_eq!(r.profile.skills.len(), 1);
+
+    let other = Sandbox::empty();
+    apply(&other, &r.profile, &["amp"], &other.env(Scope::Project));
+    assert_eq!(
+        other.read("project/.agents/skills/pdf-tools/SKILL.md"),
+        SKILL
+    );
+    assert_eq!(
+        other.read("project/.agents/skills/pdf-tools/references/notes.md"),
+        "Notes.\n"
+    );
+    assert!(!other.path("project/.claude").exists());
+}
+
+#[test]
+fn skills_follow_amps_order_and_the_first_one_wins() {
+    let sb = Sandbox::empty();
+    let mine = |tag: &str| format!("---\nname: pdf-tools\ndescription: {tag}\n---\n\n{tag}\n");
+    put(
+        &sb,
+        "home/.claude/skills/pdf-tools/SKILL.md",
+        &mine("claude"),
+    );
+    put(
+        &sb,
+        "home/.config/amp/skills/pdf-tools/SKILL.md",
+        &mine("amp"),
+    );
+    put(
+        &sb,
+        "home/.agents/skills/pdf-tools/SKILL.md",
+        &mine("agents"),
+    );
+    put(
+        &sb,
+        "home/.claude/skills/only-claude/SKILL.md",
+        &skill_named(SKILL, "only-claude"),
+    );
+    let r = capture(&["amp"], &sb.env(Scope::User));
+    assert_eq!(r.profile.skills.len(), 2);
+    let s = r
+        .profile
+        .skills
+        .iter()
+        .find(|s| s.name == "pdf-tools")
+        .unwrap();
+    assert_eq!(s.description.as_deref(), Some("agents"));
+    let notes = note_text(&r);
+    assert!(
+        notes.contains("skill 'pdf-tools'") && notes.contains("skipped: Amp uses the one in"),
+        "{notes}"
+    );
+
+    // The project: .agents/skills before .claude/skills.
+    put(
+        &sb,
+        "project/.claude/skills/pdf-tools/SKILL.md",
+        &mine("claude"),
+    );
+    put(
+        &sb,
+        "project/.agents/skills/pdf-tools/SKILL.md",
+        &mine("agents"),
+    );
+    let r = capture(&["amp"], &sb.env(Scope::Project));
+    assert_eq!(r.profile.skills.len(), 1);
+    assert_eq!(r.profile.skills[0].description.as_deref(), Some("agents"));
+}
+
+#[test]
+fn skill_settings_switch_the_claude_and_global_folders_off() {
+    let sb = Sandbox::empty();
+    put(
+        &sb,
+        "home/.claude/skills/c/SKILL.md",
+        &skill_named(SKILL, "c"),
+    );
+    put(
+        &sb,
+        "home/.agents/skills/g/SKILL.md",
+        &skill_named(SKILL, "g"),
+    );
+    put(
+        &sb,
+        "home/.config/amp/skills/a/SKILL.md",
+        &skill_named(SKILL, "a"),
+    );
+    put(
+        &sb,
+        SETTINGS,
+        r#"{ "amp.skills.disableClaudeCodeSkills": true, "amp.skills.disableGlobalAgentsSkills": true, "amp.skills.path": ["/x"] }"#,
+    );
+    let r = capture(&["amp"], &sb.env(Scope::User));
+    let names: Vec<&str> = r.profile.skills.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["a"]);
+    assert!(note_text(&r).contains("amp.skills.path"));
+}
+
+#[test]
+fn a_skills_own_mcp_servers_are_not_carried_either_way() {
+    let sb = Sandbox::empty();
+    put(&sb, "home/.config/agents/skills/pdf-tools/SKILL.md", SKILL);
+    put(
+        &sb,
+        "home/.config/agents/skills/pdf-tools/mcp.json",
+        r#"{"mcpServers":{"x":{"command":"npx"}}}"#,
+    );
+    let r = capture(&["amp"], &sb.env(Scope::User));
+    let files: Vec<&str> = r.profile.skills[0]
+        .files
+        .iter()
+        .map(|f| f.path.as_str())
+        .collect();
+    assert_eq!(files, ["SKILL.md"]);
+    assert!(note_text(&r).contains("mcp.json not captured"));
+
+    // A profile skill with mcp.json and an mcpServers key: neither is written.
+    let text =
+        "---\nname: pdf-tools\ndescription: D\nmcpServers:\n  x:\n    command: npx\n---\n\nBody.\n";
+    let prof = skill_profile("pdf-tools", text, &[("mcp.json", "{}"), ("a.txt", "a")]);
+    let other = Sandbox::empty();
+    let p = apply(&other, &prof, &["amp"], &other.env(Scope::User));
+    let dir = "home/.config/agents/skills/pdf-tools";
+    assert!(!other.path(&format!("{dir}/mcp.json")).exists());
+    assert!(other.path(&format!("{dir}/a.txt")).exists());
+    let written = other.read(&format!("{dir}/SKILL.md"));
+    assert!(
+        !written.contains("mcpServers") && written.contains("Body."),
+        "{written}"
+    );
+    assert!(said(&p, "mcp.json and mcpServers not written"));
+    assert!(!other.path("home/.config/amp").exists());
+}
+
+#[test]
+fn skills_write_no_trust_or_permission_settings() {
+    let sb = Sandbox::empty();
+    let mut prof = sample();
+    prof.skills = skill_profile("pdf-tools", SKILL, &[]).skills;
+    apply(&sb, &prof, &["amp"], &sb.env(Scope::Project));
+    let settings = sb.read("project/.amp/settings.json");
+    assert!(!settings.contains("mcpTrustedServers") && !settings.contains("mcpPermissions"));
+    assert!(
+        sb.path("project/.agents/skills/pdf-tools/SKILL.md")
+            .exists()
+    );
+}
+
+#[test]
+fn commands_are_written_as_skills_and_no_commands_folder() {
+    let sb = Sandbox::empty();
+    let mut prof = Profile::new("team");
+    prof.commands.push(Command {
+        name: "code-review".into(),
+        description: Some("Review the diff".into()),
+        argument_hint: Some("<files>".into()),
+        body: "Review $ARGUMENTS carefully.".into(),
+        ..Default::default()
+    });
+    prof.commands.push(Command {
+        name: "pdf-tools".into(),
+        body: "clashes with a skill".into(),
+        ..Default::default()
+    });
+    prof.skills = skill_profile("pdf-tools", SKILL, &[]).skills;
+    let env = sb.env(Scope::User);
+    let p = apply(&sb, &prof, &["amp"], &env);
+    let text = sb.read("home/.config/agents/skills/code-review/SKILL.md");
+    assert!(text.contains("name: code-review") && text.contains("description: Review the diff"));
+    assert!(text.contains("Review $ARGUMENTS carefully."));
+    // The skill keeps its own text.
+    assert_eq!(
+        sb.read("home/.config/agents/skills/pdf-tools/SKILL.md"),
+        SKILL
+    );
+    assert!(!sb.path("home/.config/amp/commands").exists());
+    assert!(!sb.path("home/.agents").exists());
+    assert!(said(&p, "Amp removed custom commands in favour of skills"));
+    assert!(said(&p, "'pdf-tools' skipped"));
+    assert!(said(&p, "'code-review' becomes a skill"));
+    assert!(plan(&prof, &["amp"], &env).changes.is_empty());
+
+    let r = capture(&["amp"], &env);
+    assert!(r.profile.commands.is_empty());
+    assert!(r.profile.skills.iter().any(|s| s.name == "code-review"));
+
+    // Project scope: .agents/skills, never .agents/commands.
+    apply(&sb, &prof, &["amp"], &sb.env(Scope::Project));
+    assert!(
+        sb.path("project/.agents/skills/code-review/SKILL.md")
+            .exists()
+    );
+    assert!(!sb.path("project/.agents/commands").exists());
+}
+
+#[test]
+fn skills_respect_targets_and_disabled_on() {
+    let sb = Sandbox::empty();
+    let mut prof = skill_profile("pdf-tools", SKILL, &[]);
+    prof.skills[0].targeting = Targeting {
+        targets: None,
+        disabled_on: vec!["amp".into()],
+    };
+    let mut other = skill_profile("only-codex", &skill_named(SKILL, "only-codex"), &[]);
+    other.skills[0].targeting = Targeting {
+        targets: Some(vec!["codex".into()]),
+        disabled_on: vec![],
+    };
+    prof.skills.extend(other.skills);
+    apply(&sb, &prof, &["amp"], &sb.env(Scope::User));
+    assert!(!sb.path("home/.config/agents/skills").exists());
+}
+
+#[test]
+fn a_user_skill_of_the_same_name_is_called_out() {
+    let sb = Sandbox::empty();
+    put(&sb, "home/.config/amp/skills/pdf-tools/SKILL.md", SKILL);
+    let prof = skill_profile("pdf-tools", SKILL, &[]);
+    let p = plan(&prof, &["amp"], &sb.env(Scope::User));
+    assert!(said(&p, "also exists in") && said(&p, "~/.config/agents/skills"));
+    // In a project, Amp reads the user's folders first.
+    let p = plan(&prof, &["amp"], &sb.env(Scope::Project));
+    assert!(said(&p, "Amp lists user skills before this project's"));
+}
+
+#[test]
+fn existing_skills_are_kept_without_overwrite_and_undo_leaves_others() {
+    let sb = Sandbox::empty();
+    put(
+        &sb,
+        "home/.config/agents/skills/mine/SKILL.md",
+        &skill_named(SKILL, "mine"),
+    );
+    let prof = skill_profile("pdf-tools", SKILL, &[]);
+    apply(&sb, &prof, &["amp"], &sb.env(Scope::User));
+    Store::new(sb.state()).undo(None, false).unwrap();
+    assert!(sb.path("home/.config/agents/skills/mine/SKILL.md").exists());
+    assert!(!sb.path("home/.config/agents/skills/pdf-tools").exists());
 }

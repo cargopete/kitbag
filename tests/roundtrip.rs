@@ -231,10 +231,19 @@ fn applying_everywhere_then_capturing_everything_is_a_fixed_point() {
     assert_eq!(back.mcp_servers, profile.mcp_servers);
     assert_eq!(back.instructions, profile.instructions);
     assert_eq!(back.rules, profile.rules);
-    assert_eq!(
-        back.skills.iter().map(|s| &s.name).collect::<Vec<_>>(),
-        profile.skills.iter().map(|s| &s.name).collect::<Vec<_>>()
-    );
+    // Amp has no commands (it dropped them for skills), so the commands applied
+    // to it come back from its skills folder as skills too.
+    let mut want: Vec<&String> = profile
+        .skills
+        .iter()
+        .map(|s| &s.name)
+        .chain(profile.commands.iter().map(|c| &c.name))
+        .collect();
+    want.sort();
+    want.dedup();
+    let mut got: Vec<&String> = back.skills.iter().map(|s| &s.name).collect();
+    got.sort();
+    assert_eq!(got, want);
 }
 
 #[test]
