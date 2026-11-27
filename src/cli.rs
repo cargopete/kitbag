@@ -28,14 +28,16 @@ use crate::why;
 const ABOUT: &str = "Pack your AI agent setup once, unpack it into any coding tool.";
 
 const AFTER_HELP: &str = "\
-Sources (for apply / diff / status / sync / doctor) are a profile directory, a
-plugin directory (rules/<name>.md at its root, no kitbag.toml), or a git URL to
-either:
+Sources (for apply / diff / inspect / status / sync / doctor) are a profile
+directory, a plugin directory (rules/<name>.md at its root, no kitbag.toml), or
+a git URL to either, optionally pinned to a branch, tag or commit with @ or #:
   ./my-profile   ./my-plugin   github:you/dotagents   gh:you/dotfiles/agents#main
-  https://github.com/you/dotagents.git   git@github.com:you/dotagents.git
+  github:you/dotagents@v1.2   https://github.com/you/dotagents.git@3f9c2e1
+  git@github.com:you/dotagents.git
 
 Examples:
   kitbag capture --from claude-code,cursor -o ~/dotagents
+  kitbag inspect github:you/dotagents@v1.2 --to all
   kitbag diff ~/dotagents --to codex
   kitbag apply github:you/dotagents --to all
   kitbag apply ~/dotagents --project . --to cursor,codex
@@ -124,6 +126,20 @@ enum Cmd {
         /// Exit with status 1 when there are differences (for CI drift checks)
         #[arg(long)]
         exit_code: bool,
+    },
+    /// Show what a profile or plugin holds, what in it runs commands, reads
+    /// env vars or connects to the network, and (for the tools in --to) which
+    /// files 'apply' would write. Never writes or starts anything
+    Inspect {
+        /// Profile or plugin directory, or a git URL to one
+        source: String,
+        #[command(flatten)]
+        targets: TargetArgs,
+        #[command(flatten)]
+        apply: ApplyArgs,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
     },
     /// Show where the instructions and rules in each tool differ from the
     /// profile, or (without PROFILE) changed since the last apply. Never writes
@@ -601,6 +617,18 @@ pub fn run(cli: Cli) -> Result<i32> {
             &apply,
             Mode::Diff { exit_code },
         ),
+        Cmd::Inspect {
+            source,
+            targets,
+            apply,
+            json,
+        } => cmd_inspect(
+            &context(home, Some(&targets.place))?,
+            &source,
+            &targets,
+            &apply,
+            json,
+        ),
         Cmd::Status { source, args } => {
             cmd_status(&context(home, Some(&args.place))?, source.as_deref(), &args)
         }
@@ -926,29 +954,34 @@ fn load_source(
 
 fn print_plan_summary(plan: &Plan, env: &Env) {
     for c in &plan.changes {
-        let stats = ui::line_stats(c)
-            .filter(|_| !ui::mode_only(c))
-            .map(|(a, d)| {
-                format!(
-                    "{} {}",
-                    paint(GREEN, format!("+{a}")),
-                    paint(RED, format!("-{d}"))
-                )
-            })
-            .unwrap_or_else(|| {
-                if ui::mode_only(c) {
-                    paint(DIM, "+x")
-                } else {
-                    paint(DIM, "binary")
-                }
-            });
-        println!(
-            "  {}  {}  {}",
-            ui::change_label(c),
-            tildify(&c.path, &env.home),
-            stats
-        );
+        println!("  {}", change_line(c, env));
     }
+}
+
+/// `create  ~/.claude/CLAUDE.md  +3 -0`: one file a plan writes.
+fn change_line(c: &crate::plan_fs::FileChange, env: &Env) -> String {
+    let stats = ui::line_stats(c)
+        .filter(|_| !ui::mode_only(c))
+        .map(|(a, d)| {
+            format!(
+                "{} {}",
+                paint(GREEN, format!("+{a}")),
+                paint(RED, format!("-{d}"))
+            )
+        })
+        .unwrap_or_else(|| {
+            if ui::mode_only(c) {
+                paint(DIM, "+x")
+            } else {
+                paint(DIM, "binary")
+            }
+        });
+    format!(
+        "{}  {}  {}",
+        ui::change_label(c),
+        tildify(&c.path, &env.home),
+        stats
+    )
 }
 
 fn print_plan_extras(plan: &Plan, remote: bool) {
@@ -1084,6 +1117,391 @@ fn cmd_apply(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, mode: Mode) ->
         plan.notes.extend(tool_only_notes(&found, &ctx.env));
     }
     present(ctx, &resolved, &profile, &plan, mode)
+}
+
+/// An MCP server as `inspect` shows it: redacted as capture would redact
+/// it, then masked like a diff line, so no secret in the profile is shown.
+struct ServerView {
+    name: String,
+    transport: &'static str,
+    /// Runs a command on this machine (rather than connecting to a URL).
+    local: bool,
+    /// The command line, or the URL without credentials.
+    endpoint: String,
+    env: Vec<(String, String)>,
+    headers: Vec<(String, String)>,
+    /// Where the profile holds what looks like a secret.
+    secrets: Vec<String>,
+}
+
+fn server_view(name: &str, s: &McpServer) -> ServerView {
+    let (r, redactions) = crate::secrets::redact_server(name, s);
+    // Redaction puts a made-up `${VAR}` where a literal secret was; the
+    // profile references no such variable, so show the mask instead.
+    let made_up: Vec<String> = redactions
+        .iter()
+        .filter(|x| x.reason != "secret-fallback")
+        .map(|x| crate::secrets::reference(&x.env_var))
+        .collect();
+    let show = |v: &str| {
+        let mut out = crate::secrets::mask_line(&source::strip_url_credentials(v));
+        for m in &made_up {
+            out = out.replace(m.as_str(), "••••••••");
+        }
+        visible_line(&out).into_owned()
+    };
+    let local = r.command.is_some() && (r.url.is_none() || r.transport() == Transport::Stdio);
+    let endpoint = if local {
+        show(
+            &std::iter::once(r.command.clone().unwrap_or_default())
+                .chain(r.args.iter().cloned())
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
+    } else {
+        show(r.url.as_deref().unwrap_or_default())
+    };
+    let pairs = |m: &BTreeMap<String, String>| -> Vec<(String, String)> {
+        m.iter().map(|(k, v)| (show(k), show(v))).collect()
+    };
+    ServerView {
+        name: show(name),
+        transport: r.transport().as_str(),
+        local,
+        endpoint,
+        env: pairs(&r.env),
+        headers: pairs(&r.headers),
+        secrets: redactions
+            .iter()
+            .map(|x| format!("{}: looks like a secret ({})", x.location, x.reason))
+            .collect(),
+    }
+}
+
+/// `kitbag inspect`: what a source holds and what applying it would do,
+/// without writing anything or starting any server.
+fn cmd_inspect(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, as_json: bool) -> Result<i32> {
+    let env = &ctx.env;
+    let (resolved, profile) = load_source(src, t.path.as_deref(), t.fetch())?;
+    let plugin = profile_io::is_plugin(&resolved.dir);
+    let servers: Vec<ServerView> = profile
+        .mcp_servers
+        .iter()
+        .map(|(n, s)| server_view(n, s))
+        .collect();
+    let names = |v: Vec<&String>| -> Vec<String> {
+        v.into_iter()
+            .map(|n| visible_line(n).into_owned())
+            .collect()
+    };
+    let rules = names(profile.rules.iter().map(|r| &r.name).collect());
+    let commands = names(profile.commands.iter().map(|c| &c.name).collect());
+    let skills = names(profile.skills.iter().map(|s| &s.name).collect());
+    let agents = names(profile.agents.iter().map(|s| &s.name).collect());
+    let settings = names(profile.settings.keys().collect());
+    let instructions = profile
+        .instructions
+        .as_ref()
+        .map(|i| (i.len(), i.lines().count()));
+    // Safety summary.
+    let env_vars: Vec<String> = profile_io::required_env(&profile)
+        .into_keys()
+        .map(|k| visible_line(&k).into_owned())
+        .collect();
+    let executable: Vec<String> = profile
+        .skills
+        .iter()
+        .flat_map(|s| {
+            s.files
+                .iter()
+                .filter(|f| f.executable)
+                .map(move |f| format!("skills/{}/{}", s.name, f.path))
+        })
+        .map(|p| visible_line(&p).into_owned())
+        .collect();
+    let mut secrets: Vec<String> = servers.iter().flat_map(|s| s.secrets.clone()).collect();
+    for found in profile_io::scan_for_secrets(&profile) {
+        let at = found.split(": ").next().unwrap_or_default();
+        if !secrets.iter().any(|s| s.split(": ").next() == Some(at)) {
+            secrets.push(found);
+        }
+    }
+    let secrets: Vec<String> = secrets
+        .iter()
+        .map(|s| visible_line(s).into_owned())
+        .collect();
+    let mut risky: Vec<String> = profile
+        .settings
+        .iter()
+        .flat_map(|(target, set)| {
+            let (allowed, _) = policy::filter(target, Some(set));
+            policy::risky(target, &allowed)
+        })
+        .collect();
+    risky.extend(policy::risky_content(&profile));
+    let risky: Vec<String> = risky
+        .iter()
+        .map(|r| {
+            visible_line(&crate::secrets::mask_line(&source::strip_url_credentials(
+                r,
+            )))
+            .into_owned()
+        })
+        .collect();
+    // Files per tool, planned one tool at a time like `apply --to <id>`.
+    let spec: Vec<&str> =
+        t.to.split(',')
+            .map(str::trim)
+            .filter(|x| !x.is_empty())
+            .collect();
+    let none_detected = matches!(spec.as_slice(), [] | ["detected"])
+        && !adapters::all()
+            .iter()
+            .any(|x| x.scopes().contains(&env.scope) && x.detect(env));
+    let targets = if none_detected {
+        Vec::new()
+    } else {
+        select_targets(&t.to, env, "to")?
+    };
+    let mut files = Vec::new();
+    for target in &targets {
+        let (_, plan) = plan_apply(
+            ctx,
+            &resolved,
+            profile.clone(),
+            &[*target],
+            a,
+            &BTreeSet::new(),
+        )?;
+        files.push((target.id(), plan));
+    }
+
+    if as_json {
+        let server_json: Vec<_> = servers
+            .iter()
+            .map(|s| {
+                let map = |v: &[(String, String)]| -> serde_json::Map<String, serde_json::Value> {
+                    v.iter().map(|(k, v)| (k.clone(), json!(v))).collect()
+                };
+                json!({
+                    "name": s.name, "transport": s.transport, "local": s.local,
+                    "endpoint": s.endpoint, "env": map(&s.env), "headers": map(&s.headers),
+                })
+            })
+            .collect();
+        let files_json: serde_json::Map<String, serde_json::Value> = files
+            .iter()
+            .map(|(id, plan)| {
+                let skipped = plan.skipped.iter().any(|x| x == id);
+                (
+                    (*id).to_string(),
+                    json!({
+                        "skipped": skipped,
+                        "files": plan.changes.iter().map(|c| json!({
+                            "path": c.path.display().to_string(),
+                            "change": match c.kind() {
+                                crate::plan_fs::ChangeKind::Create => "create",
+                                crate::plan_fs::ChangeKind::Modify => "modify",
+                                crate::plan_fs::ChangeKind::Delete => "delete",
+                            },
+                        })).collect::<Vec<_>>(),
+                        "withheld_mcp_servers": plan.withheld.iter().map(|w| visible_line(&w.name).into_owned()).collect::<Vec<_>>(),
+                    }),
+                )
+            })
+            .collect();
+        let v = json!({
+            "name": visible_line(&profile.name),
+            "kind": if plugin { "plugin" } else { "profile" },
+            "origin": visible_line(&resolved.origin),
+            "source": visible_line(&resolved.source),
+            "commit": resolved.commit,
+            "instructions": instructions.map(|(bytes, lines)| json!({"bytes": bytes, "lines": lines})),
+            "rules": rules, "commands": commands, "skills": skills, "agents": agents,
+            "settings": settings,
+            "mcp_servers": server_json,
+            "safety": {
+                "commands": servers.iter().filter(|s| s.local).map(|s| json!({"name": s.name, "command": s.endpoint})).collect::<Vec<_>>(),
+                "urls": servers.iter().filter(|s| !s.local).map(|s| json!({"name": s.name, "url": s.endpoint})).collect::<Vec<_>>(),
+                "env": env_vars, "executable": executable, "secrets": secrets, "risky": risky,
+            },
+            "scope": env.scope.to_string(),
+            "files": if none_detected { serde_json::Value::Null } else { serde_json::Value::Object(files_json) },
+        });
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(0);
+    }
+
+    println!(
+        "{} '{}' from {}",
+        paint(BOLD, if plugin { "Plugin" } else { "Profile" }),
+        visible_line(&profile.name),
+        visible_line(&resolved.origin)
+    );
+    if let Some(c) = &resolved.commit {
+        println!("  commit {}", visible_line(c));
+    }
+    if let Some(d) = &profile.description {
+        println!("  {}", paint(DIM, visible_line(d)));
+    }
+    let list = |label: &str, items: &[String]| {
+        let shown = if items.is_empty() {
+            paint(DIM, "none")
+        } else {
+            items.join(", ")
+        };
+        println!("  {:<15} {shown}", format!("{label} ({})", items.len()));
+    };
+    println!("\n{}", paint(BOLD, "Contents"));
+    match instructions {
+        Some((bytes, lines)) => println!(
+            "  {:<15} instructions.md ({lines} line(s), {bytes} bytes)",
+            "instructions"
+        ),
+        None => println!("  {:<15} {}", "instructions", paint(DIM, "none")),
+    }
+    list("rules", &rules);
+    list("commands", &commands);
+    list("skills", &skills);
+    list("agents", &agents);
+    if !settings.is_empty() {
+        list("settings", &settings);
+    }
+    list(
+        "mcp servers",
+        &servers.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+    );
+    for s in &servers {
+        println!(
+            "    {}: {}  {}",
+            s.name,
+            paint(BOLD, &s.endpoint),
+            paint(DIM, format!("({})", s.transport))
+        );
+        for (label, pairs) in [("env", &s.env), ("headers", &s.headers)] {
+            if !pairs.is_empty() {
+                let shown: Vec<String> = pairs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                println!("        {label}: {}", shown.join(", "));
+            }
+        }
+    }
+
+    println!("\n{}", paint(BOLD, "Safety"));
+    let mut any = false;
+    let mut section = |title: &str, lines: Vec<String>| {
+        if lines.is_empty() {
+            return;
+        }
+        any = true;
+        println!("  {}", paint(YELLOW, title));
+        for l in lines {
+            println!("    {l}");
+        }
+    };
+    section(
+        "Runs local commands (MCP servers, started by the tool):",
+        servers
+            .iter()
+            .filter(|s| s.local)
+            .map(|s| format!("{}: {}", s.name, s.endpoint))
+            .collect(),
+    );
+    section(
+        "Connects to (MCP servers):",
+        servers
+            .iter()
+            .filter(|s| !s.local)
+            .map(|s| format!("{}: {} ({})", s.name, s.endpoint, s.transport))
+            .collect(),
+    );
+    section(
+        "Env vars it references:",
+        if env_vars.is_empty() {
+            Vec::new()
+        } else {
+            vec![env_vars.join(", ")]
+        },
+    );
+    section(
+        if resolved.remote {
+            "Executable files (not marked executable from a git source without --trust-source):"
+        } else {
+            "Executable files:"
+        },
+        executable.clone(),
+    );
+    section(
+        "Lets agents act without asking, or runs commands:",
+        risky.clone(),
+    );
+    section(
+        "Looks like secrets written in the profile (shown redacted):",
+        secrets.clone(),
+    );
+    if !any {
+        println!(
+            "  {} runs no commands, connects to no URLs, references no env vars and installs no executable files.",
+            paint(GREEN, "Nothing to review:")
+        );
+    }
+
+    println!();
+    if none_detected {
+        println!(
+            "{} no supported tools detected at {} scope; pass --to <ids> to list the files 'apply' would write.",
+            paint(BOLD, "Files:"),
+            env.scope
+        );
+        return Ok(0);
+    }
+    println!(
+        "{} ({}; nothing is written)",
+        paint(BOLD, "Files 'apply' would write"),
+        where_label(env)
+    );
+    for (id, plan) in &files {
+        println!("  {id}");
+        if plan.skipped.iter().any(|x| x == id) {
+            let why = plan
+                .notes
+                .iter()
+                .find(|n| n.target == *id)
+                .map(|n| n.message.clone())
+                .unwrap_or_else(|| "skipped".into());
+            println!("    {}", paint(DIM, visible_line(&why)));
+            continue;
+        }
+        if plan.changes.is_empty() {
+            println!("    {}", paint(DIM, "nothing to write (already matches)"));
+        }
+        for c in &plan.changes {
+            println!("    {}", change_line(c, env));
+        }
+        if !plan.withheld.is_empty() {
+            println!(
+                "    {}",
+                paint(
+                    DIM,
+                    format!(
+                        "without the MCP servers {} (from a git source; see --allow-git-mcp)",
+                        plan.withheld
+                            .iter()
+                            .map(|w| visible_line(&w.name).into_owned())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                )
+            );
+        }
+    }
+    println!(
+        "\n{}",
+        paint(
+            DIM,
+            "See the changes with 'kitbag diff' and the same arguments."
+        )
+    );
+    Ok(0)
 }
 
 /// Plan an apply of `profile`, with the restrictions for git sources: risky
@@ -1247,6 +1665,28 @@ fn where_label(env: &Env) -> String {
     }
 }
 
+/// The commit this machine last applied the git source `resolved` at, when
+/// it differs from the one just fetched: the source moved since.
+fn source_moved(ctx: &Ctx, resolved: &source::Resolved) -> Result<Option<String>> {
+    let Some(now) = &resolved.commit else {
+        return Ok(None);
+    };
+    Ok(Store::new(&ctx.state_dir)
+        .applied_commit(&resolved.source)?
+        .map(|g| g.commit)
+        .filter(|before| before != now))
+}
+
+fn print_source_moved(resolved: &source::Resolved, before: &str) {
+    println!(
+        "{} {} moved since it was last applied on this machine:\n  applied  {}\n  now      {}\n",
+        paint(YELLOW, "warning:"),
+        visible_line(&resolved.source),
+        visible_line(before),
+        visible_line(resolved.commit.as_deref().unwrap_or_default())
+    );
+}
+
 /// Show a plan, then (in apply mode) confirm and write it, and record what
 /// the managed instructions look like afterwards for `kitbag status`.
 fn present(
@@ -1259,12 +1699,21 @@ fn present(
     let env = &ctx.env;
     let where_ = where_label(env);
     println!(
-        "{} '{}' from {}\n  -> {} ({where_})\n",
+        "{} '{}' from {}",
         paint(BOLD, "Profile"),
         visible_line(&profile.name),
         visible_line(&resolved.origin),
+    );
+    if let Some(c) = &resolved.commit {
+        println!("  commit {}", visible_line(c));
+    }
+    println!(
+        "  -> {} ({where_})\n",
         visible_line(&plan.targets.join(", "))
     );
+    if let Some(before) = source_moved(ctx, resolved)? {
+        print_source_moved(resolved, &before);
+    }
     let show_diff = matches!(mode, Mode::Diff { .. } | Mode::Apply { dry_run: true, .. });
     let record = |tx: Option<&str>| -> Result<()> {
         if matches!(mode, Mode::Apply { dry_run: false, .. }) {
@@ -1353,7 +1802,11 @@ fn present(
                 plan.targets.join(", "),
                 where_
             );
-            match engine::commit(plan, &desc, &ctx.state_dir)? {
+            let git = resolved.commit.as_ref().map(|c| crate::txn::GitCommit {
+                source: resolved.source.clone(),
+                commit: c.clone(),
+            });
+            match engine::commit_from(plan, &desc, &ctx.state_dir, git)? {
                 Some(tx) => {
                     record(Some(&tx.id))?;
                     println!(
@@ -1729,14 +2182,47 @@ fn cmd_status(ctx: &Ctx, src: Option<&str>, s: &StatusArgs) -> Result<i32> {
                     });
                 }
             }
+            let applied = match &resolved.commit {
+                Some(_) => Store::new(&ctx.state_dir)
+                    .applied_commit(&resolved.source)?
+                    .map(|g| g.commit),
+                None => None,
+            };
+            if let (Some(now), Some(before)) = (&resolved.commit, &applied)
+                && now != before
+            {
+                rows.insert(
+                    0,
+                    StatusRow {
+                        target: "source".into(),
+                        item: "commit".into(),
+                        path: None,
+                        state: crate::sync::State::ProfileChanged,
+                        detail: Some(format!(
+                            "moved since the last apply: applied {before}, now {now}"
+                        )),
+                    },
+                );
+            }
             if !s.json {
                 println!(
-                    "{} '{}' from {} ({})\n",
+                    "{} '{}' from {} ({})",
                     paint(BOLD, "Profile"),
                     visible_line(&profile.name),
                     visible_line(&resolved.origin),
                     where_label(env)
                 );
+                if let Some(now) = &resolved.commit {
+                    println!("  commit   {}", visible_line(now));
+                    match &applied {
+                        Some(before) => println!("  applied  {}", visible_line(before)),
+                        None => println!(
+                            "  applied  {}",
+                            paint(DIM, "no recorded apply of this source")
+                        ),
+                    }
+                }
+                println!();
             }
         }
         None => {
@@ -1749,6 +2235,7 @@ fn cmd_status(ctx: &Ctx, src: Option<&str>, s: &StatusArgs) -> Result<i32> {
                 ),
                 None => None,
             };
+            let mut txs: BTreeSet<String> = BTreeSet::new();
             for r in crate::sync::last_applied(&ctx.state_dir)?.into_values() {
                 if !r.matches(env)
                     || only
@@ -1757,6 +2244,7 @@ fn cmd_status(ctx: &Ctx, src: Option<&str>, s: &StatusArgs) -> Result<i32> {
                 {
                     continue;
                 }
+                txs.extend(r.tx.clone());
                 let current = crate::sync::item_text(
                     crate::plan_fs::read_opt(&r.path)?.as_deref(),
                     r.block.as_deref(),
@@ -1771,10 +2259,27 @@ fn cmd_status(ctx: &Ctx, src: Option<&str>, s: &StatusArgs) -> Result<i32> {
             }
             if !s.json {
                 println!(
-                    "{} since the last apply ({})\n",
+                    "{} since the last apply ({})",
                     paint(BOLD, "Changes"),
                     where_label(env)
                 );
+                // The git sources those applies came from, at the commit applied.
+                let mut from: Vec<crate::txn::GitCommit> = Vec::new();
+                for t in Store::new(&ctx.state_dir).list()? {
+                    if let Some(g) = t.git.filter(|_| txs.contains(&t.id))
+                        && !from.contains(&g)
+                    {
+                        from.push(g);
+                    }
+                }
+                for g in from {
+                    println!(
+                        "  from {} @ {}",
+                        visible_line(&g.source),
+                        visible_line(&g.commit)
+                    );
+                }
+                println!();
             }
         }
     }

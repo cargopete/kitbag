@@ -62,6 +62,21 @@ pub struct Transaction {
     pub entries: Vec<Entry>,
     /// Directories created by this transaction (removed on undo when empty).
     pub created_dirs: Vec<PathBuf>,
+    /// For an apply from a git source, the source and the commit it was
+    /// applied at. Missing for local sources and in transactions recorded by
+    /// kitbag 0.1.5 and older.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<GitCommit>,
+}
+
+/// The commit a git source was applied at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitCommit {
+    /// The source without its ref: the URL without credentials, and the
+    /// sub-directory, if any (see [`crate::source::Resolved::source`]).
+    pub source: String,
+    /// The full SHA of the commit.
+    pub commit: String,
 }
 
 impl Transaction {
@@ -367,6 +382,18 @@ impl Store {
         targets: &[String],
         opts: &WriteOptions,
     ) -> Result<Transaction> {
+        self.commit_from(changes, description, targets, opts, None)
+    }
+
+    /// [`Store::commit`], recording the git source and commit applied.
+    pub fn commit_from(
+        &self,
+        changes: &[FileChange],
+        description: &str,
+        targets: &[String],
+        opts: &WriteOptions,
+        git: Option<GitCommit>,
+    ) -> Result<Transaction> {
         let last = self.list()?.last().map(|t| t.created_ms);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -389,6 +416,7 @@ impl Store {
             targets: targets.to_vec(),
             entries: Vec::new(),
             created_dirs: Vec::new(),
+            git,
         };
         Self::create_private_dir(&self.backups())?;
         Self::create_private_dir(&self.tx_dir(&tx.id))?;
@@ -554,6 +582,17 @@ impl Store {
     }
 
     /// All transactions, oldest first.
+    /// The commit of the latest apply of the git `source` that still stands
+    /// (not undone), if one recorded it.
+    pub fn applied_commit(&self, source: &str) -> Result<Option<GitCommit>> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .rev()
+            .filter(|t| t.status == Status::Applied)
+            .find_map(|t| t.git.filter(|g| g.source == source)))
+    }
+
     pub fn list(&self) -> Result<Vec<Transaction>> {
         let rd = match fs::read_dir(self.backups()) {
             Ok(rd) => rd,
