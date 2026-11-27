@@ -239,6 +239,7 @@ fn sample() -> Profile {
         globs: vec!["src/**/*.ts".into()],
         always_apply: None,
         body: "Strict mode.".into(),
+        ..Default::default()
     });
     p.commands.push(kitbag::model::Command {
         name: "review".into(),
@@ -701,6 +702,7 @@ fn rule(name: &str, description: Option<&str>, globs: &[&str], always: Option<bo
         globs: globs.iter().map(|g| g.to_string()).collect(),
         always_apply: always,
         body: format!("Body of {name}."),
+        targeting: Default::default(),
     }
 }
 
@@ -1584,6 +1586,7 @@ fn skill(name: &str, main: &str) -> kitbag::model::Skill {
             content: main.as_bytes().to_vec(),
             executable: false,
         }],
+        ..Default::default()
     }
 }
 
@@ -1757,6 +1760,7 @@ fn copilot_apply_project_writes_prompt_files_and_skills() {
         argument_hint: Some("[version]".into()),
         extra,
         body: "Ship the release.".into(),
+        ..Default::default()
     });
     prof.skills
         .push(skill("db-migrate", "Write a reversible migration.\n"));

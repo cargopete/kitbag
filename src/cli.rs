@@ -92,8 +92,9 @@ enum Cmd {
         /// Replace an existing profile in the output directory
         #[arg(long)]
         force: bool,
-        /// With --force, drop the existing profile's MCP servers that weren't found in any
-        /// tool (by default they are kept)
+        /// With --force, drop the existing profile's MCP servers (and its rules, commands,
+        /// skills and agents with targets / disabled_on) that weren't found in any tool (by
+        /// default they are kept)
         #[arg(long)]
         prune: bool,
         /// Show what would be captured without writing anything
@@ -825,8 +826,13 @@ fn cmd_capture(
     } else {
         None
     };
+    let (mut kept_items, mut uncaptured_items) = (Vec::new(), Vec::new());
     let (kept, uncaptured) = match &old {
         Some(old) => {
+            kept_items = profile_io::keep_item_targeting(&mut r.profile, old);
+            if !prune {
+                uncaptured_items = profile_io::keep_uncaptured_items(&mut r.profile, old);
+            }
             let kept = profile_io::keep_targeting(&mut r.profile, old);
             let uncaptured = if prune {
                 old.mcp_servers
@@ -860,6 +866,26 @@ fn cmd_capture(
             message: format!(
                 "kept 'targets' / 'disabled_on' from the existing profile for MCP server(s): {}",
                 kept.join(", ")
+            ),
+        });
+    }
+    if !kept_items.is_empty() {
+        r.notes.push(adapters::Note {
+            level: adapters::Level::Info,
+            target: PROFILE_NOTE.to_string(),
+            message: format!(
+                "kept 'targets' / 'disabled_on' from the existing profile for: {}",
+                kept_items.join(", ")
+            ),
+        });
+    }
+    if !uncaptured_items.is_empty() {
+        r.notes.push(adapters::Note {
+            level: adapters::Level::Info,
+            target: PROFILE_NOTE.to_string(),
+            message: format!(
+                "kept rule(s), command(s), skill(s) and agent(s) of the existing profile that no tool has and that name tools in 'targets' / 'disabled_on': {}; pass --prune to drop them",
+                uncaptured_items.join(", ")
             ),
         });
     }
@@ -1102,6 +1128,18 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
                 shown(&s.name),
                 paint(DIM, format!("({})", s.targets.join(", ")))
             );
+        }
+    }
+    if !plan.removed_items.is_empty() {
+        println!(
+            "\n{}",
+            paint(
+                YELLOW,
+                "Rules, commands, skills and agents removed (disabled for these tools in the profile; kitbag added them there before):"
+            )
+        );
+        for (target, item) in &plan.removed_items {
+            println!("  {}  {}", shown(item), paint(DIM, format!("({target})")));
         }
     }
     if !plan.servers.is_empty() {
@@ -1594,6 +1632,7 @@ fn plan_apply(
         }
     }
     let (applied_servers, records_warning) = crate::sync::applied_servers(&ctx.state_dir, env)?;
+    let (applied_files, files_warning) = crate::sync::applied_files(&ctx.state_dir, env)?;
     let allow = a.git_mcp();
     let opts = ApplyOptions {
         overwrite: !a.no_overwrite,
@@ -1605,6 +1644,7 @@ fn plan_apply(
         hold: hold.clone(),
         // Hooks from a git source need --trust-source on top of --apply-hooks.
         apply_hooks: a.apply_hooks && !untrusted,
+        applied_files,
     };
     let mut plan = if resolved.remote {
         let unknown: Vec<String> = match &allow {
@@ -1627,7 +1667,7 @@ fn plan_apply(
     } else {
         engine::plan(&profile, targets, env, &opts)?
     };
-    if let Some(w) = records_warning {
+    for w in [records_warning, files_warning].into_iter().flatten() {
         plan.notes.push(adapters::Note {
             level: adapters::Level::Warn,
             target: PROFILE_NOTE.to_string(),
@@ -2042,6 +2082,7 @@ fn inventory_rows(
         let changed_item =
             |item: &str| plan.changed_items.iter().any(|(t, i)| t == id && i == item);
         let mut disabled_rows = Vec::new();
+        let skipped = profile.skipped_items(id);
         let mut add = |item: String, in_profile: bool, changed: bool, in_tool: Option<bool>| {
             let state = match (in_profile, changed, in_tool) {
                 (true, true, Some(false)) => State::Added,
@@ -2151,9 +2192,23 @@ fn inventory_rows(
             if a.supports(env.scope, feature) == adapters::Support::None {
                 continue;
             }
+            // Items the profile keeps off this tool get a row of their own below.
+            let off: Vec<&str> = skipped
+                .iter()
+                .filter(|s| s.kind == kind)
+                .map(|s| s.name.as_str())
+                .collect();
+            let wanted: Vec<String> = wanted
+                .into_iter()
+                .filter(|n| !off.contains(&n.as_str()))
+                .collect();
             let mut names = wanted.clone();
             if let Some(h) = &have {
-                names.extend(h.iter().filter(|n| !wanted.contains(n)).cloned());
+                names.extend(
+                    h.iter()
+                        .filter(|n| !wanted.contains(n) && !off.contains(&n.as_str()))
+                        .cloned(),
+                );
             }
             for n in names {
                 let item = format!("{kind} {n}");
@@ -2165,6 +2220,48 @@ fn inventory_rows(
                     in_tool,
                 );
             }
+        }
+        // Rules, commands, skills and agents disabled for this tool in the
+        // profile, but still in it.
+        for s in &skipped {
+            let feature = match s.kind {
+                "rule" => Feature::Rules,
+                "command" => Feature::Commands,
+                "skill" => Feature::Skills,
+                _ => Feature::Agents,
+            };
+            let in_tool = present.as_ref().is_some_and(|p| match s.kind {
+                "rule" => p.rules.iter().any(|x| x.name == s.name),
+                "command" => p.commands.iter().any(|x| x.name == s.name),
+                "skill" => p.skills.iter().any(|x| x.name == s.name),
+                _ => p.agents.iter().any(|x| x.name == s.name),
+            });
+            if !in_tool || a.supports(env.scope, feature) == adapters::Support::None {
+                continue;
+            }
+            let label = s.label();
+            let removes = plan
+                .removed_items
+                .iter()
+                .any(|(t, i)| t == id && *i == label);
+            let (state, detail) = if removes {
+                (
+                    State::Changed,
+                    "disabled for this tool in the profile; apply removes it",
+                )
+            } else {
+                (
+                    State::Removed,
+                    "disabled for this tool in the profile; apply leaves it ('kitbag diff' says why)",
+                )
+            };
+            disabled_rows.push(StatusRow {
+                target: id.to_string(),
+                item: label,
+                path: None,
+                state,
+                detail: Some(detail.to_string()),
+            });
         }
         rows.extend(disabled_rows);
     }

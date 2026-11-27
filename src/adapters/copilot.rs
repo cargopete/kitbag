@@ -934,6 +934,7 @@ mod tests {
             globs: globs.iter().map(|g| g.to_string()).collect(),
             always_apply: always,
             body: "Body.".into(),
+            ..Default::default()
         }
     }
 

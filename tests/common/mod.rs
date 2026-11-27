@@ -212,6 +212,7 @@ pub fn opts(profile: &Profile) -> ApplyOptions {
         git_removals: None,
         hold: Default::default(),
         apply_hooks: false,
+        applied_files: Vec::new(),
     }
 }
 

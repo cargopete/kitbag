@@ -14,7 +14,7 @@ use crate::edit::toml::{json_to_table, json_to_value};
 use crate::frontmatter::{self, glob_list, opt, string};
 use crate::model::{
     Agent, Command, FORMAT_VERSION, Hook, McpServer, Profile, Rule, Skill, SkillFile,
-    is_valid_name, portable_name_issues,
+    TARGETING_KEYS, Targeting, is_valid_name, portable_name_issues,
 };
 use crate::secrets::{
     redact_server, refs_in, sensitive_file, strong_secret_kind, text_secret_kind,
@@ -132,17 +132,7 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
         // Aliases (`claude`) become canonical ids here, so nothing later sees them.
         // A target named twice (`["claude", "claude-code"]`) is kept once, at
         // its first place.
-        for ids in s
-            .targets
-            .iter_mut()
-            .chain(std::iter::once(&mut s.disabled_on))
-        {
-            let mut seen = std::collections::BTreeSet::new();
-            ids.retain_mut(|id| {
-                *id = crate::adapters::canonical_id(id).to_string();
-                seen.insert(id.clone())
-            });
-        }
+        normalize_target_ids(&mut s.targets, &mut s.disabled_on);
         let (errors, unknown) = s.targeting_issues(&crate::adapters::ids());
         for i in legacy_errors.into_iter().chain(errors) {
             issues.push(format!("mcp_servers.{name}: {i}"));
@@ -183,6 +173,44 @@ pub fn parse_manifest(text: &str, file: &Path) -> Result<Profile, ProfileError> 
         warnings,
         ..Profile::default()
     })
+}
+
+/// Turn aliases in `targets` / `disabled_on` (`claude`) into canonical ids,
+/// and keep a target named twice (`["claude", "claude-code"]`) once, at its
+/// first place.
+fn normalize_target_ids(targets: &mut Option<Vec<String>>, disabled_on: &mut Vec<String>) {
+    for ids in targets.iter_mut().chain(std::iter::once(disabled_on)) {
+        let mut seen = std::collections::BTreeSet::new();
+        ids.retain_mut(|id| {
+            *id = crate::adapters::canonical_id(id).to_string();
+            seen.insert(id.clone())
+        });
+    }
+}
+
+/// Read (and take out of `data`) the targeting of an item loaded from `label`,
+/// adding what is wrong with it to `issues` and `warnings`.
+fn load_targeting(
+    data: &mut Map<String, Value>,
+    noun: &str,
+    label: &str,
+    issues: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) -> Targeting {
+    let (t, errors, warns) = Targeting::take_from(
+        data,
+        &crate::adapters::ids(),
+        |id| crate::adapters::canonical_id(id).to_string(),
+        noun,
+    );
+    issues.extend(errors.into_iter().map(|e| format!("{label}: {e}")));
+    warnings.extend(warns.into_iter().map(|w| format!("{label}: {w}")));
+    t
+}
+
+/// Does `text` mention a targeting key at all? A cheap check before parsing.
+fn mentions_targeting(text: &str) -> bool {
+    TARGETING_KEYS.iter().any(|k| text.contains(k))
 }
 
 /// Why a profile `name` (as written, before trimming) is unusable, if it is:
@@ -292,6 +320,7 @@ pub fn rule_from_markdown(name: &str, text: &str) -> Rule {
         globs,
         always_apply: d.get("alwaysApply").and_then(Value::as_bool),
         body: doc.body.trim().to_string(),
+        ..Default::default()
     }
 }
 
@@ -324,6 +353,7 @@ pub fn command_from_markdown(name: &str, text: &str) -> Command {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
         body: doc.body.trim().to_string(),
+        ..Default::default()
     }
 }
 
@@ -351,6 +381,7 @@ pub fn agent_from_markdown(name: &str, text: &str) -> Agent {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
         body: doc.body.trim().to_string(),
+        ..Default::default()
     }
 }
 
@@ -365,6 +396,33 @@ pub fn skill_description(files: &[SkillFile]) -> Option<String> {
     let main = files.iter().find(|f| f.path == "SKILL.md")?;
     let text = String::from_utf8_lossy(&main.content);
     string(frontmatter::parse(&text).data.get("description"))
+}
+
+/// Read a skill's targeting from the frontmatter of its `SKILL.md` and take
+/// the keys out of the file's content, so tools never see them (they are put
+/// back when the profile is written, see [`profile_files`]).
+fn take_skill_targeting(
+    name: &str,
+    files: &mut [SkillFile],
+    issues: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) -> Targeting {
+    let Some(main) = files.iter_mut().find(|f| f.path == "SKILL.md") else {
+        return Targeting::default();
+    };
+    let Ok(text) = std::str::from_utf8(&main.content) else {
+        return Targeting::default();
+    };
+    if !mentions_targeting(text) {
+        return Targeting::default();
+    }
+    let mut data = frontmatter::parse(text).data;
+    let label = format!("skills/{name}/SKILL.md");
+    let t = load_targeting(&mut data, "skill", &label, issues, warnings);
+    if let Some(stripped) = frontmatter::remove_keys(text, &TARGETING_KEYS) {
+        main.content = stripped.into_bytes();
+    }
+    t
 }
 
 fn read_skill_dir(
@@ -547,7 +605,17 @@ fn load_with_limit(dir: &Path, limit: u64, name_hint: Option<&str>) -> Result<Pr
         }
         let text =
             read_profile_text(&dir.join(PLUGIN_RULES).join(&file), budget)?.unwrap_or_default();
-        p.rules.push(rule_from_markdown(stem, &text));
+        let mut rule = rule_from_markdown(stem, &text);
+        if mentions_targeting(&text) {
+            rule.targeting = load_targeting(
+                &mut frontmatter::parse(&text).data,
+                "rule",
+                &format!("rules/{file}"),
+                &mut issues,
+                &mut p.warnings,
+            );
+        }
+        p.rules.push(rule);
     }
     for (file, is_dir) in list_profile_dir(&dir.join("commands"))? {
         let Some(stem) = file.strip_suffix(".md") else {
@@ -562,7 +630,15 @@ fn load_with_limit(dir: &Path, limit: u64, name_hint: Option<&str>) -> Result<Pr
         }
         let text =
             read_profile_text(&dir.join("commands").join(&file), budget)?.unwrap_or_default();
-        p.commands.push(command_from_markdown(stem, &text));
+        let mut command = command_from_markdown(stem, &text);
+        command.targeting = load_targeting(
+            &mut command.extra,
+            "command",
+            &format!("commands/{file}"),
+            &mut issues,
+            &mut p.warnings,
+        );
+        p.commands.push(command);
     }
     // A plugin's `agents/` holds Claude Code subagents, another format.
     let agents = if plugin {
@@ -582,7 +658,15 @@ fn load_with_limit(dir: &Path, limit: u64, name_hint: Option<&str>) -> Result<Pr
             continue;
         }
         let text = read_profile_text(&dir.join("agents").join(&file), budget)?.unwrap_or_default();
-        p.agents.push(agent_from_markdown(stem, &text));
+        let mut agent = agent_from_markdown(stem, &text);
+        agent.targeting = load_targeting(
+            &mut agent.extra,
+            "agent",
+            &format!("agents/{file}"),
+            &mut issues,
+            &mut p.warnings,
+        );
+        p.agents.push(agent);
     }
     for (name, is_dir) in list_profile_dir(&dir.join("skills"))? {
         if !is_dir {
@@ -598,10 +682,12 @@ fn load_with_limit(dir: &Path, limit: u64, name_hint: Option<&str>) -> Result<Pr
             issues.push(format!("skills/{name}: missing SKILL.md"));
             continue;
         }
+        let targeting = take_skill_targeting(&name, &mut files, &mut issues, &mut p.warnings);
         p.skills.push(Skill {
             description: skill_description(&files),
             name,
             files,
+            targeting,
         });
     }
     // A plugin's `hooks/` is Claude Code's own format, not a profile's.
@@ -683,27 +769,36 @@ pub fn profile_files(p: &Profile) -> BTreeMap<String, Vec<u8>> {
             format!("{}\n", i.trim()).into_bytes(),
         );
     }
+    // Targeting goes at the end of an item's frontmatter, as `targets` /
+    // `disabled_on`; items without it are written as they always were.
+    let with = |markdown: String, t: &Targeting| frontmatter::add_entries(&markdown, &t.entries());
     for r in &p.rules {
         out.insert(
             format!("rules/{}.md", r.name),
-            rule_to_markdown(r).into_bytes(),
+            with(rule_to_markdown(r), &r.targeting).into_bytes(),
         );
     }
     for c in &p.commands {
         out.insert(
             format!("commands/{}.md", c.name),
-            command_to_markdown(c, true).into_bytes(),
+            with(command_to_markdown(c, true), &c.targeting).into_bytes(),
         );
     }
     for a in &p.agents {
         out.insert(
             format!("agents/{}.md", a.name),
-            agent_to_markdown(a).into_bytes(),
+            with(agent_to_markdown(a), &a.targeting).into_bytes(),
         );
     }
     for s in &p.skills {
         for f in &s.files {
-            out.insert(format!("skills/{}/{}", s.name, f.path), f.content.clone());
+            let content = match std::str::from_utf8(&f.content) {
+                Ok(text) if f.path == "SKILL.md" && !s.targeting.is_empty() => {
+                    with(text.to_string(), &s.targeting).into_bytes()
+                }
+                _ => f.content.clone(),
+            };
+            out.insert(format!("skills/{}/{}", s.name, f.path), content);
         }
     }
     for f in &p.hook_files {
@@ -740,6 +835,54 @@ pub fn keep_hooks(new: &mut Profile, old: &Profile) -> usize {
     new.hooks.clone_from(&old.hooks);
     new.hook_files.clone_from(&old.hook_files);
     new.hooks.len()
+}
+
+/// Carry the per-tool targeting of `old`'s rules, commands, skills and agents
+/// over to the same-named items of a fresh capture. Returns them as
+/// `rule <name>` ...
+pub fn keep_item_targeting(new: &mut Profile, old: &Profile) -> Vec<String> {
+    let mut kept = Vec::new();
+    macro_rules! keep {
+        ($field:ident, $kind:literal) => {
+            for item in &mut new.$field {
+                if let Some(o) = old.$field.iter().find(|o| o.name == item.name)
+                    && !o.targeting.is_empty()
+                {
+                    item.targeting = o.targeting.clone();
+                    kept.push(format!(concat!($kind, " {}"), item.name));
+                }
+            }
+        };
+    }
+    keep!(rules, "rule");
+    keep!(commands, "command");
+    keep!(skills, "skill");
+    keep!(agents, "agent");
+    kept
+}
+
+/// Copy over `old`'s rules, commands, skills and agents that have targeting
+/// and that a fresh capture didn't find in any tool (set up only for a tool
+/// not installed here), so a re-capture doesn't drop them. Returns them as
+/// `rule <name>` ...
+pub fn keep_uncaptured_items(new: &mut Profile, old: &Profile) -> Vec<String> {
+    let mut kept = Vec::new();
+    macro_rules! keep {
+        ($field:ident, $kind:literal) => {
+            for item in &old.$field {
+                if !item.targeting.is_empty() && !new.$field.iter().any(|n| n.name == item.name) {
+                    new.$field.push(item.clone());
+                    kept.push(format!(concat!($kind, " {}"), item.name));
+                }
+            }
+        };
+    }
+    keep!(rules, "rule");
+    keep!(commands, "command");
+    keep!(skills, "skill");
+    keep!(agents, "agent");
+    new.sort();
+    kept
 }
 
 /// Copy over `old`'s MCP servers that a fresh capture didn't find in any
@@ -1253,6 +1396,7 @@ mod tests {
                 .cloned()
                 .unwrap(),
             body: "Review $ARGUMENTS".into(),
+            ..Default::default()
         });
         p.skills.push(Skill {
             name: "pdf".into(),
@@ -1269,6 +1413,7 @@ mod tests {
                     executable: false,
                 },
             ],
+            ..Default::default()
         });
         p
     }
@@ -1451,6 +1596,188 @@ mod tests {
         assert!(e.contains("symbolic links are not allowed"), "{e}");
         fs::remove_file(dir.join("plugin.json")).unwrap();
         assert_eq!(load(&dir).unwrap().name, "plug");
+    }
+
+    #[test]
+    fn item_targeting_loads_saves_and_is_taken_out_of_the_files_tools_get() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = |rel: &str, text: &str| {
+            let p = dir.path().join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, text).unwrap();
+        };
+        w("kitbag.toml", "kitbag = 1\nname = \"x\"\n");
+        w(
+            "rules/r.md",
+            "---\ndescription: R\ntargets: [claude, claude-code, cursor]\n---\nRule\n",
+        );
+        w(
+            "commands/c.md",
+            "---\ndescription: C\nmodel: m\ndisabled_on:\n  - codex\n---\nCmd\n",
+        );
+        w(
+            "agents/a.md",
+            "---\ndescription: A\nonly: cursor, codex\n---\nAgent\n",
+        );
+        w(
+            "skills/s/SKILL.md",
+            "---\nname: s\ntargets:\n  - codex\ndescription: S\n---\nSkill\n",
+        );
+        w(
+            "skills/plain/SKILL.md",
+            "---\nname: plain\ndescription: P\n---\nSkill\n",
+        );
+        let p = load(dir.path()).unwrap();
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        assert_eq!(
+            p.rules[0].targeting.targets,
+            Some(vec!["claude-code".to_string(), "cursor".to_string()])
+        );
+        assert_eq!(
+            p.commands[0].targeting.disabled_on,
+            vec!["codex".to_string()]
+        );
+        // The keys are the profile's, so they are not passed on to tools.
+        assert!(!p.commands[0].extra.contains_key("disabled_on"));
+        assert_eq!(p.commands[0].extra["model"], "m");
+        assert_eq!(
+            p.agents[0].targeting.targets,
+            Some(vec!["cursor".to_string(), "codex".to_string()])
+        );
+        assert!(!p.agents[0].extra.contains_key("only"));
+        let skill = p.skills.iter().find(|s| s.name == "s").unwrap();
+        assert_eq!(skill.targeting.targets, Some(vec!["codex".to_string()]));
+        let main = String::from_utf8(skill.main_file().unwrap().content.clone()).unwrap();
+        assert_eq!(main, "---\nname: s\ndescription: S\n---\nSkill\n");
+        assert!(
+            p.skills
+                .iter()
+                .find(|s| s.name == "plain")
+                .unwrap()
+                .targeting
+                .is_empty()
+        );
+        assert!(!p.rules[0].targeting.applies_to("codex"));
+
+        // Saved with the new names, where the loader finds them again.
+        let out = tempfile::tempdir().unwrap();
+        save(&p, out.path(), false).unwrap();
+        let rule = fs::read_to_string(out.path().join("rules/r.md")).unwrap();
+        assert!(
+            rule.contains("targets:\n  - claude-code\n  - cursor\n"),
+            "{rule}"
+        );
+        let agent = fs::read_to_string(out.path().join("agents/a.md")).unwrap();
+        assert!(agent.contains("targets:\n  - cursor\n  - codex\n") && !agent.contains("only"));
+        let again = load(out.path()).unwrap();
+        assert_eq!(again.rules, p.rules);
+        assert_eq!(again.commands, p.commands);
+        assert_eq!(again.agents, p.agents);
+        assert_eq!(again.skills, p.skills);
+    }
+
+    #[test]
+    fn items_without_targeting_are_written_as_before() {
+        let mut p = sample();
+        p.rules[0].targeting = Targeting::default();
+        let files = profile_files(&p);
+        for r in &p.rules {
+            assert_eq!(
+                files[&format!("rules/{}.md", r.name)],
+                rule_to_markdown(r).into_bytes()
+            );
+        }
+        for c in &p.commands {
+            assert_eq!(
+                files[&format!("commands/{}.md", c.name)],
+                command_to_markdown(c, true).into_bytes()
+            );
+        }
+        for s in &p.skills {
+            for f in &s.files {
+                assert_eq!(files[&format!("skills/{}/{}", s.name, f.path)], f.content);
+            }
+        }
+    }
+
+    #[test]
+    fn item_targeting_errors_and_warnings() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("kitbag.toml"), "kitbag = 1\nname = \"x\"\n").unwrap();
+        fs::create_dir_all(dir.path().join("rules")).unwrap();
+        let rule = |text: &str| fs::write(dir.path().join("rules/r.md"), text).unwrap();
+        rule("---\ntargets: [cursor]\ndisabled_on: [codex]\n---\nB\n");
+        let e = load(dir.path()).unwrap_err().to_string();
+        assert!(e.contains("rules/r.md: set either 'targets'"), "{e}");
+        rule("---\nonly: [cursor]\ntargets: [cursor]\n---\nB\n");
+        let e = load(dir.path()).unwrap_err().to_string();
+        assert!(
+            e.contains("rules/r.md: both 'only' and 'targets' are set"),
+            "{e}"
+        );
+        rule("---\ntargets: []\n---\nB\n");
+        let e = load(dir.path()).unwrap_err().to_string();
+        assert!(
+            e.contains("'targets' is empty, so the rule would apply nowhere"),
+            "{e}"
+        );
+        rule("---\ntargets: 3\n---\nB\n");
+        let e = load(dir.path()).unwrap_err().to_string();
+        assert!(e.contains("'targets' must be a list of tool names"), "{e}");
+        rule("---\ndisabled_on: [vscode]\nonly: []\n---\nB\n");
+        let p = load(dir.path()).unwrap();
+        assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
+        assert!(p.warnings[0].starts_with("rules/r.md: 'only' is empty"));
+        assert!(p.warnings[1].contains("unknown target 'vscode' in 'disabled_on' is ignored"));
+        assert!(p.rules[0].targeting.applies_to("cursor"));
+        // Another tool's `only` that isn't a list is left alone.
+        fs::create_dir_all(dir.path().join("commands")).unwrap();
+        fs::write(
+            dir.path().join("commands/c.md"),
+            "---\nonly: true\n---\nB\n",
+        )
+        .unwrap();
+        let p = load(dir.path()).unwrap();
+        assert_eq!(p.commands[0].extra["only"], true);
+        assert!(p.commands[0].targeting.is_empty());
+    }
+
+    #[test]
+    fn keeps_item_targeting_on_recapture() {
+        let mut old = Profile::new("x");
+        old.rules.push(Rule {
+            name: "r".into(),
+            targeting: Targeting {
+                targets: Some(vec!["cursor".into()]),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        old.agents.push(Agent {
+            name: "gone".into(),
+            targeting: Targeting {
+                disabled_on: vec!["codex".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        old.agents.push(Agent {
+            name: "plain".into(),
+            ..Default::default()
+        });
+        let mut new = Profile::new("x");
+        new.rules.push(Rule {
+            name: "r".into(),
+            ..Default::default()
+        });
+        assert_eq!(keep_item_targeting(&mut new, &old), vec!["rule r"]);
+        assert_eq!(
+            new.rules[0].targeting.targets,
+            Some(vec!["cursor".to_string()])
+        );
+        // Only an item with targeting is worth keeping when no tool has it.
+        assert_eq!(keep_uncaptured_items(&mut new, &old), vec!["agent gone"]);
+        assert_eq!(new.agents.len(), 1);
     }
 
     #[test]

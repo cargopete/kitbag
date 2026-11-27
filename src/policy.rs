@@ -593,6 +593,7 @@ mod tests {
             description: Some("d".into()),
             extra: extra.as_object().cloned().unwrap_or_default(),
             body: body.into(),
+            ..Default::default()
         };
         let mut p = crate::model::Profile::new("p");
         p.agents = vec![

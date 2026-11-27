@@ -599,6 +599,7 @@ mod tests {
             globs: globs.iter().map(|g| g.to_string()).collect(),
             always_apply: always,
             body: "Strict mode.\n\nNo any.".into(),
+            ..Default::default()
         }
     }
 

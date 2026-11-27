@@ -389,6 +389,7 @@ mod tests {
             globs: vec!["*.py".into(), "scripts/**/*.py".into()],
             always_apply: None,
             body: "Use hints.".into(),
+            ..Default::default()
         };
         assert_eq!(
             cursor_mdc(&r),

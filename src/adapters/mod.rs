@@ -5,7 +5,7 @@
 //! they plan writes into a [`PlanFs`] and report anything noteworthy as
 //! [`Note`]s. See `README.md` ("Adding an adapter") for a walkthrough.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -199,6 +199,11 @@ pub struct ApplyOptions {
     /// Write the profile's hooks (`apply --apply-hooks`). Hooks run commands
     /// automatically, so without this they are only listed in the plan.
     pub apply_hooks: bool,
+    /// Rule, command, skill and agent files earlier applies wrote that still
+    /// stand (see [`crate::sync::applied_files`]). One the profile disables for
+    /// a tool is only removed from it when one of these says kitbag put it
+    /// there and it is unchanged since.
+    pub applied_files: Vec<crate::sync::FileRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -242,6 +247,30 @@ pub struct Work {
     /// Ids of the targets this plan applies, so a target sharing a file with
     /// another knows whether that one is applied too.
     pub targets: Vec<String>,
+    /// Rule, command, skill and agent files the plan writes or removes, for
+    /// the state records.
+    pub file_writes: Vec<FileWrite>,
+    /// (target, `rule <name>` ...) of items the plan removes from a tool,
+    /// because the profile now disables them there.
+    pub removed_items: Vec<(String, String)>,
+    /// Skill directories the plan empties; removed when empty after the write.
+    pub prune_dirs: Vec<PathBuf>,
+}
+
+/// One rule, command, skill or agent a plan writes (`hash` is its
+/// [`crate::sync::hash`]; for a skill, [`crate::sync::files_hash`] of `files`)
+/// or removes (`hash` is `None`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileWrite {
+    pub target: String,
+    /// The file, or a skill's directory, as the adapter spelled it until the
+    /// plan resolves it.
+    pub path: PathBuf,
+    /// `rule <name>`, `command <name>`, `skill <name>` or `agent <name>`.
+    pub item: String,
+    pub hash: Option<String>,
+    /// For a skill: each file's path under the directory and the hash of its content.
+    pub files: BTreeMap<String, String>,
 }
 
 /// One MCP server entry a plan writes (`hash` is its [`crate::sync::entry_hash`])

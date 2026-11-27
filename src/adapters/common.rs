@@ -81,6 +81,7 @@ pub fn write_command(
     )? {
         work.changed_items
             .push((target.to_string(), format!("command {name}")));
+        record_file(work, target, path, format!("command {name}"), content);
     }
     Ok(())
 }
@@ -104,8 +105,21 @@ pub fn write_agent(
     )? {
         work.changed_items
             .push((target.to_string(), format!("agent {name}")));
+        record_file(work, target, path, format!("agent {name}"), content);
     }
     Ok(())
+}
+
+/// Note that the plan writes `content` to the file of `item`, for the state
+/// records that later let a disabled item be removed again.
+fn record_file(work: &mut Work, target: &str, path: &Path, item: String, content: &[u8]) {
+    work.file_writes.push(super::FileWrite {
+        target: target.to_string(),
+        path: path.to_path_buf(),
+        item,
+        hash: Some(crate::sync::hash(&String::from_utf8_lossy(content))),
+        files: BTreeMap::new(),
+    });
 }
 
 /// Markdown files that differ only in frontmatter formatting (quoting, key
@@ -334,6 +348,18 @@ pub fn write_skill(
     if wrote {
         work.changed_items
             .push((target.to_string(), format!("skill {}", skill.name)));
+        let files: BTreeMap<String, String> = skill
+            .files
+            .iter()
+            .map(|f| (f.path.clone(), crate::sync::content_hash(&f.content)))
+            .collect();
+        work.file_writes.push(super::FileWrite {
+            target: target.to_string(),
+            path: dir.to_path_buf(),
+            item: format!("skill {}", skill.name),
+            hash: Some(crate::sync::files_hash(&files)),
+            files,
+        });
     }
     Ok(())
 }
@@ -452,7 +478,9 @@ pub fn write_rule(
     if held(work, opts, path, None) {
         return Ok(());
     }
-    write_owned(work, path, content, opts, target, &format!("rule '{name}'"))?;
+    if write_owned(work, path, content, opts, target, &format!("rule '{name}'"))? {
+        record_file(work, target, path, format!("rule {name}"), content);
+    }
     Ok(())
 }
 
@@ -1517,6 +1545,7 @@ pub fn capture_skills_dir(cap: &mut Captured, dir: &Path, target: &str) -> Resul
             description: skill_description(&files),
             name,
             files,
+            ..Default::default()
         });
     }
     Ok(())
@@ -1597,6 +1626,7 @@ mod tests {
                 content: b"---\nlicense: MIT\n---\nBody\n".to_vec(),
                 executable: false,
             }],
+            ..Default::default()
         };
         let out = skill_with_required_frontmatter(&s);
         let text = String::from_utf8(out.files[0].content.clone()).unwrap();
