@@ -1144,19 +1144,40 @@ its packages; Zed downloads its extensions; Antigravity and Grok Build load the 
 their enabled state.
 
 **Documented, not carried yet (so #12 stays open)**: VS Code's user-level plugin settings for the
-Copilot agent. Its docs (checked 2026-11-27,
-[agent plugins](https://code.visualstudio.com/docs/agent-customization/agent-plugins),
-[reference](https://code.visualstudio.com/docs/agents/reference/agent-plugin-reference)) name two
-Experimental settings in VS Code's own user `settings.json`: `chat.plugins.marketplaces` (a list of
-marketplace repositories as `owner/repo#ref`, an HTTPS or SCP-style git remote, or a `file:///`
-URI) and `chat.pluginLocations` (a map of plugin folders to `true` / `false`). Both are by
-reference, but they need a decision kitbag hasn't made: which editor's settings file to write
-(VS Code, Insiders, VSCodium; kitbag's `copilot` target has no VS Code location today), and a
-profile shape for plugin folders and for marketplaces without a name. Not written; nothing in the
-`.github/copilot/settings.json` carry above depends on them. Also not writable from the docs,
-and therefore not a gap in kitbag: Grok Build's marketplace sources and project-level
-`[plugins] paths` (no entry shape or path meaning is documented), and Zed's project-level
-`auto_install_extensions` (UNVERIFIED).
+Copilot agent. Re-read 2026-11-27 ([agent plugins](https://code.visualstudio.com/docs/agent-customization/agent-plugins),
+[plugin reference](https://code.visualstudio.com/docs/agents/reference/agent-plugin-reference),
+[AI settings](https://code.visualstudio.com/docs/agents/reference/ai-settings),
+[settings files](https://code.visualstudio.com/docs/configure/settings)). Two Experimental settings
+go in `settings.json`: `chat.plugins.marketplaces` (default
+`["github/copilot-plugins", "github/awesome-copilot"]`; an array of `owner/repo` with an optional
+`#<ref>` (a branch, tag or 40-character commit SHA), an HTTPS or SCP-style git remote, or a
+`file:///` URI of a marketplace already cloned) and `chat.pluginLocations` (default `{}`; a map of
+plugin directory to `true` / `false`, "to register an existing development directory without
+installing it"). Both are by reference and their shapes are documented, and the settings page names
+the default profile's user file for Code (`%APPDATA%\Code\User\settings.json`, `~/Library/Application
+Support/Code/User/settings.json`, `~/.config/Code/User/settings.json`). They are still not written,
+because the docs leave four things open that kitbag would otherwise have to guess:
+
+- **Which file.** Other profiles keep their settings in `.../User/profiles/<profile ID>/settings.json`,
+  and no page says how to tell which profile is active; Code Insiders and VSCodium are not named at
+  all. Remote windows use the separate "Remote settings" file, which has no documented path.
+- **Replace or add.** `chat.plugins.marketplaces` is described as "additional" marketplaces, but its
+  default value already holds the two built-in ones. No page says whether a user's array replaces
+  that default or is added to it, so a write that is meant to be additive could drop the built-in
+  marketplaces (UNVERIFIED either way).
+- **Enablement.** `chat.plugins.enabled` is `false` by default, can be managed by an organization,
+  and the docs say nothing on whether a tool other than VS Code itself should switch it on. A
+  marketplace "does not install or enable" its plugins, and `chat.plugins.enabledPlugins` is only
+  described for enterprise policy.
+- **A tool name.** The `copilot` target is Copilot CLI and the repository's
+  `.github/copilot/settings.json`; VS Code's own file would need a separate target (the docs give
+  no reason to mix the two) and a profile shape for marketplaces without a name.
+
+Nothing in the `.github/copilot/settings.json` carry above depends on this: VS Code reads
+`enabledPlugins` and `extraKnownMarketplaces` from that file, which `[plugins.copilot]` and
+`[plugins.claude-code]` already write. Also not writable from the docs, and therefore not a gap
+in kitbag: Grok Build's marketplace sources and project-level `[plugins] paths` (no entry shape
+or path meaning is documented), and Zed's project-level `auto_install_extensions` (UNVERIFIED).
 
 ### Plugins: `rules/` at the root, no `kitbag.toml`
 

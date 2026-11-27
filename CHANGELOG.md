@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Re-read VS Code's official docs for the Experimental `chat.plugins.marketplaces` and `chat.pluginLocations` settings (2026-11-27) and kept them as a documented skip, with the reasons now in the README: the docs give the settings' shapes and the default profile's user `settings.json` path for Code, but not how to tell the active profile, where Insiders or VSCodium keep theirs, whether a user's `chat.plugins.marketplaces` array replaces the two built-in marketplaces or adds to them, or whether another tool should switch `chat.plugins.enabled` on. No tool or section is added; every other target's plugin system is carried or a dated skip, so #12 stays open for VS Code only (#12)
+
 ## [0.1.10] - 2026-11-27
 
 ### Added
