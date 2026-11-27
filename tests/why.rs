@@ -471,8 +471,18 @@ fn grok_build_loads_home_then_root_down_and_every_instruction_file() {
         std::path::PathBuf::from("~/.grok/rules/b.md"),
         std::path::PathBuf::from("~/.claude/CLAUDE.md"),
         std::path::PathBuf::from("~/.cursor/rules/c.md"),
-        repo.join("CLAUDE.md"),
-        repo.join("AGENTS.md"),
+        // Grok tries Agents.md, Claude.md, CLAUDE.md, ..., AGENTS.md in turn; where names
+        // match in any case, Agents.md finds AGENTS.md first.
+        repo.join(if cfg!(target_os = "linux") {
+            "CLAUDE.md"
+        } else {
+            "AGENTS.md"
+        }),
+        repo.join(if cfg!(target_os = "linux") {
+            "AGENTS.md"
+        } else {
+            "CLAUDE.md"
+        }),
         repo.join(".claude/rules/scoped.md"),
         sub.join("AGENTS.md"),
         sub.join(".grok/rules/s.md"),
