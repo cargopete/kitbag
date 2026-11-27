@@ -33,6 +33,10 @@ All notable changes to this project are documented here. The format follows
 
 - Capture no longer drops an `outputStyle` setting that names a custom style: it is kept (with a note when the capture has no file of that name, as for a plugin's or a managed style, since Claude Code then falls back to its default style). The built-in styles it recognises now include `Proactive` and `Concise`, which the old list left out and which were dropped on capture. (#15)
 
+### Fixed
+
+- Capture now writes a local marketplace or plugin folder under the home directory as `~/...` even when Windows has shortened a directory name along the path (an 8.3 name such as `RUNNER~1`), so a profile captured there is portable (#12)
+
 ## [0.1.9] - 2026-11-27
 
 ### Added
