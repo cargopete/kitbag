@@ -105,7 +105,7 @@ fn capture_project_reads_zed_settings_and_the_first_instructions_file() {
     assert!(
         r.notes
             .iter()
-            .any(|n| n.message.contains("AGENTS.md not read"))
+            .any(|n| n.message.contains("AGENTS.md") && n.message.contains("not read"))
     );
 
     // Without them, AGENTS.md is the file.
@@ -127,11 +127,9 @@ fn capture_project_reads_only_the_file_zed_reads() {
     fs::write(sb.project().join(".rules"), "Zed-only rules.\n").unwrap();
     let r = capture(&["zed"], &sb.env(Scope::Project));
     assert_eq!(r.profile.instructions.as_deref(), Some("Zed-only rules."));
-    assert!(
-        r.notes
-            .iter()
-            .any(|n| n.message.contains("AGENTS.md not read") && n.message.contains(".rules"))
-    );
+    assert!(r.notes.iter().any(|n| n.message.contains("AGENTS.md")
+        && n.message.contains("not read")
+        && n.message.contains(".rules")));
 }
 
 #[test]
@@ -917,4 +915,130 @@ fn zed_warns_when_amp_would_write_a_different_copy_of_a_shared_project_skill() {
     assert!(warned(&both, "Amp and Zed share .agents/skills"));
     let alone = plan(&prof, &["zed"], &sb.env(Scope::Project));
     assert!(!warned(&alone, "Amp and Zed share"));
+}
+
+/// Zed's list ends `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`: a project with only
+/// one of the last two gets the block there, `AGENTS.md` still wins over both,
+/// and with none of the files `AGENTS.md` is created.
+#[test]
+fn project_instructions_consider_claude_md_and_gemini_md() {
+    let prof = sample();
+    for only in ["CLAUDE.md", "GEMINI.md"] {
+        let sb = Sandbox::empty();
+        let env = sb.env(Scope::Project);
+        fs::write(sb.project().join(only), "Mine.\n").unwrap();
+        let p = apply(&sb, &prof, &["zed"], &env);
+        let text = sb.read(&format!("project/{only}"));
+        assert!(text.starts_with("Mine.") && text.contains("Use British English."));
+        assert!(!sb.project().join("AGENTS.md").exists(), "{only}");
+        assert!(said(&p, &format!("go to {only} rather than AGENTS.md")));
+        assert!(plan(&prof, &["zed"], &env).changes.is_empty());
+    }
+
+    // CLAUDE.md comes before GEMINI.md.
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::Project);
+    fs::write(sb.project().join("CLAUDE.md"), "C.\n").unwrap();
+    fs::write(sb.project().join("GEMINI.md"), "G.\n").unwrap();
+    apply(&sb, &prof, &["zed"], &env);
+    assert!(
+        sb.read("project/CLAUDE.md")
+            .contains("Use British English.")
+    );
+    assert_eq!(sb.read("project/GEMINI.md"), "G.\n");
+
+    // AGENTS.md wins over both.
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::Project);
+    for f in ["AGENTS.md", "CLAUDE.md", "GEMINI.md"] {
+        fs::write(sb.project().join(f), "Mine.\n").unwrap();
+    }
+    apply(&sb, &prof, &["zed"], &env);
+    assert!(
+        sb.read("project/AGENTS.md")
+            .contains("Use British English.")
+    );
+    assert_eq!(sb.read("project/CLAUDE.md"), "Mine.\n");
+    assert_eq!(sb.read("project/GEMINI.md"), "Mine.\n");
+
+    // None of them: AGENTS.md is created.
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::Project);
+    apply(&sb, &prof, &["zed"], &env);
+    assert!(
+        sb.read("project/AGENTS.md")
+            .contains("Use British English.")
+    );
+    assert!(!sb.project().join("CLAUDE.md").exists());
+    assert!(!sb.project().join("GEMINI.md").exists());
+}
+
+#[test]
+fn capture_reads_claude_md_or_gemini_md_when_zed_does() {
+    for only in ["CLAUDE.md", "GEMINI.md"] {
+        let sb = Sandbox::empty();
+        let env = sb.env(Scope::Project);
+        fs::write(sb.project().join(only), "Only here.\n").unwrap();
+        let r = capture(&["zed"], &env);
+        assert_eq!(
+            r.profile.instructions.as_deref(),
+            Some("Only here."),
+            "{only}"
+        );
+        assert!(!r.notes.iter().any(|n| n.message.contains("not read")));
+    }
+
+    // CLAUDE.md is read, GEMINI.md is named as ignored.
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::Project);
+    fs::write(sb.project().join("CLAUDE.md"), "From Claude.\n").unwrap();
+    fs::write(sb.project().join("GEMINI.md"), "From Gemini.\n").unwrap();
+    let r = capture(&["zed"], &env);
+    assert_eq!(r.profile.instructions.as_deref(), Some("From Claude."));
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n.message.contains("GEMINI.md not read"))
+    );
+
+    // AGENTS.md beats both, and the other two are named.
+    fs::write(sb.project().join("AGENTS.md"), "From agents.\n").unwrap();
+    let r = capture(&["zed"], &env);
+    assert_eq!(r.profile.instructions.as_deref(), Some("From agents."));
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n.message.contains("CLAUDE.md, GEMINI.md not read"))
+    );
+}
+
+/// When the file Zed reads is CLAUDE.md or GEMINI.md and the tool that owns it
+/// is a target too, the file gets one block, in any order.
+#[test]
+fn zed_shares_claude_md_and_gemini_md_with_their_tools() {
+    let prof = sample();
+    for (file, tool) in [("CLAUDE.md", "claude-code"), ("GEMINI.md", "gemini-cli")] {
+        let sb = Sandbox::empty();
+        let env = sb.env(Scope::Project);
+        fs::write(sb.project().join(file), "Mine.\n").unwrap();
+        for order in [["zed", tool], [tool, "zed"]] {
+            let p = apply(&sb, &prof, &order, &env);
+            let path = sb.project().join(file);
+            assert!(
+                p.changes.iter().filter(|c| c.path == path).count() <= 1,
+                "{file} {order:?}"
+            );
+            let text = sb.read(&format!("project/{file}"));
+            assert_eq!(
+                text.matches("<!-- kitbag:begin team -->").count(),
+                1,
+                "{file} {order:?}: {text}"
+            );
+            assert_eq!(text.matches("Use British English.").count(), 1, "{file}");
+            assert!(
+                plan(&prof, &order, &env).changes.is_empty(),
+                "{file} {order:?}"
+            );
+        }
+    }
 }

@@ -12,9 +12,10 @@
 //! * Instructions: Zed's personal `AGENTS.md` in the config directory, and in a
 //!   project the first existing file of `.rules`, `.cursorrules`,
 //!   `.windsurfrules`, `.clinerules`, `.github/copilot-instructions.md`,
-//!   `AGENT.md`, `AGENTS.md` (Zed reads only that one), else `AGENTS.md`,
-//!   which is shared with Codex, Cursor, Antigravity, opencode, Grok Build and
-//!   Windsurf.
+//!   `AGENT.md`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md` (Zed reads only that
+//!   one), else `AGENTS.md`, which is shared with Codex, Cursor, Antigravity,
+//!   opencode, Grok Build and Windsurf (and `CLAUDE.md` / `GEMINI.md` with
+//!   Claude Code and Gemini CLI when one of them is the file Zed reads).
 //! * Skills: `<name>/SKILL.md` (`name` and `description` frontmatter, optional
 //!   `disable-model-invocation`) in `~/.agents/skills/` and a project's
 //!   `.agents/skills/`, the only folders Zed's docs name; Zed reads no other
@@ -52,7 +53,8 @@ const ID: &str = "zed";
 /// is preserved.
 const MANAGED_KEYS: &[&str] = &["command", "args", "env", "url", "headers", "enabled"];
 /// Project instruction files in the order Zed looks for them; it uses the
-/// first one that exists. The last one is where kitbag writes by default.
+/// first one that exists (zed.dev/docs/ai/instructions, checked 2026-11-27).
+/// When none exists, kitbag writes `AGENTS.md`.
 const PROJECT_FILES: &[&str] = &[
     ".rules",
     ".cursorrules",
@@ -61,6 +63,8 @@ const PROJECT_FILES: &[&str] = &[
     ".github/copilot-instructions.md",
     "AGENT.md",
     "AGENTS.md",
+    "CLAUDE.md",
+    "GEMINI.md",
 ];
 const DEFAULT_PROJECT_FILE: &str = "AGENTS.md";
 /// Longest skill description Zed loads without a warning.
