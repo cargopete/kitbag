@@ -527,7 +527,7 @@ fn capture_says_what_it_leaves_behind() {
     let out = capture(&sb, false);
     assert!(out.contains("1 commands defined in"), "{out}");
     assert!(out.contains("1 agents defined in"), "{out}");
-    assert!(out.contains("plugins) not captured"), "{out}");
+    assert!(out.contains("plugin code) not copied"), "{out}");
     assert!(out.contains("primary agents) not captured"), "{out}");
 }
 

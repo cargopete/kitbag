@@ -16,9 +16,9 @@
 //! ```
 //!
 //! The ids are the tool's own (`name@marketplace`, as Claude Code keys
-//! `enabledPlugins`) and are never translated to another tool's. Only Claude
-//! Code is carried so far ([`TARGETS`]); Antigravity's and opencode's plugins
-//! and Gemini CLI's extensions are other systems.
+//! `enabledPlugins`; an npm package spec for opencode) and are never
+//! translated to another tool's. Claude Code and opencode are carried
+//! ([`TARGETS`]); the other systems are documented skips, see below.
 //!
 //! Claude Code, from its docs (checked 2026-11-27):
 //!
@@ -40,9 +40,43 @@
 //! kitbag only writes those two settings keys. It never downloads or runs a
 //! plugin; the plan says what Claude Code will fetch and what is left to do.
 //!
+//! opencode, from its docs (checked 2026-11-27): the `plugins` array of
+//! `opencode.json(c)` (`plugin` in opencode 1) lists npm packages, which
+//! opencode installs itself at startup (`opencode-x`, `opencode-x@1.2.0`,
+//! `@scope/x`). kitbag carries those specs as `[plugins.opencode.enabled."<spec>"]`
+//! and appends missing ones to the array of the config file it writes MCP
+//! servers to. Not carried: local paths and `file:` entries (code on this
+//! machine), `-name` entries (a plugin turned off), the `options` of the
+//! object/tuple forms (they can hold keys) and anything that isn't an npm spec
+//! (a git spec's syntax is not documented: UNVERIFIED). opencode has no
+//! marketplaces, and `plugins/` folders are the plugin code itself, so they are
+//! never copied.
+//!
+//! Skipped, with the docs read on 2026-11-27 (all would need plugin code
+//! copied, or a layout the docs don't give):
+//!
+//! * Antigravity: plugins are folders under `~/.gemini/config/plugins/<name>/`
+//!   (or `.agents/plugins/`), unpacked by `agy plugin install`, and enabled
+//!   and disabled with `agy plugin enable|disable`. The docs name no
+//!   `plugins.json`, no setting that lists plugins or marketplaces, and no
+//!   file holding enablement, so there is nothing to write by reference.
+//!   <https://antigravity.google/docs/plugins>, <https://antigravity.google/docs/build-plugins/>
+//! * Gemini CLI: extensions are copied into `~/.gemini/extensions/<name>/` by
+//!   `gemini extensions install`; the docs name no file that records an
+//!   install source or enablement (UNVERIFIED: `extension-enablement.json`).
+//!   <https://geminicli.com/docs/extensions/reference/>
+//! * Claude Desktop: the only filesystem layout its docs name is the
+//!   organization plugins directory (`/Library/Application Support/Claude/org-plugins/`
+//!   on macOS, `C:\Program Files\Claude\org-plugins\` on Windows, none on Linux),
+//!   which an administrator owns (root or administrators only) and which
+//!   holds the plugins themselves. User plugins are added in the app and live
+//!   in its local data directory, whose path the docs don't give.
+//!   <https://claude.com/docs/third-party/claude-desktop/extensions>
+//!
 //! * <https://code.claude.com/docs/en/plugins/install>
 //! * <https://code.claude.com/docs/en/plugins/loading>
 //! * <https://code.claude.com/docs/en/plugins/org>
+//! * <https://opencode.ai/docs/plugins/>, <https://opencode.ai/docs/migrate-v1/>
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -56,7 +90,7 @@ use crate::edit::json::JsonDoc;
 use crate::model::{Profile, is_valid_name, targeting_issues, targeting_skip_reason};
 
 /// The targets that have a plugin section.
-pub const TARGETS: &[&str] = &["claude-code"];
+pub const TARGETS: &[&str] = &["claude-code", "opencode"];
 
 /// Origins in a plugin id (`name@origin`) that are not marketplaces: a plugin
 /// loaded for one session, from a skills directory or synced from claude.ai.
@@ -302,6 +336,11 @@ pub fn validate(plugins: &mut BTreeMap<String, PluginSet>) -> (Vec<String>, Vec<
             ));
         }
         let at = format!("plugins.{target}");
+        if target == "opencode" && !set.marketplaces.is_empty() {
+            issues.push(format!(
+                "{at}: opencode has no plugin marketplaces; list its npm packages under [{at}.enabled]"
+            ));
+        }
         for (name, m) in &mut set.marketplaces {
             let label = format!("{at}.marketplaces.{}", name.escape_default());
             issues.extend(name_issue("marketplace", name).map(|i| format!("{at}: {i}")));
@@ -322,6 +361,24 @@ pub fn validate(plugins: &mut BTreeMap<String, PluginSet>) -> (Vec<String>, Vec<
         }
         for (id, p) in &mut set.enabled {
             let label = format!("{at}.enabled.{}", id.escape_default());
+            if target == "opencode" {
+                issues.extend(opencode_spec_issue(id).map(|i| format!("{label}: {i}")));
+                if p.version.is_some() {
+                    issues.push(format!(
+                        "{label}: version is not used for opencode; pin the package in its id (name@1.2.0)"
+                    ));
+                }
+                targeting(
+                    &label,
+                    &mut p.targets,
+                    &mut p.disabled_on,
+                    "plugin",
+                    &valid,
+                    &mut issues,
+                    &mut warnings,
+                );
+                continue;
+            }
             match split_id(id) {
                 Some((name, market)) => {
                     if !is_valid_name(name) {
@@ -744,6 +801,311 @@ pub fn apply(
 }
 
 // ---------------------------------------------------------------------------
+// opencode
+
+/// The config keys that list plugins: opencode 2's and opencode 1's.
+const OPENCODE_KEYS: [&str; 2] = ["plugins", "plugin"];
+
+fn npm_name_ok(name: &str) -> bool {
+    let seg = |s: &str| {
+        !s.is_empty()
+            && !s.starts_with(['.', '_', '-'])
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    };
+    match name.strip_prefix('@') {
+        Some(scoped) => scoped
+            .split_once('/')
+            .is_some_and(|(scope, n)| seg(scope) && seg(n)),
+        None => seg(name),
+    }
+}
+
+/// An npm package spec (`name`, `name@1.2.0`, `@scope/name`, `@scope/name@^1`)
+/// as (package name, version).
+fn npm_parts(spec: &str) -> Option<(&str, Option<&str>)> {
+    if spec.len() > 300 {
+        return None;
+    }
+    let from = usize::from(spec.starts_with('@'));
+    let (name, version) = match spec[from..].find('@') {
+        Some(i) => (&spec[..from + i], Some(&spec[from + i + 1..])),
+        None => (spec, None),
+    };
+    if !npm_name_ok(name) {
+        return None;
+    }
+    if let Some(v) = version
+        && (v.is_empty()
+            || !v.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '^' | '~' | '*')
+            }))
+    {
+        return None;
+    }
+    Some((name, version))
+}
+
+/// What is wrong with an opencode plugin id, which is an npm package spec.
+pub fn opencode_spec_issue(spec: &str) -> Option<String> {
+    if npm_parts(spec).is_some() {
+        return None;
+    }
+    Some(format!(
+        "'{}' is not an npm package spec (name, name@1.2.0 or @scope/name); local paths and git specs aren't carried",
+        spec.escape_default()
+    ))
+}
+
+/// The spec an entry of an opencode plugin array names, whatever its form: a
+/// string, opencode 2's `{"package": ..}` or opencode 1's `[spec, options]`.
+/// The `bool` says it carries options.
+fn opencode_entry(v: &Value) -> Option<(&str, bool)> {
+    match v {
+        Value::String(s) => Some((s, false)),
+        Value::Object(o) => o
+            .get("package")
+            .and_then(Value::as_str)
+            .map(|s| (s, o.get("options").is_some_and(|x| !x.is_null()))),
+        Value::Array(a) => a.first().and_then(Value::as_str).map(|s| (s, a.len() > 1)),
+        _ => None,
+    }
+}
+
+/// Read the npm plugins of one opencode config document into the profile, by
+/// reference. `file` is how the plan names the config file.
+pub fn capture_opencode(cap: &mut Captured, doc: &Value, file: &str) {
+    let target = "opencode";
+    let mut found = Vec::new();
+    let mut other = Vec::new();
+    let (mut off, mut with_options) = (0, 0);
+    for key in OPENCODE_KEYS {
+        match doc.get(key) {
+            None | Some(Value::Null) => continue,
+            Some(Value::Array(list)) => {
+                for entry in list {
+                    let Some((spec, has_options)) = opencode_entry(entry) else {
+                        other.push(entry.to_string());
+                        continue;
+                    };
+                    if spec.starts_with('-') {
+                        off += 1;
+                    } else if npm_parts(spec).is_some() {
+                        if has_options {
+                            with_options += 1;
+                        }
+                        found.push(spec.to_string());
+                    } else {
+                        other.push(spec.to_string());
+                    }
+                }
+            }
+            Some(_) => cap.info(
+                target,
+                format!("'{key}' in {file} is not a list, so no plugins were captured from it"),
+            ),
+        }
+    }
+    if !other.is_empty() {
+        let shown: Vec<String> = other
+            .iter()
+            .take(5)
+            .map(|s| s.escape_default().to_string())
+            .collect();
+        cap.info(
+            target,
+            format!(
+                "{} plugin entr{} in {file} not carried (local paths and other specs are code on this machine, not a package to install): {}{}",
+                other.len(),
+                if other.len() == 1 { "y" } else { "ies" },
+                shown.join(", "),
+                if other.len() > shown.len() { ", ..." } else { "" }
+            ),
+        );
+    }
+    if off > 0 {
+        cap.info(
+            target,
+            format!("{off} plugin(s) turned off with a '-' prefix in {file} are not carried"),
+        );
+    }
+    if with_options > 0 {
+        cap.info(
+            target,
+            format!("the options of {with_options} plugin(s) in {file} are not carried (they can hold keys); set them on the other machine"),
+        );
+    }
+    if found.is_empty() {
+        return;
+    }
+    let n = found.len();
+    let set = cap.profile.plugins.entry(target.to_string()).or_default();
+    for spec in found {
+        set.enabled.entry(spec).or_default();
+    }
+    cap.info(
+        target,
+        format!(
+            "{n} plugin(s) captured by reference from {file}; plugin files (plugins/) are not copied"
+        ),
+    );
+}
+
+/// Add the profile's npm plugins to the plugin array of the opencode config at
+/// `path`. The array is the one the file already has (`plugins`, or opencode
+/// 1's `plugin`); a new one is `plugins`, or `plugin` when `legacy` says the
+/// file is opencode 1's. A package that is already listed in any form is left
+/// alone, unless the profile pins a different version of it (replaced, but not
+/// with `--no-overwrite`, and not when it carries options).
+pub fn apply_opencode(
+    profile: &Profile,
+    opts: &ApplyOptions,
+    work: &mut Work,
+    path: &Path,
+    legacy: bool,
+) -> Result<()> {
+    let target = "opencode";
+    let Some(set) = profile.plugins.get(target) else {
+        return Ok(());
+    };
+    let mut wanted = Vec::new();
+    for (spec, p) in &set.enabled {
+        match targeting_skip_reason(&p.targets, &p.disabled_on, target) {
+            None => wanted.push((spec, p)),
+            Some(why) => work.info(
+                target,
+                format!(
+                    "{} skipped: disabled in profile ({why})",
+                    describe_plugin(spec, p)
+                ),
+            ),
+        }
+    }
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    let text = work.fs.read(path)?;
+    let mut doc = JsonDoc::parse(text.as_deref(), path)?;
+    doc.check_unique_keys(&[], &OPENCODE_KEYS)?;
+    let current = doc.value();
+    for key in OPENCODE_KEYS {
+        if current.get(key).is_some_and(|v| !v.is_array()) {
+            bail!(
+                "{key} in {} is not a list; fix it by hand, kitbag won't overwrite it",
+                path.display()
+            );
+        }
+    }
+    let list = |key: &str| -> Vec<Value> {
+        current
+            .get(key)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let mut lists: Vec<(&str, Vec<Value>)> = OPENCODE_KEYS.iter().map(|k| (*k, list(k))).collect();
+    let new_key = if current.get("plugins").is_some() {
+        "plugins"
+    } else if current.get("plugin").is_some() || legacy {
+        "plugin"
+    } else {
+        "plugins"
+    };
+    let file = path
+        .file_name()
+        .map_or_else(String::new, |f| f.to_string_lossy().into_owned());
+    let mut dirty: Vec<&str> = Vec::new();
+    let mut added = Vec::new();
+    for (spec, p) in wanted {
+        let Some((name, version)) = npm_parts(spec) else {
+            continue;
+        };
+        // Where this package is listed already: (list, position, spec, options).
+        let mut have = None;
+        let mut turned_off = false;
+        for (key, entries) in &lists {
+            for (i, e) in entries.iter().enumerate() {
+                let Some((s, opts_)) = opencode_entry(e) else {
+                    continue;
+                };
+                if s.strip_prefix('-').and_then(npm_parts).map(|(n, _)| n) == Some(name) {
+                    turned_off = true;
+                }
+                if npm_parts(s).map(|(n, _)| n) == Some(name) && have.is_none() {
+                    have = Some((*key, i, s.to_string(), opts_, e.is_string()));
+                }
+            }
+        }
+        if turned_off {
+            work.warn(
+                target,
+                format!(
+                    "{} not added to {file}: it is turned off there with a '-' entry; remove that entry to enable it",
+                    describe_plugin(spec, p)
+                ),
+            );
+            continue;
+        }
+        match have {
+            None => {
+                if let Some((_, entries)) = lists.iter_mut().find(|(k, _)| *k == new_key) {
+                    entries.push(json!(spec));
+                }
+                if !dirty.contains(&new_key) {
+                    dirty.push(new_key);
+                }
+                added.push(describe_plugin(spec, p));
+            }
+            Some((key, i, have_spec, has_options, is_string)) => {
+                let same = version.is_none() || have_spec == *spec;
+                if same {
+                    continue;
+                }
+                if !opts.overwrite || !is_string || has_options {
+                    let why = if !opts.overwrite {
+                        "because --no-overwrite was given".to_string()
+                    } else {
+                        "it is written with options, which kitbag leaves to you".to_string()
+                    };
+                    work.warn(
+                        target,
+                        format!(
+                            "kept '{}' in {file}, {why}; the profile has '{spec}'",
+                            have_spec.escape_default()
+                        ),
+                    );
+                    continue;
+                }
+                if let Some((_, entries)) = lists.iter_mut().find(|(k, _)| *k == key) {
+                    entries[i] = json!(spec);
+                }
+                if !dirty.contains(&key) {
+                    dirty.push(key);
+                }
+                added.push(describe_plugin(spec, p));
+            }
+        }
+    }
+    if dirty.is_empty() {
+        return Ok(());
+    }
+    for key in dirty {
+        if let Some((_, entries)) = lists.iter().find(|(k, _)| *k == key) {
+            doc.set(&[key], &Value::Array(entries.clone()));
+        }
+    }
+    work.fs.write(path, doc.render())?;
+    for d in &added {
+        work.info(target, format!("{d} added to {file}"));
+    }
+    work.warn(
+        target,
+        "kitbag doesn't install plugins. opencode installs the npm packages above itself the next time it starts, and they run inside opencode with its permissions",
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Policy
 
 /// Take the plugins and marketplaces out of a profile from a git source that
@@ -795,10 +1157,12 @@ pub fn review_lines(profile: &Profile) -> Vec<String> {
             ));
         }
         for (id, p) in &set.enabled {
-            out.push(format!(
-                "{} for {target}: runs whatever the plugin bundles (hooks, MCP servers, commands) once the tool installs it",
-                describe_plugin(id, p)
-            ));
+            let what = if target == "opencode" {
+                "an npm package opencode installs itself and runs inside opencode, with its permissions"
+            } else {
+                "runs whatever the plugin bundles (hooks, MCP servers, commands) once the tool installs it"
+            };
+            out.push(format!("{} for {target}: {what}", describe_plugin(id, p)));
         }
     }
     out
@@ -894,6 +1258,52 @@ mod tests {
         ));
         assert!(!ok(json!({"source": "npm", "package": "x"})));
         assert!(!ok(json!({"source": "directory", "path": "a\nb"})));
+    }
+
+    #[test]
+    fn opencode_specs_are_npm_packages_only() {
+        for ok in [
+            "opencode-x",
+            "opencode-x@1.2.0",
+            "@acme/opencode-plugin",
+            "@acme/p@^1.2.0",
+            "x@latest",
+        ] {
+            assert!(npm_parts(ok).is_some(), "{ok}");
+        }
+        assert_eq!(npm_parts("@acme/p@1.0"), Some(("@acme/p", Some("1.0"))));
+        for bad in [
+            "",
+            "./plugins/local",
+            "../x",
+            "/abs/x",
+            "~/x",
+            "file:///x",
+            "C:\\x",
+            "-x",
+            "@acme",
+            "@acme/",
+            "a/b",
+            "x@",
+            "x@github:u/r",
+            "git+https://h/r.git",
+            "x y",
+            ".hidden",
+        ] {
+            assert!(npm_parts(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn opencode_entries_come_in_three_forms() {
+        assert_eq!(opencode_entry(&json!("a@1")), Some(("a@1", false)));
+        assert_eq!(
+            opencode_entry(&json!({"package": "a", "options": {"k": 1}})),
+            Some(("a", true))
+        );
+        assert_eq!(opencode_entry(&json!({"package": "a"})), Some(("a", false)));
+        assert_eq!(opencode_entry(&json!(["a", {"k": 1}])), Some(("a", true)));
+        assert_eq!(opencode_entry(&json!(3)), None);
     }
 
     #[test]

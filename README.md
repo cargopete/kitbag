@@ -131,7 +131,7 @@ Where things go:
 | Gemini CLI | `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`, `~/.gemini/commands/*.toml`, `~/.gemini/skills/`, `~/.gemini/agents/*.md` | `.gemini/settings.json`, `GEMINI.md`, `.gemini/commands/`, `.gemini/skills/`, `.gemini/agents/*.md` |
 | Claude Desktop | `claude_desktop_config.json` in `~/Library/Application Support/Claude` (macOS), `%APPDATA%\Claude` (Windows), `~/.config/Claude` (Linux) | n/a |
 | Antigravity | `~/.gemini/config/mcp_config.json`, `~/.gemini/GEMINI.md` (the same file and managed block as Gemini CLI); capture also reads `~/.gemini/AGENTS.md` and `~/.gemini/config/{AGENTS,GEMINI}.md`; `~/.gemini/config/rules/*.md`, `~/.gemini/config/skills/`, `~/.gemini/config/agents/<name>.md` | `.agents/mcp_config.json`, `AGENTS.md` (shared with Codex and Cursor); capture also reads `GEMINI.md` and `.agents/{AGENTS,GEMINI}.md`; `.agents/rules/*.md`, `.agents/skills/` (the same directory as Codex's project skills), `.agents/agents/<name>.md` |
-| opencode | `~/.config/opencode/opencode.json` or `opencode.jsonc` (`mcp.servers`), `~/.config/opencode/{AGENTS.md, commands/*.md, skills/<name>/, agents/*.md}`; honours `XDG_CONFIG_HOME` | `opencode.json(c)` or `.opencode/opencode.json(c)` (the first that exists, else `opencode.json`), `AGENTS.md` (shared with Codex, Cursor and Antigravity), `.opencode/{commands,skills,agents}/`; capture reads every config file there is |
+| opencode | `~/.config/opencode/opencode.json` or `opencode.jsonc` (`mcp.servers`), `~/.config/opencode/{AGENTS.md, commands/*.md, skills/<name>/, agents/*.md}` (plugins, by reference: the npm packages in the config's `plugins` array); honours `XDG_CONFIG_HOME` | `opencode.json(c)` or `.opencode/opencode.json(c)` (the first that exists, else `opencode.json`), `AGENTS.md` (shared with Codex, Cursor and Antigravity), `.opencode/{commands,skills,agents}/`; capture reads every config file there is |
 | Grok Build | `$GROK_HOME/config.toml` (`[mcp_servers.<name>]`, default `~/.grok`), `$GROK_HOME/{AGENTS.md, rules/*.md, commands/*.md, skills/}` | `.grok/config.toml`, `AGENTS.md` (shared with Codex, Cursor, Antigravity and opencode), `.grok/{rules,commands,skills}/`; Grok reads project files only in folders you have trusted |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` (`mcpServers`), `~/.codeium/windsurf/memories/global_rules.md`, `~/.codeium/windsurf/global_workflows/<name>.md` | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode and Grok Build); capture also reads the legacy `.windsurfrules`; `.windsurf/rules/<name>.md`, `.windsurf/workflows/<name>.md`, `.windsurf/skills/<name>/`; Windsurf's docs describe no project MCP file, so MCP servers are not written at project scope |
 | Zed | `settings.json` in `~/.config/zed` (macOS), `$XDG_CONFIG_HOME/zed` or `~/.config/zed` (Linux), `%APPDATA%\Zed` (Windows) (`context_servers`), and `AGENTS.md` next to it (Zed's personal instructions), `~/.agents/skills/<name>/` (skills) | `.zed/settings.json` (`context_servers`; Zed starts these only in a trusted worktree); instructions go to the first of `.rules`, `.cursorrules`, `.windsurfrules`, `.clinerules`, `.github/copilot-instructions.md`, `AGENT.md`, `AGENTS.md`, `CLAUDE.md` and `GEMINI.md` that exists, since Zed reads only that one, and to `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build and Windsurf) when none does; `.agents/skills/<name>/` (skills; Amp writes its project skills to the same folder) |
@@ -680,10 +680,11 @@ kitbag resolved. Shell scripts need LF line endings to run; on Windows keep `hoo
 A Claude Code plugin is someone else's code (it can bundle hooks, MCP servers, commands, agents
 and skills), so kitbag never copies one. It carries only what Claude Code itself stores to find
 and enable it: the marketplaces Claude Code knows (`extraKnownMarketplaces`) and the plugins it
-has enabled (`enabledPlugins`), in a per-target section of `kitbag.toml`. Only `claude-code` has
-such a section so far; Antigravity's and opencode's plugins, Gemini CLI's extensions and Claude
-Desktop's plugins are other systems and are not carried (#12), and kitbag never translates an id
-from one tool to another. A `[plugins.<other tool>]` section is ignored with a warning.
+has enabled (`enabledPlugins`), in a per-target section of `kitbag.toml`. `claude-code` and
+[`opencode`](#opencode-plugins-by-reference-pluginsopencode) have such a section; the other tools'
+plugin systems are not carried (see [Plugins not carried](#plugins-not-carried-antigravity-gemini-cli-claude-desktop)),
+and kitbag never translates an id from one tool to another. A `[plugins.<other tool>]` section is
+ignored with a warning.
 
 ```toml
 [plugins.claude-code.marketplaces.acme-tools]     # the name Claude Code registers it under
@@ -738,7 +739,68 @@ profile, or disabling it with `disabled_on`, doesn't uninstall or disable it in 
 lists each marketplace with its source and each plugin, and nothing is written for them. `kitbag
 inspect` lists them under what runs commands. Not carried yet: `CLAUDE_CODE_PLUGIN_CACHE_DIR`
 (the plugins directory is read at `~/.claude/plugins`), the `additionalMarketplaces` alias of
-`extraKnownMarketplaces`, managed settings, Claude Desktop's plugins and their `commands/`.
+`extraKnownMarketplaces`, managed settings.
+
+### opencode plugins, by reference: `[plugins.opencode]`
+
+opencode loads plugins from the npm packages listed in the `plugins` array of its config
+(`plugin` in opencode 1), which it installs itself at startup, and from code in its `plugins/`
+folders. kitbag carries only the packages, by reference: the id is the npm spec as opencode
+reads it (`opencode-x`, `opencode-x@1.2.0`, `@scope/x`; a version in the id is the pin).
+opencode has no marketplaces, and `version` isn't used.
+
+```toml
+[plugins.opencode.enabled."@acme/opencode-plugin@1.2.0"]
+# disabled_on = ["opencode"]                      # or targets = [...]; as for an MCP server
+[plugins.opencode.enabled."opencode-notify"]
+```
+
+**Capture** reads the array from every opencode config file at the scope (`~/.config/opencode`
+or the project's `opencode.json(c)` / `.opencode/opencode.json(c)`), in both its `plugins` and
+`plugin` spellings, and in opencode's string, `{"package": ...}` and `[spec, options]` forms.
+Left out, with a note: local paths and `file:` entries (code on that machine), anything that
+isn't an npm spec (the docs don't give a git spec's syntax, so that is UNVERIFIED and not
+written), `-name` entries (a plugin turned off) and the `options` of a plugin, which can hold
+keys. The `plugins/` folders are plugin code and are never read into a profile.
+
+**Apply** appends the packages that aren't listed yet to the array the config file already has
+(`plugins`, or `plugin` when that is the key there or the file is in opencode 1's MCP layout; a
+new array is `plugins`), in the same file the MCP servers go to, and writes nothing else. It
+never installs or runs a plugin or touches `plugins/` or the cache: opencode installs the
+packages itself the next time it starts, and the plan says so. A package already listed, in any
+form, is left alone, including one you turned off with a `-` entry; a different pinned version
+of a plain entry is replaced (not with `--no-overwrite`, and never an entry that has options). A
+second apply is "Up to date", and `kitbag undo` restores the config as it was, so plugins you
+added another way stay. Apply is additive. **From a git source** the packages are withheld
+unless you pass `--trust-source` (a plugin runs inside opencode with its permissions); the
+plan lists each one, and `inspect` lists them under what runs commands. Docs checked 2026-11-27:
+[plugins](https://opencode.ai/docs/plugins/), [config](https://opencode.ai/docs/config/),
+[migrating from v1](https://opencode.ai/docs/migrate-v1/). Whether opencode 2 still reads the
+singular `plugin` key isn't said there, so a file kitbag creates uses `plugins`.
+
+### Plugins not carried: Antigravity, Gemini CLI, Claude Desktop
+
+Checked against each tool's official docs on 2026-11-27; none documents a way to list a plugin
+by reference that kitbag could write without copying plugin code, so none is carried (#12).
+
+- **Antigravity**: a plugin is a folder (with a `plugin.json`) unpacked into
+  `~/.gemini/config/plugins/<name>/`, or put in a workspace's `.agents/plugins/`, by
+  `agy plugin install` (from a marketplace, a GitHub URL or a local path) and turned on or off
+  with `agy plugin enable|disable`. The docs name no `plugins.json`, no setting that lists
+  plugins or marketplaces and no file that records enablement (UNVERIFIED: any such file), so
+  the folder is the install and there is nothing to write by reference.
+  ([plugins](https://antigravity.google/docs/plugins), [build plugins](https://antigravity.google/docs/build-plugins/))
+- **Gemini CLI**: `gemini extensions install` copies an extension into
+  `~/.gemini/extensions/<name>/`; the docs name no file that records its source or whether it is
+  enabled (UNVERIFIED: `extension-enablement.json`).
+  ([extensions](https://geminicli.com/docs/extensions/reference/))
+- **Claude Desktop**: the only filesystem layout its docs name is the organization plugins
+  directory (`/Library/Application Support/Claude/org-plugins/` on macOS,
+  `C:\Program Files\Claude\org-plugins\` on Windows, none on Linux). An administrator owns
+  it (root or administrators only, on purpose) and it holds the plugins themselves, so kitbag
+  doesn't write there. User plugins are added in the app and kept in its local data directory,
+  whose path the docs don't give; marketplaces are set by managed configuration or in the app.
+  ([extensions](https://claude.com/docs/third-party/claude-desktop/extensions))
 
 ### Plugins: `rules/` at the root, no `kitbag.toml`
 
@@ -1289,7 +1351,8 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   kitbag already carries Hermes skills, but profile `commands/` are not rewritten as Hermes skills.
   Claude Desktop (the chat app) has no standalone commands folder; official docs
   (claude.com/docs/third-party/claude-desktop/extensions, checked 2026-11-27) place slash-command
-  definitions in a plugin's `commands/` directory, which is plugin layout and is tracked in #12.
+  definitions in a plugin's `commands/` directory; the only plugin folder those docs name is an
+  administrator-owned organization directory, which kitbag doesn't write (see the plugins section).
   Copilot's user-level prompt files live in VS Code's profile storage, with no path the docs
   name, and VS Code is deprecating prompt files in favour of skills. Codex custom prompts are
   documented for `~/.codex/prompts/` only, and are deprecated for skills. Continue documents no
@@ -1338,8 +1401,9 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   prompt. Keys other tools use (`argument-hint`, `allowed-tools`, a `tools` list, `permissionMode`,
   `hooks`, a `model` alias such as `sonnet`) are left out with a note, never translated. Agents
   and commands defined inside `opencode.json` and opencode 1's `mode/` agents are not carried
-  (plugins are tracked in #12, and so are opencode's hooks, which exist only as plugins). That is everything opencode's docs describe for
-  MCP servers, instructions, rules, commands, skills and agents. opencode also reads
+  (hooks exist only as plugins, see Hooks). Plugins are carried by reference, see
+  [opencode plugins](#opencode-plugins-by-reference-pluginsopencode). That is everything
+  opencode's docs describe for MCP servers, instructions, rules, commands, skills and agents. opencode also reads
   `.claude/skills` and `~/.claude/skills` (and `.agents/skills`, `~/.agents/skills`), so with
   Claude Code targeted too a skill is visible from both folders.
 - **Grok Build** also reads Claude Code's files (`CLAUDE.md`, `.claude/rules`, `.claude/skills`,
