@@ -1396,12 +1396,13 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   rule no `applyTo`. A server using VS Code's `${input:...}` or `${command:...}` variables in
   `.vscode/mcp.json` is skipped at capture. Commands become VS Code prompt files
   (`.github/prompts/<name>.prompt.md`) at project scope only: VS Code keeps user prompt files
-  in its own profile storage, and Copilot CLI doesn't read prompt files (it reads Claude
-  Code's `.claude/commands/`). A prompt file keeps `description`, `argument-hint` and VS Code's
+  in its own profile storage, and Copilot CLI's docs don't list prompt files among what it
+  reads. A prompt file keeps `description`, `argument-hint` and VS Code's
   `name`, `agent`, `model` and `tools`; other command keys (`allowed-tools` ...) are left out with
   a note, and `$ARGUMENTS` is written as is with a warning, since VS Code documents
   `${input:NAME}` instead. Skills go to `$COPILOT_HOME/skills/` and `.github/skills/`, which
-  Copilot CLI and VS Code both read; `name` and `description` are filled in when `SKILL.md`
+  Copilot CLI and VS Code both read (they also read `.claude/skills` and `.agents/skills`, which
+  kitbag doesn't write for Copilot, as `.github/skills` and `~/.copilot/skills` already reach both); `name` and `description` are filled in when `SKILL.md`
   lacks them, and a name VS Code wouldn't load (not lowercase letters, digits and hyphens) is
   warned about. Custom agents go to `$COPILOT_HOME/agents/<name>.agent.md` (default
   `~/.copilot/agents/`) and `.github/agents/<name>.agent.md`, the folders Copilot CLI and
