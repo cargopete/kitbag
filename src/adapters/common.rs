@@ -137,7 +137,13 @@ pub fn write_output_style(
 
 /// Note that the plan writes `content` to the file of `item`, for the state
 /// records that later let a disabled item be removed again.
-fn record_file(work: &mut Work, target: &str, path: &Path, item: String, content: &[u8]) {
+pub(super) fn record_file(
+    work: &mut Work,
+    target: &str,
+    path: &Path,
+    item: String,
+    content: &[u8],
+) {
     work.file_writes.push(super::FileWrite {
         target: target.to_string(),
         path: path.to_path_buf(),
@@ -202,7 +208,7 @@ fn values_match(cur: &Value, want: &Value, eq: &impl Fn(&str, &str) -> bool) -> 
 /// applied back to the tool it was captured from), keep the file and say so;
 /// otherwise warn that the markers will be written literally. Returns whether
 /// to go ahead with the write.
-fn check_redacted(
+pub(super) fn check_redacted(
     work: &mut Work,
     path: &Path,
     cur: Option<&[u8]>,

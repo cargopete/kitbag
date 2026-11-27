@@ -101,7 +101,7 @@ preview with `kitbag diff github:cargopete/dotagents --to all`.
 | `grok-build`     | Grok Build        | user, project | ✓   | ✓            | ✓*         | ✓                       | ✓      | -      | -             | -        |
 | `windsurf`       | Windsurf          | user, project | user | ✓           | project    | ✓                       | project | -     | -             | -        |
 | `zed`            | Zed               | user, project | ✓   | ✓            | -          | -                       | ✓      | -      | -             | -        |
-| `hermes`         | Hermes Agent      | user, project | user | ✓           | -          | -                       | ✓      | -      | -             | -        |
+| `hermes`         | Hermes Agent      | user, project | user | ✓           | -          | -                       | ✓      | -      | user          | user     |
 | `amp`            | Amp               | user, project | ✓   | ✓            | -          | as skills               | ✓      | -      | -             | -        |
 | `cline`          | Cline             | user, project | user | ✓           | ✓          | ✓                       | ✓      | -      | -             | -        |
 | `roo`            | Roo Code (alias: `roo-code`) | user, project | ✓ | ✓    | ✓          | ✓                       | ✓      | -      | -             | -        |
@@ -135,7 +135,7 @@ Where things go:
 | Grok Build | `$GROK_HOME/config.toml` (`[mcp_servers.<name>]`, default `~/.grok`), `$GROK_HOME/{AGENTS.md, rules/*.md, commands/*.md, skills/}` | `.grok/config.toml`, `AGENTS.md` (shared with Codex, Cursor, Antigravity and opencode), `.grok/{rules,commands,skills}/`; Grok reads project files only in folders you have trusted |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` (`mcpServers`), `~/.codeium/windsurf/memories/global_rules.md`, `~/.codeium/windsurf/global_workflows/<name>.md` | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode and Grok Build); capture also reads the legacy `.windsurfrules`; `.windsurf/rules/<name>.md`, `.windsurf/workflows/<name>.md`, `.windsurf/skills/<name>/`; Windsurf's docs describe no project MCP file, so MCP servers are not written at project scope |
 | Zed | `settings.json` in `~/.config/zed` (macOS), `$XDG_CONFIG_HOME/zed` or `~/.config/zed` (Linux), `%APPDATA%\Zed` (Windows) (`context_servers`), and `AGENTS.md` next to it (Zed's personal instructions), `~/.agents/skills/<name>/` (skills) | `.zed/settings.json` (`context_servers`; Zed starts these only in a trusted worktree); instructions go to the first of `.rules`, `.cursorrules`, `.windsurfrules`, `.clinerules`, `.github/copilot-instructions.md`, `AGENT.md`, `AGENTS.md`, `CLAUDE.md` and `GEMINI.md` that exists, since Zed reads only that one, and to `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build and Windsurf) when none does; `.agents/skills/<name>/` (skills; Amp writes its project skills to the same folder) |
-| Hermes Agent | `$HERMES_HOME/config.yaml` (`mcp_servers`, default `~/.hermes`), `$HERMES_HOME/SOUL.md` (Hermes's identity file, the only global file it reads for instructions; capture reads only a kitbag-managed block in it), `$HERMES_HOME/skills/<name>/` (skills; capture also looks in category folders such as `skills/devops/<name>/`, and skips the skills Hermes bundled or installed from its hub) | `.hermes.md` or `HERMES.md` when the project has one (Hermes loads it before `AGENTS.md`), otherwise `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf and Grok Build); Hermes documents no project MCP file, so MCP servers are not written at project scope; `.hermes/skills/<name>/` (skills; Hermes loads them once you run `hermes skills trust`, and also reads `.agents/skills/`, which kitbag leaves to the tools that own it) |
+| Hermes Agent | `$HERMES_HOME/config.yaml` (`mcp_servers`, `agent.personalities` and `display.personality`, default `~/.hermes`), `$HERMES_HOME/SOUL.md` (Hermes's identity file, the only global file it reads for instructions; capture reads only a kitbag-managed block in it), `$HERMES_HOME/skills/<name>/` (skills; capture also looks in category folders such as `skills/devops/<name>/`, and skips the skills Hermes bundled or installed from its hub) | `.hermes.md` or `HERMES.md` when the project has one (Hermes loads it before `AGENTS.md`), otherwise `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf and Grok Build); Hermes documents no project MCP file, so MCP servers are not written at project scope; `.hermes/skills/<name>/` (skills; Hermes loads them once you run `hermes skills trust`, and also reads `.agents/skills/`, which kitbag leaves to the tools that own it) |
 | Amp | `~/.config/amp/settings.json` or `settings.jsonc` (`amp.mcpServers`; `%USERPROFILE%\.config\amp` on Windows), `~/.config/amp/AGENTS.md`, `~/.config/agents/skills/<name>/` | `.amp/settings.json` or `settings.jsonc` (`amp.mcpServers`; Amp asks you to approve these servers, `amp mcp approve`), `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Windsurf, Grok Build and Hermes), or `AGENT.md` / `CLAUDE.md` when that is the file Amp reads, `.agents/skills/<name>/` |
 | Cline | `~/.cline/data/settings/cline_mcp_settings.json` (`mcpServers`; `CLINE_MCP_SETTINGS_PATH` names the file, `CLINE_DATA_DIR` replaces `~/.cline/data`, `CLINE_DIR` replaces `~/.cline`), `~/.cline/rules/kitbag.md` (instructions: a managed block in a file of its own; Cline reads every file in that directory), `~/.cline/rules/<name>.md`, `~/.cline/workflows/<name>.md`, `~/.cline/skills/<name>/`; capture also reads `~/Documents/Cline/Rules/`, `~/Cline/Rules/`, `~/Documents/Cline/Workflows/` and `~/.agents/skills/` | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build, Windsurf and Zed), `.cline/rules/<name>.md`, `.cline/workflows/<name>.md`, `.cline/skills/<name>/`; capture also reads the older `.clinerules/` (rules, `workflows/`, `skills/`) and `.agents/skills/`; Cline's docs describe no project MCP file, so MCP servers are not written at project scope |
 | Roo Code | `mcp_settings.json` in `<editor user data>/User/globalStorage/rooveterinaryinc.roo-cline/settings/` (`mcpServers`; the editor is VS Code, else VS Code Insiders, VSCodium or Cursor, whichever has the extension's folder: `~/.config/Code` or `$XDG_CONFIG_HOME/Code` on Linux, `~/Library/Application Support/Code` on macOS, `%APPDATA%\Code` on Windows), `~/.roo/rules/kitbag.md` (instructions: a managed block in a file of its own; Roo reads every file in that directory), `~/.roo/rules/<name>.md`, `~/.roo/commands/<name>.md`, `~/.roo/skills/<name>/`; capture also reads `~/.agents/skills/` | `.roo/mcp.json` (`mcpServers`; wins over the user file for a server of the same name), `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode, Grok Build, Windsurf and Zed), `.roo/rules/<name>.md`, `.roo/commands/<name>.md`, `.roo/skills/<name>/`; capture also reads `.agents/skills/` |
@@ -182,7 +182,7 @@ my-profile/
 ├── agents/
 │   └── reviewer.md        # custom agents (GitHub Copilot)
 ├── output-styles/
-│   └── terse.md           # Claude Code output styles
+│   └── terse.md           # output styles (Claude Code; Hermes personalities)
 └── hooks/
     └── typecheck.sh       # scripts the [[hooks]] of kitbag.toml run (optional)
 ```
@@ -361,6 +361,7 @@ with a bounded effect are applied. Anything else is dropped with a warning:
 | `claude-code` | `model`, `effortLevel`, `permissions`, `outputStyle`, `alwaysThinkingEnabled`, `includeCoAuthoredBy`, `cleanupPeriodDays` |
 | `codex` | `model`, `model_reasoning_effort`, `model_reasoning_summary`, `model_verbosity`, `approval_policy`, `sandbox_mode`, `web_search`, `file_opener` |
 | `gemini-cli` | `model`, `ui` |
+| `hermes` | `display`, of which only `personality` is written |
 
 `env` blocks, `apiKeyHelper`, provider endpoints and similar keys are never carried. Hooks
 are not a setting: they have their own opt-in path (see [Hooks](#hooks-hooks-in-kitbagtoml-and-hooks)).
@@ -532,8 +533,9 @@ such agents in a local profile.
 
 ### Output styles: `output-styles/<name>.md`
 
-Output styles set Claude's role, tone and response format for a whole session. Only
-**Claude Code** has them as a file (no other target is written: see below). Claude Code's
+Output styles set Claude's role, tone and response format for a whole session. **Claude Code**
+has them as a file, and **Hermes Agent** has the comparable personalities (see below); no other
+target is written. Claude Code's
 [output styles page](https://code.claude.com/docs/en/output-styles) (checked 2026-11-27) says
 a custom style is "a Markdown file: frontmatter for metadata, then the instructions for
 Claude", saved at one of three levels: user `~/.claude/output-styles`, project
@@ -574,12 +576,48 @@ style has no way to run commands, so a git source's styles are not held back (re
 anyway: they steer everything Claude says). `targets` / `disabled_on` in the frontmatter work as
 for the other items, and `kitbag disable output-style:<name>` sets them.
 
-Other tools: Hermes Agent's docs name a comparable feature (`agent.personalities` in
-`config.yaml`, picked with `display.personality`, and `SOUL.md`), and Grok Build's name
-`personas/*.toml` without a format; neither is written yet, and no style text is folded into
-instructions files. Codex's `personality` setting is documented as deprecated, Gemini CLI's
-`system.md` replaces the whole system prompt, and Roo Code's custom modes also set tool access.
-The other targets' docs describe only ordinary rules or instructions files.
+**Hermes Agent** (user scope only) has personalities: named pieces of prompt text that
+`/personality <name>` adds to the system prompt. Hermes's
+[personality page](https://hermes-agent.nousresearch.com/docs/user-guide/features/personality)
+(checked 2026-11-27) says custom ones go in `config.yaml` under `agent.personalities`, each name
+mapped to a string (its example writes it as a `>` block scalar), that "a top-level
+`personalities:` block works too; `agent.personalities` wins if the same name appears in both",
+and that the choice is "stored as a name in `display.personality`". Capture reads both blocks
+(`agent.personalities` wins) into `output-styles/<name>.md`, the body being the personality's
+text; a value that is not text, or a name that can't be a file name, is skipped with a note.
+Apply writes `agent.personalities.<name>` in `config.yaml`, editing the file in place: your
+other keys, comments and personalities stay, a multi-line text is written as a `|` block
+scalar, and a name Hermes already has with other text is replaced unless `--no-overwrite`
+(the same text, even in the top-level block, is up to date). A personality has no description
+or other keys, so only the style's text is written, and the plan says when a description or
+`keep-coding-instructions` was left out. Disabling a style for Hermes (`targets` /
+`disabled_on`) takes out an entry kitbag added and leaves one you changed or added. A style
+captured from Claude Code reaches Hermes, and a personality captured from Hermes reaches
+Claude Code, as it does for any target that carries styles; use `targets` / `disabled_on` to
+keep one on one tool. The picked name is carried as `[settings.hermes.display]` `personality`
+(only that key of `display`; `none`, `default` and `neutral`, which mean no personality, are
+not carried, and a name that is neither one of Hermes's fourteen built-ins nor in the file is kept
+with a note), and written to `display.personality`. The text is prompt text, so `kitbag diff`
+shows it in full, including for a git source, and capture redacts secrets in it. If
+`agent`, `personalities` or `display` is written in a form kitbag can't edit in place (a flow
+mapping), the plan says so and leaves the file alone.
+
+`SOUL.md` is **not** a personality here: the docs call it Hermes's single identity file (the
+first slot of the system prompt, a durable tone and identity for the whole install) and name no
+named personalities in it. kitbag keeps writing the instructions in a managed block there and
+reading only that block; the persona text around it is neither captured nor changed.
+
+Not written, with the docs checked 2026-11-27: **Grok Build** names `.grok/personas/*.toml`,
+`~/.grok/personas/*.toml` and a `[subagents.personas]` table, "behavioral overlays only (tone,
+focus, contracts)" ([subagents](https://docs.x.ai/build/features/subagents)), but its pages
+(subagents, settings and the settings reference) give no key or example for a persona, so
+there is no format to write; **Codex**'s `personality` is documented as a "Deprecated
+compatibility setting" that no longer changes the style (`friendly` / `pragmatic`), and
+`features.personality` is ignored; **Gemini CLI**'s `GEMINI_SYSTEM_MD` replaces the whole
+built-in system prompt (and `output.format` is `text` or `json`), not a style file; **Roo
+Code**'s custom modes also set tool access, so they are agents, not styles. The other
+targets' docs describe only ordinary rules or instructions files. No style text is folded
+into instructions files behind a flag (the optional idea in the issue is not done).
 
 ### Hooks: `[[hooks]]` in `kitbag.toml`, and `hooks/`
 
@@ -1584,8 +1622,9 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   next to `.grok/rules/`. Commands are Claude Code style markdown; Grok counts positional
   arguments from `$0`, so kitbag warns about commands that use `$1`-style placeholders. Grok
   Build agent definitions (`.grok/agents/`) are not carried: docs.x.ai names the folder but gives
-  no file format (see [Agents](#agents-agentsnamemd)). Personas, plugins and settings are not
-  carried yet; hooks are (see Hooks).
+  no file format (see [Agents](#agents-agentsnamemd)). Personas are not carried either: the docs
+  name `personas/*.toml` but no format (see [Output styles](#output-styles-output-stylesnamemd)).
+  Plugins and settings are not carried yet; hooks are (see Hooks).
 - **Windsurf** (now also shipped as Devin Desktop) keeps MCP servers in
   `~/.codeium/windsurf/mcp_config.json` and global rules in
   `~/.codeium/windsurf/memories/global_rules.md`; kitbag writes those, and nothing at project
@@ -1869,7 +1908,7 @@ No further candidates are named here; open an issue for the tool you miss. Issue
 - Apply is additive and doesn't delete entries that were removed from the profile (see above).
 - **Not carried yet:** hooks only for Claude Code, and only with `--include hooks` (see
   [Hooks](#hooks-hooks-in-kitbagtoml-and-hooks)). Capture lists what it found of these and
-  leaves them out. Output styles are carried for Claude Code (see
+  leaves them out. Output styles are carried for Claude Code and, as personalities, Hermes Agent (see
   [Output styles](#output-styles-output-stylesnamemd)), and `outputStyle` is kept even when it
   names a style kitbag has no file for.
 - **Encodings.** Capture reads UTF-8 (with or without a byte-order mark) and UTF-16 with a

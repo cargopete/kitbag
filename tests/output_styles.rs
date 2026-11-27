@@ -367,13 +367,13 @@ fn other_targets_say_they_carry_no_output_styles_and_write_nothing() {
             "apply",
             "p",
             "--to",
-            "cursor,codex,gemini-cli,opencode,hermes",
+            "cursor,codex,gemini-cli,opencode",
             "--yes",
         ],
     );
     assert!(ok, "{out}");
     assert!(out.contains("1 output-styles"), "{out}");
-    for t in ["cursor", "codex", "gemini-cli", "opencode", "hermes"] {
+    for t in ["cursor", "codex", "gemini-cli", "opencode"] {
         let line = out
             .lines()
             .find(|l| l.contains("not supported by") && l.contains("output-styles"))
@@ -393,7 +393,7 @@ fn other_targets_say_they_carry_no_output_styles_and_write_nothing() {
     assert!(ok, "{out}");
     let v: Value = serde_json::from_str(&out).unwrap();
     for t in v.as_array().unwrap() {
-        let want = if t["id"] == "claude-code" {
+        let want = if t["id"] == "claude-code" || t["id"] == "hermes" {
             "native"
         } else {
             "-"

@@ -471,6 +471,25 @@ pub trait Adapter: Sync {
         work: &mut Work,
     ) -> Result<()>;
 
+    /// For an item that kitbag writes inside a config file instead of a file
+    /// of its own (`item` is `output-style <name>`): `None` if this tool has no
+    /// such items, else the item's text as the file has it now (`Some(None)`
+    /// when it isn't there). Used to take the item out again when the profile
+    /// disables it for this tool.
+    fn read_embedded_item(
+        &self,
+        _work: &Work,
+        _env: &Env,
+        _item: &str,
+    ) -> Result<Option<Option<String>>> {
+        Ok(None)
+    }
+
+    /// Plan the removal of the item [`Adapter::read_embedded_item`] reads.
+    fn remove_embedded_item(&self, _work: &mut Work, _env: &Env, _item: &str) -> Result<()> {
+        Ok(())
+    }
+
     fn supports(&self, scope: Scope, feature: Feature) -> Support {
         if !self.scopes().contains(&scope) {
             return Support::None;

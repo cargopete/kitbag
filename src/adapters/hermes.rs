@@ -39,6 +39,18 @@
 //!   The skills Hermes put there itself, named in `skills/.bundled_manifest`
 //!   (bundled) or `skills/.hub/lock.json` (installed from the hub), are neither
 //!   captured nor overwritten; Hermes keeps those up to date.
+//! * Output styles: Hermes's personalities, `agent.personalities` in `config.yaml`
+//!   (user scope only): each name maps to the text of the personality, which
+//!   Hermes adds to the system prompt when `/personality <name>` picks it. A
+//!   top-level `personalities:` block is accepted too, and `agent.personalities`
+//!   wins when a name is in both; capture reads both, apply writes
+//!   `agent.personalities`. A personality has no description or other keys, so
+//!   only the style's text is written. `display.personality`, the name of the
+//!   one picked, is carried as `settings.hermes.display.personality` and
+//!   nothing else of `display` is. `SOUL.md` is not a personality: it is
+//!   Hermes's single identity file, which holds the instructions block above,
+//!   and the docs name no named personalities in it. Docs:
+//!   <https://hermes-agent.nousresearch.com/docs/user-guide/features/personality>.
 //! * Rules and commands: Hermes's docs name no rules folder (its context-file
 //!   list only reads Cursor's `.cursorrules` and `.cursor/rules/*.mdc`, which
 //!   Cursor owns) and no commands folder (`quick_commands` in `config.yaml` are
@@ -62,18 +74,21 @@ use anyhow::Result;
 use serde_json::{Map, Value, json};
 
 use super::common::{
-    capture_instructions, capture_managed_instructions, capture_skill, import_server,
-    merge_server_def, note_dropped_server_keys, off_skipped_server, record_server_write,
-    render_server, server_entries, server_from_json, servers_for, set_enabled_false,
-    skill_with_required_frontmatter, skipped_servers, str_of, write_instructions, write_skill,
+    add_output_style, capture_instructions, capture_managed_instructions, capture_skill,
+    check_redacted, import_server, merge_server_def, note_dropped_server_keys, off_skipped_server,
+    pick_settings, record_file, record_server_write, render_server, safe_settings, server_entries,
+    server_from_json, servers_for, set_enabled_false, skill_with_required_frontmatter,
+    skipped_servers, str_of, write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::yaml::{YamlDoc, parse_map};
-use crate::model::{Profile, Transport};
+use crate::model::{OutputStyle, Profile, Transport};
 use crate::secrets::RefStyle;
 
 const ID: &str = "hermes";
 const SECTION: &str = "mcp_servers";
+const AGENT: &str = "agent";
+const PERSONALITIES: &str = "personalities";
 /// Server keys kitbag writes; anything else is preserved.
 const MANAGED_KEYS: &[&str] = &[
     "command",
@@ -160,7 +175,11 @@ impl Adapter for Hermes {
     fn support(&self, scope: Scope) -> [(Feature, Support); 8] {
         Feature::ALL.map(|f| {
             let s = match f {
-                Feature::Mcp if scope == Scope::User => Support::Native,
+                Feature::Mcp | Feature::OutputStyles | Feature::Settings
+                    if scope == Scope::User =>
+                {
+                    Support::Native
+                }
                 Feature::Instructions | Feature::Skills => Support::Native,
                 _ => Support::None,
             };
@@ -203,6 +222,7 @@ impl Adapter for Hermes {
                 for (name, def) in server_entries(&mut cap, ID, config, SECTION, doc.get(SECTION)) {
                     capture_server(&mut cap, name, def);
                 }
+                capture_personalities(&mut cap, &doc);
                 let external = doc
                     .pointer("/skills/external_dirs")
                     .and_then(Value::as_array)
@@ -316,14 +336,316 @@ impl Adapter for Hermes {
         write_instructions(work, &p.instructions, profile, opts, false, ID)?;
         apply_skills(profile, env, opts, work)?;
         super::hook_files::apply_for(profile, env, opts, work, &super::hook_files::HERMES)?;
-        if profile.settings.contains_key(ID) {
+        if let Some(config) = &p.config {
+            apply_personalities(profile, opts, work, config)?;
+            apply_selection(profile, opts, work, config)?;
+        } else if profile.settings.contains_key(ID) {
             work.info(
                 ID,
-                "kitbag doesn't manage Hermes settings; settings.hermes was not applied",
+                "Hermes documents no project-level config; settings.hermes was not applied (apply at user scope)",
             );
         }
         Ok(())
     }
+
+    fn read_embedded_item(
+        &self,
+        work: &Work,
+        env: &Env,
+        item: &str,
+    ) -> Result<Option<Option<String>>> {
+        let Some(name) = item.strip_prefix("output-style ") else {
+            return Ok(None);
+        };
+        let Some(config) = paths(env).config else {
+            return Ok(None);
+        };
+        let text = work.fs.read(&config)?;
+        let doc = YamlDoc::parse(text.as_deref(), &config)?;
+        Ok(Some(match personalities_of(&doc).get(name) {
+            Some(Value::String(t)) => Some(t.trim().to_string()),
+            _ => None,
+        }))
+    }
+
+    fn remove_embedded_item(&self, work: &mut Work, env: &Env, item: &str) -> Result<()> {
+        let (Some(name), Some(config)) = (item.strip_prefix("output-style "), paths(env).config)
+        else {
+            return Ok(());
+        };
+        let text = work.fs.read(&config)?;
+        let mut doc = YamlDoc::parse(text.as_deref(), &config)?;
+        if doc.check_editable_in(AGENT, PERSONALITIES).is_err()
+            || doc.check_editable(PERSONALITIES).is_err()
+        {
+            work.warn(
+                ID,
+                format!(
+                    "personality '{name}' not removed from {}: kitbag can't edit its personalities in place; remove it by hand",
+                    crate::ui::tildify(&config, &work.home)
+                ),
+            );
+            return Ok(());
+        }
+        doc.remove_in(AGENT, PERSONALITIES, name)?;
+        doc.remove(PERSONALITIES, name)?;
+        if doc.changed() {
+            work.fs.write(&config, doc.render()?)?;
+        }
+        Ok(())
+    }
+}
+
+/// The personalities `config.yaml` defines: the top-level `personalities:`
+/// block, then `agent.personalities` over it (it wins for a name in both).
+fn personalities_of(doc: &YamlDoc) -> Map<String, Value> {
+    let mut all = doc.entries(PERSONALITIES);
+    all.extend(doc.entries_in(AGENT, PERSONALITIES));
+    all
+}
+
+/// Hermes's own personalities, which a `display.personality` may name without
+/// a definition in the file.
+const BUILTIN_PERSONALITIES: &[&str] = &[
+    "helpful",
+    "concise",
+    "technical",
+    "creative",
+    "teacher",
+    "kawaii",
+    "catgirl",
+    "pirate",
+    "shakespeare",
+    "surfer",
+    "noir",
+    "uwu",
+    "philosopher",
+    "hype",
+];
+/// `display.personality` values that mean no personality is picked.
+const NO_PERSONALITY: &[&str] = &["none", "default", "neutral"];
+
+/// Capture the personalities of `config.yaml` as output styles, and the one
+/// `display.personality` picks as a setting.
+fn capture_personalities(cap: &mut Captured, doc: &Value) {
+    let mut all = Map::new();
+    if let Some(Value::Object(m)) = doc.get(PERSONALITIES) {
+        all.extend(m.clone());
+    }
+    if let Some(Value::Object(m)) = doc.pointer("/agent/personalities") {
+        all.extend(m.clone());
+    }
+    for (name, value) in &all {
+        let Value::String(text) = value else {
+            cap.info(
+                ID,
+                format!(
+                    "personality '{name}' is not plain text; Hermes's docs only show text, so it was not captured"
+                ),
+            );
+            continue;
+        };
+        if !crate::model::is_valid_name(name) {
+            cap.warn(
+                ID,
+                format!("personality '{name}' skipped: its name can't be a file name in a profile"),
+            );
+            continue;
+        }
+        if text.trim().is_empty() {
+            continue;
+        }
+        let style = OutputStyle {
+            name: name.clone(),
+            body: text.trim().to_string(),
+            ..Default::default()
+        };
+        add_output_style(cap, style, ID);
+    }
+    let picked = doc
+        .pointer("/display/personality")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|n| !n.is_empty() && !NO_PERSONALITY.contains(&n.to_ascii_lowercase().as_str()));
+    let Some(picked) = picked else { return };
+    let display = json!({ "display": { "personality": picked } });
+    if let Value::Object(m) = &display {
+        pick_settings(cap, ID, m);
+    }
+    if !BUILTIN_PERSONALITIES.contains(&picked.to_ascii_lowercase().as_str())
+        && !all.contains_key(picked)
+    {
+        cap.info(
+            ID,
+            format!(
+                "display.personality = \"{picked}\" names no personality in config.yaml; the setting is kept as it is"
+            ),
+        );
+    }
+}
+
+/// Write the profile's output styles as `agent.personalities` entries.
+fn apply_personalities(
+    profile: &Profile,
+    opts: &ApplyOptions,
+    work: &mut Work,
+    path: &Path,
+) -> Result<()> {
+    if profile.output_styles.is_empty() {
+        return Ok(());
+    }
+    let text = work.fs.read(path)?;
+    let mut doc = YamlDoc::parse(text.as_deref(), path)?;
+    if let Err(why) = doc.check_editable_in(AGENT, PERSONALITIES) {
+        work.warn(
+            ID,
+            format!(
+                "personalities not written to {}: {why}, which kitbag can't edit in place; add them by hand",
+                crate::ui::tildify(path, &work.home)
+            ),
+        );
+        return Ok(());
+    }
+    let existing = personalities_of(&doc);
+    let mut trimmed = false;
+    for o in &profile.output_styles {
+        let want = o.body.trim();
+        if want.is_empty() {
+            work.warn(
+                ID,
+                format!(
+                    "output style '{}' has no text; no personality written",
+                    o.name
+                ),
+            );
+            continue;
+        }
+        trimmed |= o.description.is_some() || !o.extra.is_empty();
+        let cur = match existing.get(&o.name) {
+            None => None,
+            Some(Value::String(t)) if t.trim() == want => continue,
+            Some(Value::String(t)) => Some(t.as_str()),
+            Some(_) => {
+                work.warn(
+                    ID,
+                    format!(
+                        "personality '{}' in {} is not plain text; left as it is",
+                        o.name,
+                        path.display()
+                    ),
+                );
+                continue;
+            }
+        };
+        if cur.is_some() && !opts.overwrite {
+            work.warn(
+                ID,
+                format!(
+                    "kept existing personality '{}' in {} because --no-overwrite was given",
+                    o.name,
+                    path.display()
+                ),
+            );
+            continue;
+        }
+        if !check_redacted(work, path, cur.map(str::as_bytes), want.as_bytes(), ID) {
+            continue;
+        }
+        doc.set_in(
+            AGENT,
+            PERSONALITIES,
+            &o.name,
+            &Value::String(want.to_string()),
+        )?;
+        let item = format!("output-style {}", o.name);
+        work.changed_items.push((ID.to_string(), item.clone()));
+        record_file(work, ID, path, item, want.as_bytes());
+    }
+    if trimmed {
+        work.info(
+            ID,
+            "Hermes personalities are plain text: the description and other frontmatter keys of an output style (keep-coding-instructions ...) were not written",
+        );
+    }
+    if doc.changed() {
+        work.fs.write(path, doc.render()?)?;
+    }
+    Ok(())
+}
+
+/// Write `display.personality` from `settings.hermes`; nothing else of
+/// `display` is carried.
+fn apply_selection(
+    profile: &Profile,
+    opts: &ApplyOptions,
+    work: &mut Work,
+    path: &Path,
+) -> Result<()> {
+    if !profile.settings.contains_key(ID) {
+        return Ok(());
+    }
+    let allowed = safe_settings(profile, ID, work);
+    let Some(Value::Object(display)) = allowed.get("display") else {
+        return Ok(());
+    };
+    let other: Vec<&str> = display
+        .keys()
+        .map(String::as_str)
+        .filter(|k| *k != "personality")
+        .collect();
+    if !other.is_empty() {
+        work.warn(
+            ID,
+            format!(
+                "settings not applied: display.{} (kitbag carries only display.personality for Hermes)",
+                other.join(", display.")
+            ),
+        );
+    }
+    let name = match display.get("personality") {
+        None => return Ok(()),
+        Some(Value::String(n)) if !n.trim().is_empty() => n.trim(),
+        Some(_) => {
+            work.warn(
+                ID,
+                "display.personality is not a name; settings.hermes was not applied",
+            );
+            return Ok(());
+        }
+    };
+    let text = work.fs.read(path)?;
+    let mut doc = YamlDoc::parse(text.as_deref(), path)?;
+    if let Err(why) = doc.check_editable("display") {
+        work.warn(
+            ID,
+            format!(
+                "display.personality not written to {}: {why}, which kitbag can't edit in place; set it by hand",
+                crate::ui::tildify(path, &work.home)
+            ),
+        );
+        return Ok(());
+    }
+    let cur = doc
+        .entries("display")
+        .get("personality")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if cur.as_deref() == Some(name) {
+        return Ok(());
+    }
+    if cur.is_some() && !opts.overwrite {
+        work.warn(
+            ID,
+            format!(
+                "kept existing display.personality in {} because --no-overwrite was given",
+                path.display()
+            ),
+        );
+        return Ok(());
+    }
+    doc.set("display", "personality", &Value::String(name.to_string()))?;
+    work.fs.write(path, doc.render()?)?;
+    Ok(())
 }
 
 /// Every skill folder under `root`, as (its parent, its name): a folder with a

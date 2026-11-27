@@ -686,7 +686,13 @@ fn remove_disabled_items(
         for r in records {
             // The files of the item that are there now, as (path under r.path, bytes).
             let mut present: Vec<(String, Vec<u8>)> = Vec::new();
-            if r.files.is_empty() {
+            // An item written inside a config file is read from there.
+            let embedded = a.read_embedded_item(work, env, &label)?;
+            if let Some(text) = &embedded {
+                if let Some(t) = text {
+                    present.push((String::new(), t.clone().into_bytes()));
+                }
+            } else if r.files.is_empty() {
                 if let Some(b) = work.fs.read_bytes(&r.path)? {
                     present.push((String::new(), b));
                 }
@@ -743,6 +749,10 @@ fn remove_disabled_items(
                 continue;
             }
             for (rel, _) in &present {
+                if embedded.is_some() {
+                    a.remove_embedded_item(work, env, &label)?;
+                    continue;
+                }
                 let path = if rel.is_empty() {
                     r.path.clone()
                 } else {

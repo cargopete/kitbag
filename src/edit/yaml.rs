@@ -114,6 +114,15 @@ impl YamlDoc {
         }
     }
 
+    /// The entries of the mapping `parent.section` (an `agent:` key with
+    /// `personalities:` below it), as they are now.
+    pub fn entries_in(&self, parent: &str, section: &str) -> Map<String, Value> {
+        match self.parsed.get(parent).and_then(|p| p.get(section)) {
+            Some(Value::Object(m)) => m.clone(),
+            _ => Map::new(),
+        }
+    }
+
     /// The value of a top-level key, for reading other settings.
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.parsed.get(key)
@@ -132,8 +141,53 @@ impl YamlDoc {
         self.layout(section).map(|_| ())
     }
 
+    /// [`YamlDoc::check_editable`] for the mapping `parent.section`.
+    pub fn check_editable_in(
+        &self,
+        parent: &str,
+        section: &str,
+    ) -> std::result::Result<(), String> {
+        match self.parsed.get(parent) {
+            None | Some(Value::Null) => {}
+            Some(Value::Object(m)) => match m.get(section) {
+                None | Some(Value::Null) | Some(Value::Object(_)) => {}
+                Some(_) => return Err(format!("'{parent}.{section}' is not a mapping")),
+            },
+            Some(_) => return Err(format!("'{parent}' is not a mapping")),
+        }
+        self.layout_in(parent, section).map(|_| ())
+    }
+
     fn layout(&self, section: &str) -> std::result::Result<Option<Layout>, String> {
-        let Some(key_line) = self.lines.iter().position(|l| is_section_key(l, section)) else {
+        self.layout_between(section, 0, self.lines.len(), 0)
+    }
+
+    /// The layout of `section` below the top-level key `parent`: found among
+    /// the lines of `parent`, indented as its entries are.
+    fn layout_in(
+        &self,
+        parent: &str,
+        section: &str,
+    ) -> std::result::Result<Option<Layout>, String> {
+        let Some(p) = self.layout(parent)? else {
+            return Ok(None);
+        };
+        self.layout_between(section, p.key_line + 1, p.end, p.indent)
+    }
+
+    /// The layout of the key `section`, written with `key_indent` spaces, among
+    /// the lines `from..to`. Its content is whatever follows it that is
+    /// indented deeper.
+    fn layout_between(
+        &self,
+        section: &str,
+        from: usize,
+        to: usize,
+        key_indent: usize,
+    ) -> std::result::Result<Option<Layout>, String> {
+        let Some(key_line) = (from..to.min(self.lines.len()))
+            .find(|&i| is_key_at(&self.lines[i], section, key_indent))
+        else {
             return Ok(None);
         };
         let rest = value_after_key(&self.lines[key_line]);
@@ -152,14 +206,14 @@ impl YamlDoc {
         let mut step = None;
         let mut entries: Vec<(String, usize, usize)> = Vec::new();
         let mut i = key_line + 1;
-        while i < self.lines.len() {
+        while i < to.min(self.lines.len()) {
             let line = self.lines[i].trim_end_matches('\r');
             if is_blank_or_comment(line) {
                 i += 1;
                 continue;
             }
             let lead = leading_spaces(line);
-            if lead == 0 {
+            if lead <= key_indent {
                 break;
             }
             if line.starts_with('\t') {
@@ -197,7 +251,7 @@ impl YamlDoc {
             key_line,
             inline_empty,
             end,
-            indent: indent.unwrap_or(2),
+            indent: indent.unwrap_or(key_indent + 2),
             step: step.unwrap_or(2),
             entries,
         }))
@@ -206,38 +260,114 @@ impl YamlDoc {
     /// Add or replace entry `name` of `section`.
     pub fn set(&mut self, section: &str, name: &str, def: &Value) -> Result<()> {
         let layout = self.layout(section).map_err(|e| self.cannot(section, &e))?;
-        let (indent, step) = layout.as_ref().map_or((2, 2), |l| (l.indent, l.step));
-        let text = render_entry(name, def, indent, step);
         match layout {
             None => {
+                let text = render_entry(name, def, 2, 2);
                 let mut block = vec![format!("{}:", key_text(section))];
                 block.extend(text);
                 let at = self.append_point();
                 self.insert(at, block);
             }
-            Some(l) => {
-                let mut at = l.end;
-                if l.inline_empty {
-                    self.lines[l.key_line] = replace_value(&self.lines[l.key_line], "");
-                    at = l.key_line + 1;
+            Some(l) => self.put_entry(l, name, def),
+        }
+        self.expect_set(&[section], name, def);
+        self.changed = true;
+        Ok(())
+    }
+
+    /// Add or replace entry `name` of the mapping `parent.section`, creating
+    /// whatever of `parent:` and `section:` is missing.
+    pub fn set_in(&mut self, parent: &str, section: &str, name: &str, def: &Value) -> Result<()> {
+        let label = format!("{parent}.{section}");
+        let layout = self
+            .layout_in(parent, section)
+            .map_err(|e| self.cannot(&label, &e))?;
+        match layout {
+            Some(l) => self.put_entry(l, name, def),
+            None => match self.layout(parent).map_err(|e| self.cannot(parent, &e))? {
+                None => {
+                    let mut block = vec![
+                        format!("{}:", key_text(parent)),
+                        format!("  {}:", key_text(section)),
+                    ];
+                    block.extend(render_entry(name, def, 4, 2));
+                    let at = self.append_point();
+                    self.insert(at, block);
                 }
-                if let Some((_, start, end)) = l.entries.iter().find(|(n, _, _)| n == name) {
-                    let (start, end) = (*start, *end);
-                    self.lines.drain(start..end);
-                    at = start;
+                Some(p) => {
+                    let mut at = p.end;
+                    if p.inline_empty {
+                        self.lines[p.key_line] = replace_value(&self.lines[p.key_line], "");
+                        at = p.key_line + 1;
+                    }
+                    let mut block = vec![format!("{}{}:", " ".repeat(p.indent), key_text(section))];
+                    block.extend(render_entry(name, def, p.indent + p.step, p.step));
+                    self.insert(at, block);
                 }
-                self.insert(at, text);
+            },
+        }
+        self.expect_set(&[parent, section], name, def);
+        self.changed = true;
+        Ok(())
+    }
+
+    /// Write entry `name` into a section that is there: replacing the entry
+    /// of that name, else after the last one.
+    fn put_entry(&mut self, l: Layout, name: &str, def: &Value) {
+        let text = render_entry(name, def, l.indent, l.step);
+        let mut at = l.end;
+        if l.inline_empty {
+            self.lines[l.key_line] = replace_value(&self.lines[l.key_line], "");
+            at = l.key_line + 1;
+        }
+        if let Some((_, start, end)) = l.entries.iter().find(|(n, _, _)| n == name) {
+            let (start, end) = (*start, *end);
+            self.lines.drain(start..end);
+            at = start;
+        }
+        self.insert(at, text);
+    }
+
+    /// Note in what the file should mean that `name` of the mapping at `path` is `def`.
+    fn expect_set(&mut self, path: &[&str], name: &str, def: &Value) {
+        let mut cur = &mut self.expected;
+        for key in path {
+            let e = cur
+                .entry((*key).to_string())
+                .or_insert_with(|| Value::Object(Map::new()));
+            if !e.is_object() {
+                *e = Value::Object(Map::new());
             }
+            cur = match e {
+                Value::Object(m) => m,
+                _ => return,
+            };
         }
-        let entry = self
+        cur.insert(name.to_string(), def.clone());
+    }
+
+    /// Remove entry `name` of the mapping `parent.section`, if there.
+    pub fn remove_in(&mut self, parent: &str, section: &str, name: &str) -> Result<()> {
+        let label = format!("{parent}.{section}");
+        let layout = self
+            .layout_in(parent, section)
+            .map_err(|e| self.cannot(&label, &e))?;
+        let Some(l) = layout else { return Ok(()) };
+        let Some((_, start, end)) = l.entries.iter().find(|(n, _, _)| n == name) else {
+            return Ok(());
+        };
+        let (start, end) = (*start, *end);
+        self.lines.drain(start..end);
+        if l.entries.len() == 1 {
+            let line = replace_value(&self.lines[l.key_line], " {}");
+            self.lines[l.key_line] = line;
+        }
+        if let Some(Value::Object(m)) = self
             .expected
-            .entry(section.to_string())
-            .or_insert_with(|| Value::Object(Map::new()));
-        if !entry.is_object() {
-            *entry = Value::Object(Map::new());
-        }
-        if let Value::Object(m) = entry {
-            m.insert(name.to_string(), def.clone());
+            .get_mut(parent)
+            .and_then(|p| p.get_mut(section))
+        {
+            m.remove(name);
         }
         self.changed = true;
         Ok(())
@@ -448,7 +578,7 @@ impl YamlDoc {
             .map_err(|e| anyhow!("{e:#}\nkitbag did not write it"))?;
         if again != self.expected {
             bail!(
-                "{}: kitbag could not edit this file without changing something else, so it did not write it; add the MCP servers by hand",
+                "{}: kitbag could not edit this file without changing something else, so it did not write it; add them by hand",
                 self.path
             );
         }
@@ -513,8 +643,14 @@ fn plain_key(key: &str) -> bool {
 
 /// Is this a top-level `section:` line (the key may be quoted)?
 fn is_section_key(line: &str, section: &str) -> bool {
+    is_key_at(line, section, 0)
+}
+
+/// Is this a `section:` line written with exactly `indent` spaces (the key
+/// may be quoted)?
+fn is_key_at(line: &str, section: &str, indent: usize) -> bool {
     let line = line.trim_end_matches('\r');
-    if line.starts_with([' ', '\t', '#']) {
+    if line.starts_with(['\t', '#']) || leading_spaces(line) != indent {
         return false;
     }
     entry_name(line).is_some_and(|n| n == section)
@@ -553,10 +689,11 @@ fn value_after_key(line: &str) -> String {
 
 /// The colon that ends the key at the start of `line`.
 fn find_key_colon(line: &str) -> Option<usize> {
-    let c = ENTRY_KEY.captures(line)?;
+    let lead = line.len() - line.trim_start_matches(' ').len();
+    let c = ENTRY_KEY.captures(&line[lead..])?;
     let whole = c.get(0)?;
     // The match includes the colon and one space after it (if any).
-    line[..whole.end()].rfind(':')
+    line[..lead + whole.end()].rfind(':')
 }
 
 /// `line` with what follows its key's colon replaced by `value` (kept comment
@@ -574,7 +711,8 @@ fn replace_value(line: &str, value: &str) -> String {
 /// `name:` and its definition, as lines indented by `indent`.
 fn render_entry(name: &str, def: &Value, indent: usize, step: usize) -> Vec<String> {
     let mut out = vec![format!("{}{}:", " ".repeat(indent), key_text(name))];
-    emit_value(def, indent + step, step, false, &mut out);
+    // A text value (a personality) is a block scalar when it has several lines.
+    emit_value(def, indent + step, step, def.is_string(), &mut out);
     out
 }
 
@@ -1014,5 +1152,99 @@ mod tests {
             out,
             "name: x\r\nrules:\r\n  - plain\r\n  - name: \"r\"\r\n    rule: |\r\n      a\r\n      b\r\n"
         );
+    }
+
+    #[test]
+    fn set_in_creates_the_parent_and_the_section_at_the_end() {
+        let text = "model: x\n";
+        let mut d = doc(text);
+        d.set_in("agent", "personalities", "pirate", &json!("Arr."))
+            .unwrap();
+        assert_eq!(
+            d.render().unwrap(),
+            "model: x\nagent:\n  personalities:\n    pirate: \"Arr.\"\n"
+        );
+    }
+
+    #[test]
+    fn set_in_adds_below_the_parents_last_entry_and_keeps_what_follows() {
+        let text = "agent:\n  max_turns: 3\n  # note\n\n# next\ndisplay:\n  skin: x\n";
+        let mut d = doc(text);
+        d.set_in("agent", "personalities", "a", &json!("one\ntwo"))
+            .unwrap();
+        d.set_in("agent", "personalities", "b", &json!("B"))
+            .unwrap();
+        let out = d.render().unwrap();
+        assert_eq!(
+            out,
+            "agent:\n  max_turns: 3\n  personalities:\n    a: |-\n      one\n      two\n    b: \"B\"\n  # note\n\n# next\ndisplay:\n  skin: x\n"
+        );
+        let v = parse_map(Some(&out), Path::new("c")).unwrap();
+        assert_eq!(v["agent"]["personalities"]["a"], "one\ntwo");
+        assert_eq!(v["display"]["skin"], "x");
+    }
+
+    #[test]
+    fn set_in_replaces_an_entry_and_fills_an_empty_parent() {
+        let mut d = doc("agent:\n  personalities:\n    a: >\n      old\n      text\n    b: keep\n");
+        d.set_in("agent", "personalities", "a", &json!("new"))
+            .unwrap();
+        assert_eq!(
+            d.render().unwrap(),
+            "agent:\n  personalities:\n    a: \"new\"\n    b: keep\n"
+        );
+        let mut d = doc("agent: {}\nx: 1\n");
+        d.set_in("agent", "personalities", "a", &json!("A"))
+            .unwrap();
+        assert_eq!(
+            d.render().unwrap(),
+            "agent:\n  personalities:\n    a: \"A\"\nx: 1\n"
+        );
+        let mut d = doc("agent:\n  personalities: {}\n");
+        d.set_in("agent", "personalities", "a", &json!("A"))
+            .unwrap();
+        assert_eq!(
+            d.render().unwrap(),
+            "agent:\n  personalities:\n    a: \"A\"\n"
+        );
+    }
+
+    #[test]
+    fn set_in_keeps_crlf_and_a_bom() {
+        let mut d = doc("\u{feff}agent:\r\n  max_turns: 3\r\n");
+        d.set_in("agent", "personalities", "a", &json!("A"))
+            .unwrap();
+        assert_eq!(
+            d.render().unwrap(),
+            "\u{feff}agent:\r\n  max_turns: 3\r\n  personalities:\r\n    a: \"A\"\r\n"
+        );
+    }
+
+    #[test]
+    fn remove_in_takes_one_entry_and_leaves_an_empty_mapping() {
+        let mut d = doc("agent:\n  personalities:\n    a: A\n    b: B\n  max_turns: 3\n");
+        d.remove_in("agent", "personalities", "a").unwrap();
+        d.remove_in("agent", "personalities", "missing").unwrap();
+        assert_eq!(
+            d.render().unwrap(),
+            "agent:\n  personalities:\n    b: B\n  max_turns: 3\n"
+        );
+        d.remove_in("agent", "personalities", "b").unwrap();
+        assert_eq!(
+            d.render().unwrap(),
+            "agent:\n  personalities: {}\n  max_turns: 3\n"
+        );
+    }
+
+    #[test]
+    fn nested_editing_refuses_layouts_it_cannot_handle() {
+        let d = doc("agent: {max_turns: 3}\n");
+        assert!(d.check_editable_in("agent", "personalities").is_err());
+        let d = doc("agent:\n  personalities: [a]\n");
+        assert!(d.check_editable_in("agent", "personalities").is_err());
+        let d = doc("agent: 3\n");
+        assert!(d.check_editable_in("agent", "personalities").is_err());
+        let d = doc("model: x\n");
+        assert!(d.check_editable_in("agent", "personalities").is_ok());
     }
 }
