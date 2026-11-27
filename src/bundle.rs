@@ -12,6 +12,12 @@
 //! every format, so a stray `{:?}` can't leak one. The plaintext of the
 //! bundle is built in a zeroizing buffer and handed straight to age; there is
 //! no plaintext file, not even a temporary one.
+//!
+//! Besides the `${VAR}` values, a bundle can hold MCP OAuth token stores
+//! ([`TokenStore`]): a tool's documented token file, kept as opaque bytes and
+//! tagged with the tool it belongs to (see [`crate::oauth_tokens`]). A bundle
+//! with token stores is format 2; one without is written as format 1, as
+//! before, and both are read.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -41,6 +47,11 @@ pub struct Secret(Zeroizing<String>);
 impl Secret {
     pub fn new(value: &str) -> Self {
         Secret(Zeroizing::new(value.to_string()))
+    }
+
+    /// Take `value` as it is, without copying it.
+    pub fn from_string(value: String) -> Self {
+        Secret(Zeroizing::new(value))
     }
 
     /// The value, for sealing it. Keep the result out of messages and files.
@@ -77,16 +88,47 @@ pub struct Entry {
     pub at: String,
 }
 
-/// The values of `${VAR}` names, in memory.
+/// One tool's MCP OAuth token store: the file's bytes, opaque (kitbag never
+/// parses them), with what kitbag knew from the tool's config at capture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenStore {
+    /// The tool it belongs to (`gemini-cli`); it is only ever written back to
+    /// that tool.
+    pub tool: String,
+    /// Which documented file it is ([`crate::oauth_tokens::GEMINI_KIND`]).
+    pub kind: String,
+    /// The tool's remote MCP servers at capture, name -> URL (from the
+    /// tool's config, not from the token file).
+    #[serde(default)]
+    pub servers: BTreeMap<String, String>,
+    /// The file's content. Never printed.
+    pub content: Secret,
+}
+
+/// The values of `${VAR}` names, and any token stores, in memory.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Bundle {
     entries: BTreeMap<String, Entry>,
+    tokens: Vec<TokenStore>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Wire {
     kitbag_secrets: u32,
     secrets: BTreeMap<String, Entry>,
+    #[serde(default)]
+    token_stores: Vec<TokenStore>,
+}
+
+/// The bundle formats this kitbag reads.
+const FORMATS: [u32; 2] = [1, 2];
+
+/// Is `s` a tool id or store kind a bundle may hold (`gemini-cli`)?
+fn valid_label(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// Is `name` an environment variable name a bundle may hold?
@@ -100,12 +142,32 @@ pub fn valid_name(name: &str) -> bool {
 }
 
 impl Bundle {
+    /// No variable and no token store.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && self.tokens.is_empty()
     }
 
+    /// The number of variables (token stores not counted).
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Add a tool's token store. A second store for the same tool and kind
+    /// replaces the first.
+    pub fn add_token_store(&mut self, store: TokenStore) {
+        self.tokens
+            .retain(|t| !(t.tool == store.tool && t.kind == store.kind));
+        self.tokens.push(store);
+    }
+
+    /// The token stores.
+    pub fn token_stores(&self) -> &[TokenStore] {
+        &self.tokens
+    }
+
+    /// Take the token stores out of the bundle.
+    pub fn take_token_stores(&mut self) -> Vec<TokenStore> {
+        std::mem::take(&mut self.tokens)
     }
 
     /// Add `name`. The same name with another value is an error: two secrets
@@ -291,13 +353,28 @@ pub fn seal(bundle: &Bundle, how: &Seal) -> Result<Vec<u8>> {
         .iter()
         .map(|(k, e)| (k.len() + e.value.expose().len() + e.at.len()) * 2 + 64)
         .sum::<usize>()
+        // A JSON string escape is at most six bytes per input byte.
+        + bundle
+            .tokens
+            .iter()
+            .map(|t| {
+                t.content.expose().len() * 6
+                    + (t.tool.len() + t.kind.len()) * 2
+                    + t.servers
+                        .iter()
+                        .map(|(k, v)| (k.len() + v.len()) * 6 + 8)
+                        .sum::<usize>()
+                    + 128
+            })
+            .sum::<usize>()
         + 256;
     let mut plain = Zeroizing::new(Vec::with_capacity(room));
     serde_json::to_writer(
         &mut *plain,
         &WireRef {
-            kitbag_secrets: 1,
+            kitbag_secrets: if bundle.tokens.is_empty() { 1 } else { 2 },
             secrets: &bundle.entries,
+            token_stores: &bundle.tokens,
         },
     )?;
     let encryptor = match how {
@@ -318,6 +395,8 @@ pub fn seal(bundle: &Bundle, how: &Seal) -> Result<Vec<u8>> {
 struct WireRef<'a> {
     kitbag_secrets: u32,
     secrets: &'a BTreeMap<String, Entry>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    token_stores: &'a [TokenStore],
 }
 
 /// Does `bytes` start like an age file (binary or armored)?
@@ -376,11 +455,14 @@ pub fn open(bytes: &[u8], how: &Unlock) -> Result<Bundle> {
     // serde's own error text can quote input: say only that it is malformed.
     let wire: Wire = serde_json::from_slice(&plain)
         .map_err(|_| anyhow::anyhow!("the decrypted bundle is not one kitbag wrote"))?;
-    if wire.kitbag_secrets != 1 {
+    if !FORMATS.contains(&wire.kitbag_secrets) {
         bail!(
-            "the bundle has format {}; this kitbag reads format 1",
+            "the bundle has format {}; this kitbag reads formats 1 and 2",
             wire.kitbag_secrets
         );
+    }
+    if wire.kitbag_secrets == 1 && !wire.token_stores.is_empty() {
+        bail!("the decrypted bundle is not one kitbag wrote");
     }
     let mut bundle = Bundle::default();
     for (name, e) in wire.secrets {
@@ -388,6 +470,12 @@ pub fn open(bytes: &[u8], how: &Unlock) -> Result<Bundle> {
             bail!("the bundle names a variable that is not a valid name; refusing it");
         }
         bundle.entries.insert(name, e);
+    }
+    for t in wire.token_stores {
+        if !valid_label(&t.tool) || !valid_label(&t.kind) {
+            bail!("the bundle has a token store with an unusable tool name; refusing it");
+        }
+        bundle.add_token_store(t);
     }
     Ok(bundle)
 }
@@ -655,6 +743,81 @@ mod tests {
         assert!(ensure_gitignored(dir.path()).unwrap());
         let text = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         assert!(text.starts_with("target\n") && gitignore_covers(&text));
+    }
+
+    const FAKE_TOKEN: &str = "ya29.FAKE-gemini-access-unit-test";
+
+    fn store() -> TokenStore {
+        TokenStore {
+            tool: "gemini-cli".into(),
+            kind: crate::oauth_tokens::GEMINI_KIND.into(),
+            servers: [(
+                "linear".to_string(),
+                "https://mcp.example.com/mcp".to_string(),
+            )]
+            .into(),
+            content: Secret::new(&format!("{{\"t\":\"{FAKE_TOKEN}\"}}\n")),
+        }
+    }
+
+    fn pass() -> Unlock {
+        Unlock {
+            passphrase: Some(SecretString::from(FAKE_PASS.to_string())),
+            identities: vec![],
+        }
+    }
+
+    fn sealed_plain(plain: &str) -> Vec<u8> {
+        let enc = age::Encryptor::with_user_passphrase(SecretString::from(FAKE_PASS.to_string()));
+        let mut out = Vec::new();
+        let mut w = enc.wrap_output(&mut out).unwrap();
+        w.write_all(plain.as_bytes()).unwrap();
+        w.finish().unwrap();
+        out
+    }
+
+    #[test]
+    fn token_stores_round_trip_as_format_2_and_stay_encrypted() {
+        let mut b = sample();
+        b.add_token_store(store());
+        assert!(!format!("{b:?}").contains(FAKE_TOKEN));
+        let sealed = seal(
+            &b,
+            &Seal::Passphrase(SecretString::from(FAKE_PASS.to_string())),
+        )
+        .unwrap();
+        assert!(
+            !sealed
+                .windows(FAKE_TOKEN.len())
+                .any(|w| w == FAKE_TOKEN.as_bytes())
+        );
+        let back = open(&sealed, &pass()).unwrap();
+        assert_eq!(back, b);
+        assert_eq!(back.token_stores()[0].content, store().content);
+        // A second store for the same tool replaces the first.
+        b.add_token_store(store());
+        assert_eq!(b.token_stores().len(), 1);
+    }
+
+    #[test]
+    fn a_format_1_bundle_still_opens_and_bad_formats_are_refused() {
+        let old = sealed_plain(&format!(
+            "{{\"kitbag_secrets\":1,\"secrets\":{{\"GITHUB_TOKEN\":{{\"value\":\"{FAKE_VALUE}\",\"at\":\"mcp_servers.gh.env.GITHUB_TOKEN\"}}}}}}"
+        ));
+        let b = open(&old, &pass()).unwrap();
+        assert_eq!(b, sample());
+        assert!(b.token_stores().is_empty());
+        // Format 1 carries no token stores, and a later format is refused.
+        let bad = sealed_plain(
+            "{\"kitbag_secrets\":1,\"secrets\":{},\"token_stores\":[{\"tool\":\"gemini-cli\",\"kind\":\"k\",\"content\":\"x\"}]}",
+        );
+        assert!(open(&bad, &pass()).is_err());
+        let future = sealed_plain("{\"kitbag_secrets\":3,\"secrets\":{}}");
+        assert!(open(&future, &pass()).is_err());
+        let odd = sealed_plain(
+            "{\"kitbag_secrets\":2,\"secrets\":{},\"token_stores\":[{\"tool\":\"../x\",\"kind\":\"k\",\"content\":\"x\"}]}",
+        );
+        assert!(open(&odd, &pass()).is_err());
     }
 
     #[cfg(unix)]

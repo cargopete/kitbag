@@ -58,8 +58,10 @@ pub struct UnlockArgs {
 pub struct FromArgs {
     /// A secrets.age written by 'capture --include secrets': a local file, never a
     /// git URL, and not with --remote. It is decrypted in memory to check it and
-    /// list its variable names; no value is written into any tool config or
-    /// kept in the undo record
+    /// list its variable names; no variable's value is written into any tool
+    /// config or kept in the undo record. A Gemini CLI MCP OAuth token store in
+    /// it is written to Gemini CLI's documented token file only for gemini-cli,
+    /// only if that file is missing or empty, and outside the undo record
     #[arg(long, value_name = "PATH")]
     pub secrets_from: Option<PathBuf>,
     /// With --secrets-from: a file whose first line is the bundle's passphrase
@@ -185,10 +187,14 @@ pub fn unlock(a: &UnlockArgs, bytes: &[u8]) -> Result<Unlock> {
 /// The variable names of a bundle, with the places they were captured from.
 /// The values are decrypted in memory to get here and dropped before this returns.
 pub fn names_of(file: &Path, a: &UnlockArgs) -> Result<Vec<(String, String)>> {
+    Ok(open_bundle(file, a)?.names())
+}
+
+/// The bundle at `file`, decrypted in memory.
+fn open_bundle(file: &Path, a: &UnlockArgs) -> Result<Bundle> {
     let bytes = bundle::read_bundle(file)?;
     let u = unlock(a, &bytes)?;
-    let b = bundle::open(&bytes, &u).map_err(|e| anyhow::anyhow!("{}: {e:#}", file.display()))?;
-    Ok(b.names())
+    bundle::open(&bytes, &u).map_err(|e| anyhow::anyhow!("{}: {e:#}", file.display()))
 }
 
 /// `kitbag secrets list`.
@@ -204,7 +210,14 @@ pub fn list(file: Option<&Path>, a: &UnlockArgs) -> Result<i32> {
     } else {
         given.to_path_buf()
     };
-    let names = names_of(&path, a)?;
+    let b = open_bundle(&path, a)?;
+    let names = b.names();
+    let stores: Vec<String> = b
+        .token_stores()
+        .iter()
+        .map(crate::oauth_tokens::describe)
+        .collect();
+    drop(b);
     println!(
         "{} {} variable(s), names only; the values are never shown:",
         paint(BOLD, visible_line(&path.display().to_string())),
@@ -216,6 +229,15 @@ pub fn list(file: Option<&Path>, a: &UnlockArgs) -> Result<i32> {
             paint(GREEN, visible_line(&name)),
             paint(DIM, visible_line(&at))
         );
+    }
+    if !stores.is_empty() {
+        println!(
+            "{} token store(s), tool and location only; the tokens are never shown:",
+            stores.len()
+        );
+        for s in stores {
+            println!("  {}", paint(GREEN, visible_line(&s)));
+        }
     }
     Ok(0)
 }
@@ -229,10 +251,15 @@ fn looks_remote(src: &str) -> bool {
 }
 
 /// `apply --secrets-from`: open the bundle in memory to check it, and say
-/// which of the profile's variables it covers. Names only.
-pub fn apply_notes(from: &FromArgs, needed: &[String], git_source: bool) -> Result<Vec<Note>> {
+/// which of the profile's variables it covers (names only). Returns the
+/// bundle's MCP OAuth token stores too, for [`crate::oauth_tokens::plan`].
+pub fn apply_notes(
+    from: &FromArgs,
+    needed: &[String],
+    git_source: bool,
+) -> Result<(Vec<Note>, Vec<bundle::TokenStore>)> {
     let Some(path) = &from.secrets_from else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     if git_source {
         bail!(
@@ -244,7 +271,10 @@ pub fn apply_notes(from: &FromArgs, needed: &[String], git_source: bool) -> Resu
     {
         bail!("--secrets-from takes a file on this machine, not a git source");
     }
-    let held = names_of(path, &from.unlock_args())?;
+    let mut b = open_bundle(path, &from.unlock_args())?;
+    let stores = b.take_token_stores();
+    let held = b.names();
+    drop(b);
     let held: Vec<String> = held.into_iter().map(|(n, _)| n).collect();
     let covered: Vec<&String> = needed.iter().filter(|n| held.contains(n)).collect();
     let lacking: Vec<&String> = needed.iter().filter(|n| !held.contains(n)).collect();
@@ -253,9 +283,14 @@ pub fn apply_notes(from: &FromArgs, needed: &[String], git_source: bool) -> Resu
         level: Level::Info,
         target: "secrets".to_string(),
         message: format!(
-            "{} holds {} variable(s); it was decrypted in memory to check it, and no value was written into any tool or kept in the undo record. Tools get ${{VAR}} references as before: set the variables in your environment{}",
+            "{} holds {} variable(s); it was decrypted in memory to check it, and no {} was written into any tool or kept in the undo record. Tools get ${{VAR}} references as before: set the variables in your environment{}",
             path.display(),
             held.len(),
+            if stores.is_empty() {
+                "value"
+            } else {
+                "variable's value"
+            },
             if covered.is_empty() {
                 String::new()
             } else {
@@ -273,5 +308,5 @@ pub fn apply_notes(from: &FromArgs, needed: &[String], git_source: bool) -> Resu
             ),
         });
     }
-    Ok(notes)
+    Ok((notes, stores))
 }
