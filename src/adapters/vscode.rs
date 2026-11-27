@@ -8,9 +8,12 @@
 //!   `%APPDATA%\Code\User`, macOS `~/Library/Application Support/Code/User`,
 //!   Linux `~/.config/Code/User`; <https://code.visualstudio.com/docs/configure/settings>,
 //!   checked 2026-11-27). `User/profiles/<id>/` is never written: VS Code's
-//!   docs don't say how to tell which profile is active. A workspace's
-//!   `.vscode/settings.json` is not written either, so this target has user
-//!   scope only.
+//!   docs don't say how to tell which profile is active.
+//! * Project scope (#144): the same allow-listed keys, merged into the
+//!   project's `.vscode/settings.json` (the workspace settings file named on
+//!   the same page). Nothing else is read or written there: no extensions
+//!   (they are a user-level `code --install-extension` concern) and never
+//!   `User/settings.json`; at user scope `.vscode/settings.json` is not touched.
 //! * Extensions: `code --list-extensions` and `code --install-extension
 //!   publisher.extension[@version]`
 //!   (<https://code.visualstudio.com/docs/configure/command-line>). The
@@ -54,8 +57,16 @@ pub fn user_dir(env: &Env) -> PathBuf {
     }
 }
 
+/// The project's workspace settings file.
+fn workspace_file(env: &Env) -> PathBuf {
+    env.project.join(".vscode").join("settings.json")
+}
+
 fn settings_file(env: &Env) -> PathBuf {
-    user_dir(env).join("settings.json")
+    match env.scope {
+        Scope::Project => workspace_file(env),
+        Scope::User => user_dir(env).join("settings.json"),
+    }
 }
 
 impl Adapter for VsCode {
@@ -69,7 +80,7 @@ impl Adapter for VsCode {
         "https://code.visualstudio.com/docs/configure/settings"
     }
     fn scopes(&self) -> &'static [Scope] {
-        &[Scope::User]
+        &[Scope::User, Scope::Project]
     }
     fn support(&self, _scope: Scope) -> [(Feature, Support); 8] {
         Feature::ALL.map(|f| {
@@ -86,7 +97,10 @@ impl Adapter for VsCode {
     }
 
     fn detect(&self, env: &Env) -> bool {
-        user_dir(env).is_dir()
+        match env.scope {
+            Scope::Project => env.project.join(".vscode").is_dir(),
+            Scope::User => user_dir(env).is_dir(),
+        }
     }
 
     fn capture(&self, env: &Env) -> Result<Captured> {
@@ -116,6 +130,12 @@ impl Adapter for VsCode {
         }
         // Without VS Code's folder in this home there is nothing to read, and
         // `code` would list the extensions of whoever runs kitbag instead.
+        if env.scope == Scope::Project {
+            if !set.is_empty() {
+                cap.profile.editor.insert(ID.to_string(), set);
+            }
+            return Ok(cap);
+        }
         let cli = if self.detect(env) {
             editor::find_cli()
         } else {
@@ -177,6 +197,19 @@ impl Adapter for VsCode {
             );
         }
         merge_json_settings(work, &settings_file(env), &set.settings, opts, ID)?;
+        if env.scope == Scope::Project {
+            if !set.extensions.is_empty() {
+                work.info(
+                    ID,
+                    "extensions are not installed at project scope (they are a user-level `code --install-extension`); apply at user scope to install them",
+                );
+            }
+            work.info(
+                ID,
+                "project scope: only the allow-listed AI settings in .vscode/settings.json; User/settings.json is not touched",
+            );
+            return Ok(());
+        }
         if !set.extensions.is_empty() {
             let cli = editor::find_cli();
             let (plans, warning) = editor::plan_extensions(ID, &set, cli.as_deref());

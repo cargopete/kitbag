@@ -196,18 +196,63 @@ fn plan_again(p: &Profile, env: &kitbag::adapters::Env) -> kitbag::engine::Plan 
 }
 
 #[test]
-fn vscode_has_user_scope_only_and_never_touches_profile_folders() {
+fn project_scope_writes_only_workspace_settings_and_never_user_files_or_extensions() {
     let sb = Sandbox::empty();
     let p = manifest(PROFILE).unwrap();
-    let plan = plan(&p, &["vscode"], &sb.env(Scope::Project));
-    assert!(plan.changes.is_empty());
+    let env = sb.env(Scope::Project);
+    let plan = apply(&sb, &p, &["vscode"], &env);
+    let ws = std::path::Path::new(".vscode").join("settings.json");
+    let file = env.project.join(&ws);
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(v["chat.agent.enabled"], json!(true));
+    assert_eq!(v["chat.agent.maxRequests"], json!(40));
+    assert!(plan.extensions.is_empty(), "no extension at project scope");
     assert!(
-        plan.notes
-            .iter()
-            .any(|n| n.message.contains("no project scope")),
-        "{:?}",
-        plan.notes
+        !sb.path(VSCODE_SETTINGS).exists(),
+        "User/settings.json untouched"
     );
+    // Idempotent.
+    assert!(plan_again(&p, &env).changes.is_empty());
+    // User scope does not write the workspace file.
+    let sb2 = Sandbox::empty();
+    let env2 = sb2.env(Scope::User);
+    apply(&sb2, &p, &["vscode"], &env2);
+    assert!(!env2.project.join(&ws).exists());
+    assert!(sb2.path(VSCODE_SETTINGS).exists());
+}
+
+#[test]
+fn project_scope_merges_keeps_other_keys_and_captures_only_the_allow_list() {
+    let sb = Sandbox::empty();
+    let env = sb.env(Scope::Project);
+    let file = env.project.join(".vscode").join("settings.json");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(
+        &file,
+        "{\n  // mine\n  \"editor.fontSize\": 15,\n  \"chat.agent.enabled\": false,\n  \"chat.agent.maxRequests\": \"lots\"\n}\n",
+    )
+    .unwrap();
+    let r = capture(&["vscode"], &env);
+    let set = &r.profile.editor["vscode"];
+    assert_eq!(set.settings.len(), 1, "{:?}", set.settings);
+    assert_eq!(set.settings["chat.agent.enabled"], json!(false));
+    assert!(set.extensions.is_empty());
+    let mut p = manifest(PROFILE).unwrap();
+    p.editor.get_mut("vscode").unwrap().extensions.clear();
+    apply(&sb, &p, &["vscode"], &env);
+    let after = fs::read_to_string(&file).unwrap();
+    assert!(
+        after.contains("// mine") && after.contains("\"editor.fontSize\": 15"),
+        "{after}"
+    );
+    assert!(after.contains("\"chat.agent.enabled\": true"), "{after}");
+    assert!(after.contains("\"chat.agent.maxRequests\": 40"), "{after}");
+    assert!(!sb.path(VSCODE_SETTINGS).exists());
+}
+
+#[test]
+fn vscode_never_touches_profile_folders() {
+    let sb = Sandbox::empty();
     let user = plan_user_paths(&sb);
     assert!(
         user.iter()

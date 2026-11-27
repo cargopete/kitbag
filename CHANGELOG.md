@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The `vscode` editor target now works at project scope: the same allow-listed AI settings are captured from and merged into the project's `.vscode/settings.json` (created if missing), without touching `User/settings.json`, and no extension is listed or installed at project scope (#144)
+
 ## [0.1.11] - 2026-11-28
 
 ### Added

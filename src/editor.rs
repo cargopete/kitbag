@@ -5,7 +5,7 @@
 //! Settings Sync. What is carried, and where each item comes from (docs read
 //! 2026-11-27):
 //!
-//! * `[editor.vscode]`, VS Code's default profile at user scope only
+//! * `[editor.vscode]`, VS Code's default profile at user scope, and the project's `.vscode/settings.json` at project scope (settings only, #144)
 //!   (`User/settings.json`, <https://code.visualstudio.com/docs/configure/settings>;
 //!   `User/profiles/<id>/` is never touched, and kitbag cannot tell which
 //!   profile is active, see <https://code.visualstudio.com/docs/configure/profiles>):
