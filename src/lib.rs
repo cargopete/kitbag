@@ -21,6 +21,7 @@ pub mod mcp_tokens;
 pub mod memory;
 pub mod model;
 pub mod oauth;
+pub mod oauth_tokens;
 pub mod plan_fs;
 pub mod plugins;
 pub mod policy;

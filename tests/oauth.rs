@@ -643,7 +643,9 @@ fn two_tools_that_each_name_some_oauth_keys_make_one_server() {
 
 #[test]
 fn no_source_file_names_a_token_store() {
-    // The only mention is Hermes's list of credential files it never touches.
+    // The only mention is Hermes's list of credential files it never touches,
+    // and Gemini CLI's documented token file, carried only by the secrets
+    // bundle in oauth_tokens.rs (phase 2).
     let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
     while let Some(d) = stack.pop() {
         for e in fs::read_dir(d).unwrap() {
@@ -653,8 +655,15 @@ fn no_source_file_names_a_token_store() {
                 continue;
             }
             let text = fs::read_to_string(&p).unwrap();
-            for name in ["mcp-oauth-tokens", ".credentials.json", "keyring"] {
+            for name in [".credentials.json", "keyring"] {
                 assert!(!text.contains(name), "{} names {name}", p.display());
+            }
+            if !p.ends_with("oauth_tokens.rs") {
+                assert!(
+                    !text.contains("mcp-oauth-tokens"),
+                    "{} names mcp-oauth-tokens",
+                    p.display()
+                );
             }
             if !p.ends_with("hermes.rs") {
                 assert!(!text.contains("auth.json"), "{}", p.display());

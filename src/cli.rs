@@ -112,9 +112,10 @@ enum Cmd {
         /// Codex memories, Hermes MEMORY.md and USER.md); they can hold
         /// personal data, so read memory/ before sharing the profile. 'secrets':
         /// the values capture redacts (MCP env, headers, URLs, and a literal OAuth
-        /// client_secret) go, encrypted with age, to secrets.age next to
-        /// kitbag.toml, never into it; give --secrets-passphrase-file or
-        /// --secrets-recipient (or be asked for a passphrase on a terminal)
+        /// client_secret), and Gemini CLI's MCP OAuth token file, go, encrypted
+        /// with age, to secrets.age next to kitbag.toml, never into it; give
+        /// --secrets-passphrase-file or --secrets-recipient (or be asked for a
+        /// passphrase on a terminal)
         #[arg(long, value_enum, value_delimiter = ',', value_name = "WHAT")]
         include: Vec<Include>,
         #[command(flatten)]
@@ -1184,7 +1185,7 @@ fn cmd_capture(
     }
     // The values capture kept for the bundle move into one map; the copies on
     // the redactions are dropped now, and the map once secrets.age is written.
-    let secrets = if env.include_secrets {
+    let mut secrets = if env.include_secrets {
         let b = secrets_cmd::bundle_of(&r.redactions)?;
         for red in &mut r.redactions {
             red.value = None;
@@ -1193,6 +1194,16 @@ fn cmd_capture(
     } else {
         crate::bundle::Bundle::default()
     };
+    // MCP OAuth token stores with a documented path (#18): only with
+    // --include secrets, and only into the encrypted bundle.
+    if env.include_secrets {
+        let ids: Vec<&str> = targets.iter().map(|t| t.id()).collect();
+        let (stores, notes) = crate::oauth_tokens::capture(env, &ids, &r.profile)?;
+        r.notes.extend(notes);
+        for s in stores {
+            secrets.add_token_store(s);
+        }
+    }
     if !r.notes.is_empty() {
         println!();
         print_notes(&r.notes);
@@ -1209,12 +1220,23 @@ fn cmd_capture(
                 }
             );
         } else {
-            println!(
-                "\n{} value(s) go to {}, encrypted; they are not written to {} or shown",
-                secrets.len(),
-                crate::bundle::FILE,
-                MANIFEST
-            );
+            let values = secrets.len();
+            if values > 0 {
+                println!(
+                    "\n{} value(s) go to {}, encrypted; they are not written to {} or shown",
+                    values,
+                    crate::bundle::FILE,
+                    MANIFEST
+                );
+            }
+            for s in secrets.token_stores() {
+                println!(
+                    "\n{} goes to {}, encrypted; it is not written to {} or shown",
+                    visible_line(&crate::oauth_tokens::describe(s)),
+                    crate::bundle::FILE,
+                    MANIFEST
+                );
+            }
         }
     }
     if p.is_empty() {
@@ -1368,7 +1390,7 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
     }
     print_signins(
         plan,
-        "Sign in to these MCP servers after applying (kitbag never signs in or touches tokens):",
+        "Sign in to these MCP servers after applying (kitbag never signs in):",
     );
     if !plan.extensions.is_empty() {
         println!(
@@ -1615,18 +1637,33 @@ fn cmd_apply(
     let (resolved, profile) = load_source(src, t.path.as_deref(), t.fetch())?;
     let targets = select_targets(&t.to, &ctx.env, "to")?;
     let (profile, mut plan) = plan_apply(ctx, &resolved, profile, &targets, a, &BTreeSet::new())?;
+    let mut tokens = Vec::new();
     if let Some(from) = secrets_from {
         // Names only: the bundle is opened in memory to check it, and no
-        // value goes anywhere.
+        // variable's value goes anywhere. A token store is written only to
+        // its own tool's documented file, outside the undo record.
         let needed: Vec<String> = profile_io::required_env(&profile).into_keys().collect();
-        plan.notes
-            .extend(secrets_cmd::apply_notes(from, &needed, resolved.remote)?);
+        let (notes, stores) = secrets_cmd::apply_notes(from, &needed, resolved.remote)?;
+        plan.notes.extend(notes);
+        let ids: Vec<&str> = plan.targets.iter().map(String::as_str).collect();
+        let planned = crate::oauth_tokens::plan(stores, &profile, &ids, &ctx.env);
+        plan.notes.extend(planned.notes);
+        for s in planned.signins {
+            if !plan
+                .signins
+                .iter()
+                .any(|x| x.target == s.target && x.server == s.server)
+            {
+                plan.signins.push(s);
+            }
+        }
+        tokens = planned.pending;
     }
     if matches!(mode, Mode::Diff { .. }) {
         let found = tool_only_items(ctx, &profile, &plan, &targets)?;
         plan.notes.extend(tool_only_notes(&found, &ctx.env));
     }
-    present(ctx, &resolved, &profile, &plan, mode)
+    present(ctx, &resolved, &profile, &plan, mode, &tokens)
 }
 
 /// How many extensions the plan would install.
@@ -2400,12 +2437,28 @@ fn print_source_moved(resolved: &source::Resolved, before: &str) {
 
 /// Show a plan, then (in apply mode) confirm and write it, and record what
 /// the managed instructions look like afterwards for `kitbag status`.
+/// Write the token stores `apply --secrets-from` planned, after the files.
+/// They are not part of the undo transaction, so no token reaches the state
+/// directory. Messages name the tool and path only.
+fn write_token_stores(tokens: &[crate::oauth_tokens::Pending]) -> Result<()> {
+    for t in tokens {
+        crate::oauth_tokens::write(t)?;
+        println!(
+            "{} {} (not in the undo record)",
+            paint(GREEN, "Wrote"),
+            visible_line(&t.describe()),
+        );
+    }
+    Ok(())
+}
+
 fn present(
     ctx: &Ctx,
     resolved: &source::Resolved,
     profile: &Profile,
     plan: &Plan,
     mode: Mode,
+    tokens: &[crate::oauth_tokens::Pending],
 ) -> Result<i32> {
     let env = &ctx.env;
     let where_ = where_label(env);
@@ -2471,6 +2524,29 @@ fn present(
             print_held_back(plan);
         }
         print_plan_extras(plan, resolved.remote);
+        if let Mode::Apply {
+            yes,
+            dry_run: false,
+        } = mode
+            && !tokens.is_empty()
+        {
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    bail!(
+                        "not writing without confirmation in a non-interactive session; review with 'kitbag apply --dry-run', then pass --yes"
+                    );
+                }
+                println!();
+                if !confirm(&format!(
+                    "Write {} MCP OAuth token store(s) from the bundle? 'kitbag undo' does not remove them.",
+                    tokens.len()
+                ))? {
+                    println!("Aborted; nothing written.");
+                    return Ok(1);
+                }
+            }
+            write_token_stores(tokens)?;
+        }
         // The files already match, but the source moved: remember the commit
         // in a transaction with no files, so `status` stops calling it drift.
         if matches!(mode, Mode::Apply { dry_run: false, .. })
@@ -2547,11 +2623,17 @@ fn present(
                 }
                 println!();
                 let installs = pending_installs(plan);
-                let also = if installs > 0 {
+                let mut also = if installs > 0 {
                     format!(" and install {installs} extension(s) (they run code)")
                 } else {
                     String::new()
                 };
+                if !tokens.is_empty() {
+                    also.push_str(&format!(
+                        ", and {} MCP OAuth token store(s) from the bundle, which 'kitbag undo' does not remove",
+                        tokens.len()
+                    ));
+                }
                 if !confirm(&format!(
                     "Write {} file(s){also}? Backups are kept; 'kitbag undo' reverts the files.",
                     plan.changes.len()
@@ -2579,11 +2661,13 @@ fn present(
                         tx.entries.len(),
                         paint(BOLD, format!("kitbag undo {}", tx.id))
                     );
+                    write_token_stores(tokens)?;
                     print_signins(plan, "Next, sign in to these MCP servers:");
                 }
                 None => {
                     record(None)?;
                     println!("Nothing to write.");
+                    write_token_stores(tokens)?;
                 }
             }
             Ok(i32::from(!install_extensions(plan)))
@@ -3578,6 +3662,7 @@ fn cmd_sync(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, s: &SyncArgs) -
             yes: s.yes,
             dry_run: s.dry_run,
         },
+        &[],
     )?;
     Ok(if code == 0 && held { 1 } else { code })
 }

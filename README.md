@@ -512,10 +512,12 @@ Capture reads the same keys from each tool's own server entry, and only there: n
 token file, no credentials store is opened. Two tools that each name some of a server's OAuth
 settings make one server with both sets.
 
-**What is never carried.** Access tokens, refresh tokens, expiry times, and the files and
-keychain items that hold them (`~/.gemini/mcp-oauth-tokens.json`, `$CODEX_HOME/.credentials.json`,
-Hermes's `auth.json` and `mcp-tokens/`, Amp's and Claude Code's stored sign-ins) are not read,
-written, copied or printed, and kitbag never starts a sign-in. A client secret is a
+**What is never carried in the profile.** Access tokens, refresh tokens, expiry times, and the
+files and keychain items that hold them are never in `kitbag.toml`, never in git, never printed,
+and kitbag never starts a sign-in. Only Gemini CLI's documented token file can travel, encrypted
+and opt-in (see [MCP OAuth tokens in the secrets bundle](#mcp-oauth-tokens-in-the-secrets-bundle));
+the others (`$CODEX_HOME/.credentials.json`, Hermes's `auth.json` and `mcp-tokens/`, opencode's
+database, Amp's and Claude Code's stored sign-ins, any keychain) are not read. A client secret is a
 credential: it is carried only as an env reference (`${VAR}`, or the tool's own `{env:VAR}` /
 `${env:VAR}` spelling, which capture turns back into `${VAR}`). A literal secret found in a
 tool's config is left out of the profile with a warning that says so (never what it was), and a
@@ -539,10 +541,52 @@ is yours to do; across tools, sign in again.
 documents an in-app sign-in prompt and no keys. Amp's `amp.mcpServers` has no `oauth` keys (its
 docs show only `amp mcp oauth login` flags, whose use needs `--server-url` and more), so its
 existing `oauth` object is kept while the URL is unchanged, as before, and nothing is captured
-or listed. Claude Desktop's docs name none. Moving a *signed-in* session to another tool or
-machine is not done here; it waits for the encrypted secrets bundle's later slices (#9, #18). A
-*literal* `client_secret` that capture leaves out of the profile is carried in `secrets.age` when
-you pass `--include secrets` (see item 6 of [Secrets: the security model](#secrets-the-security-model)).
+or listed. Claude Desktop's docs name none. A *literal* `client_secret` that capture leaves out
+of the profile is carried in `secrets.age` when you pass `--include secrets` (see item 6 of
+[Secrets: the security model](#secrets-the-security-model)).
+
+#### MCP OAuth tokens in the secrets bundle
+
+A signed-in Gemini CLI session can move to another machine with the same opt-in flags as other
+secrets: `kitbag capture --include secrets` and `kitbag apply --secrets-from`. There is no other
+flag, and a bare capture never reads a token file.
+
+- **What.** Gemini CLI's MCP docs say tokens are "stored securely in
+  `~/.gemini/mcp-oauth-tokens.json`", refreshed when expired and validated before each
+  connection (read 2026-11-27). The docs give the path, not the layout, so kitbag carries the
+  file's bytes as they are, inside `secrets.age` only, tagged with the tool (`gemini-cli`) and the
+  names and URLs of the remote servers in Gemini CLI's config at capture. It never parses, merges,
+  validates or refreshes the tokens; Gemini CLI does that. Capture reads it only when you capture
+  from `gemini-cli`.
+- **Same tool only.** On apply the store is written only to `~/.gemini/mcp-oauth-tokens.json`,
+  and only when `gemini-cli` is among the targets. `--to cursor` (or any other tool) never writes
+  it and never copies it into another tool's files: sign in there.
+- **A changed URL means a new sign-in.** If a server recorded with the store now has another
+  URL, in the profile or in Gemini CLI's own `settings.json`, the store is not written; the plan
+  says which server moved and lists `/mcp auth <name>` for its servers.
+- **No clobbering.** The file is written only if it is missing or empty, `0600` on Unix (on
+  Windows it keeps the access of the folder it is in, like `secrets.age`). An existing, non-empty
+  token file is left as it is, since no documented layout says how to merge one; the plan says so
+  and lists the servers to sign in to.
+- **Not in undo, plan, diff or logs.** The file is written after the other files and outside
+  the undo transaction, so no token is in the plan, the diff, the output or the state directory.
+  The plan names only the tool and the path. **`kitbag undo` does not remove or revert it:** sign
+  out in Gemini CLI, or delete the file. `kitbag diff` and `kitbag inspect` never open the bundle.
+- **`kitbag secrets list`** names the store (`gemini-cli MCP OAuth tokens
+  (~/.gemini/mcp-oauth-tokens.json)`), never its content.
+- **Never from git, never to `--remote`.** As for every bundle, `--secrets-from` is refused for a
+  git source and with `--remote`; nothing is copied to the host.
+- A bundle with a token store is format 2; one without is still written as format 1, and both
+  open.
+
+**Skipped on purpose (official docs checked 2026-11-27); sign in again with the checklist:**
+Codex's config reference names `mcp_oauth_credentials_store = auto | file | keyring` but no
+file path or layout, so its store isn't read (`codex mcp login <name>`). Claude Code's MCP docs
+say tokens are "stored securely and refreshed automatically" and name no path; its
+`~/.claude/.credentials.json` holds *login* credentials and is never touched (`/mcp` or `claude
+mcp login <name>`). opencode keeps credentials in a SQLite database its docs say not to edit
+(`opencode mcp auth <name>`). Amp keeps sign-ins on ampcode.com. Cursor, Hermes, Zed, Copilot
+and Claude Desktop name no local token file. No OS keychain is read.
 
 ### Rules: `rules/<name>.md`
 
@@ -1641,16 +1685,18 @@ after the plugin directory is gone.
      keep getting `${VAR}` references, as before, and you set the variables in your environment.
      `--secrets-from` is a local file only: it is refused for a git source (a profile you didn't
      write could name any variable) and with `--remote` (nothing is sent to the host).
-   - **`kitbag secrets list [FILE|DIR]`** prints variable names and capture locations, never
-     values.
+   - **`kitbag secrets list [FILE|DIR]`** prints variable names and capture locations, and any
+     MCP OAuth token store by tool and path, never values.
    - **`kitbag doctor SOURCE`** fails when the profile directory holds a plaintext secrets file
      (`secrets.json`, `secrets.toml`, `secrets.decrypted`, `.env` ...), when `secrets.age` isn't an
      age file, or when `kitbag.toml` itself holds a literal secret, and warns when a git
      repository doesn't ignore `secrets.age`.
    - **Not done yet (#9 stays open):** resolving bundle values into tools that can't read env
      vars (that needs a way to do it without the value reaching the undo record), an OS keychain
-     or helper, `secrets set` / `rotate`, committing the encrypted file, opening a bundle on a
-     `--remote` host, and OAuth tokens (#18).
+     or helper, `secrets set` / `rotate`, committing the encrypted file, and opening a bundle on
+     a `--remote` host. Gemini CLI's MCP OAuth token file is carried (#18, see
+     [MCP OAuth tokens in the secrets bundle](#mcp-oauth-tokens-in-the-secrets-bundle)); other
+     tools' tokens are not.
    - **Skipped on purpose (checked 2026-11-27).** kitbag doesn't read the OS keychain, shell
      profiles, or tools' undocumented auth files (Codex's `~/.codex/auth.json`, Hermes's `.env`
      and `auth.json`, the Claude Code and Cursor sign-ins): only values it already redacts from
