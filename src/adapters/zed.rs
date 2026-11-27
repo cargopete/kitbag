@@ -22,6 +22,9 @@
 //!   tool's skill folder and loads project skills only from a trusted worktree.
 //!   The folder is also read by other tools (Amp writes its project skills to
 //!   the same one), but Zed names no folder of its own, so kitbag writes there.
+//! * Extensions, by reference: the ids in `auto_install_extensions` of the user
+//!   `settings.json`, which Zed installs from its gallery itself; see
+//!   `crate::plugins`.
 //! * Rules and commands: Zed's docs describe no rules file or commands folder
 //!   (the Rules Library is a database inside Zed that is being replaced by
 //!   skills and the personal `AGENTS.md`, and kitbag never reads or writes it),
@@ -213,6 +216,9 @@ impl Adapter for Zed {
                 s.disabled = def.get("enabled") == Some(&Value::Bool(false));
                 import_server(&mut cap, ID, name, s, false);
             }
+            if env.scope == Scope::User {
+                crate::plugins::capture_zed(&mut cap, &doc, "settings.json");
+            }
         }
 
         let instructions = instructions_file(env, |p| p.is_file());
@@ -397,6 +403,7 @@ impl Adapter for Zed {
                 "kitbag doesn't manage Zed settings; settings.zed was not applied",
             );
         }
+        crate::plugins::apply_zed(profile, env, opts, work, &file)?;
         Ok(())
     }
 }

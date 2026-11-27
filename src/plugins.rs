@@ -17,8 +17,9 @@
 //!
 //! The ids are the tool's own (`name@marketplace`, as Claude Code keys
 //! `enabledPlugins`; an npm package spec for opencode) and are never
-//! translated to another tool's. Claude Code, opencode and Antigravity are
-//! carried ([`TARGETS`]); the other systems are documented skips, see below.
+//! translated to another tool's. Claude Code, Copilot CLI, Codex, opencode,
+//! Antigravity, Zed and Grok Build are carried ([`TARGETS`]); the other systems
+//! are documented skips, see below.
 //!
 //! Claude Code, from its docs (checked 2026-11-27):
 //!
@@ -93,9 +94,55 @@
 //!   repositories); no manifest lists them. Cline: SDK code, loaded by
 //!   `extensions` / `pluginPaths` or `cline plugin install`; no settings file.
 //!
-//! Documented but not carried yet (#12): Codex (`[plugins."name@marketplace"]`
-//! and `[marketplaces.<name>]` in `config.toml`) and Copilot CLI
-//! (`enabledPlugins` and `extraKnownMarketplaces` in `~/.copilot/settings.json`).
+//! * Cursor: plugins are installed from the app's Customize page and team
+//!   marketplaces are set in the dashboard; `~/.cursor/plugins/local` holds the
+//!   plugin code. No file or key lists one by reference.
+//!   <https://cursor.com/docs/plugins>, <https://cursor.com/docs/reference/plugins>
+//! * Hermes Agent: `hermes plugins install` clones into `~/.hermes/plugins/`
+//!   and records the source in `.install-metadata.json` inside the install;
+//!   `plugins.enabled` lists names of installed plugins and `hermes-pack.yaml` is
+//!   read only by `hermes plugins pack install`. No layout without the install.
+//!   <https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins>
+//! * Windsurf (MCP "plugins" are MCP servers, the JetBrains plugin is an editor
+//!   integration), Roo Code (its marketplace installs MCP servers and modes) and
+//!   Continue (hub blocks are configuration): no plugin system to carry.
+//!
+//! The same pages, read on 2026-11-27, for the systems that are carried:
+//!
+//! * Copilot CLI: `enabledPlugins` (`name@marketplace`: bool) and
+//!   `extraKnownMarketplaces` (`source` of `github` (`repo`, `ref`, `path`), `git`
+//!   (`url`, `ref`, `path`) or `directory` (`path`), and `autoUpdate`, honoured
+//!   only in user settings) in `~/.copilot/settings.json` (`$COPILOT_HOME`) and
+//!   the repository's `.github/copilot/settings.json`. The same shapes as Claude
+//!   Code's, so [`capture`] and [`apply`] serve both. Built-in marketplace:
+//!   `awesome-copilot`. VS Code reads the repository file too (workspace plugin
+//!   recommendations and enablement). Not carried yet (#12): VS Code's own user
+//!   settings `chat.plugins.marketplaces` and `chat.pluginLocations`
+//!   (Experimental; <https://code.visualstudio.com/docs/agents/reference/agent-plugin-reference>).
+//!   <https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference>,
+//!   <https://docs.github.com/en/copilot/reference/enterprise-managed-settings-reference>
+//! * Codex: `[marketplaces.<name>]` (`source_type` `git` | `local`, `source`,
+//!   `ref`, `sparse_paths`) and `[plugins."<name>@<marketplace>"]` (`enabled`) in
+//!   `config.toml`, in user, system, cloud-managed or trusted-project config. The
+//!   profile keeps Codex's own keys in the marketplace's `source` table. When
+//!   Codex fetches a configured marketplace by itself is UNVERIFIED (its docs
+//!   say it can install or refresh configured plugins "during marketplace
+//!   refresh").
+//!   <https://learn.chatgpt.com/docs/config-file/config-reference>,
+//!   <https://developers.openai.com/plugins/build/plugins>
+//! * Zed: `auto_install_extensions` (`{"id": true | false}`) in `settings.json`;
+//!   written at user scope only (a project's `.zed/settings.json` is not
+//!   documented for it: UNVERIFIED).
+//!   <https://zed.dev/docs/reference/all-settings>,
+//!   <https://zed.dev/docs/extensions/installing-extensions>
+//! * Grok Build: extra plugin folders under `[plugins] paths` of
+//!   `~/.grok/config.toml`. Whether `~` is expanded, what a relative path is
+//!   relative to, and the shape of `[[marketplace.sources]]` are not documented
+//!   (UNVERIFIED), so kitbag writes absolute folders at user scope only and no
+//!   marketplace sources. Grok Build reads Claude Code's marketplaces and plugins
+//!   itself.
+//!   <https://docs.x.ai/build/features/skills-plugins-marketplaces>,
+//!   <https://docs.x.ai/build/settings/reference>
 //!
 //! * <https://code.claude.com/docs/en/plugins/install>
 //! * <https://code.claude.com/docs/en/plugins/loading>
@@ -108,13 +155,58 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use toml_edit::Item;
 
 use crate::adapters::{ApplyOptions, Captured, Env, Scope, Work};
 use crate::edit::json::JsonDoc;
 use crate::model::{Profile, is_valid_name, targeting_issues, targeting_skip_reason};
 
 /// The targets that have a plugin section.
-pub const TARGETS: &[&str] = &["claude-code", "opencode", "antigravity"];
+pub const TARGETS: &[&str] = &[
+    "claude-code",
+    "copilot",
+    "codex",
+    "opencode",
+    "antigravity",
+    "zed",
+    "grok-build",
+];
+
+/// Targets whose plugins are `name@marketplace` ids with marketplaces.
+fn has_marketplaces(target: &str) -> bool {
+    matches!(target, "claude-code" | "copilot" | "codex")
+}
+
+/// Targets whose plugin ids are folders on this machine.
+pub fn lists_folders(target: &str) -> bool {
+    matches!(target, "antigravity" | "grok-build")
+}
+
+/// The marketplace source kinds a `name@marketplace` target's settings take.
+fn source_kinds(target: &str) -> &'static [&'static str] {
+    match target {
+        "copilot" => &["github", "git", "directory"],
+        _ => &["github", "git", "url", "file", "directory"],
+    }
+}
+
+/// The marketplace each tool ships built in, which a settings file needn't declare.
+fn builtin_marketplace(target: &str) -> &'static str {
+    match target {
+        "copilot" => "awesome-copilot",
+        "codex" => "openai-curated",
+        _ => "claude-plugins-official",
+    }
+}
+
+/// How to register a marketplace by hand, for the plan.
+fn add_marketplace_hint(target: &str) -> &'static str {
+    match target {
+        "copilot" => "copilot plugin marketplace add",
+        "codex" => "codex plugin marketplace add",
+        _ => "claude plugin marketplace add",
+    }
+}
 
 /// Origins in a plugin id (`name@origin`) that are not marketplaces: a plugin
 /// loaded for one session, from a skills directory or synced from claude.ai.
@@ -210,6 +302,14 @@ impl Plugin {
 /// `github acme/tools, ref v1.2.0`: where a marketplace comes from, for plans.
 pub fn describe_source(src: &Map<String, Value>) -> String {
     let get = |k: &str| src.get(k).and_then(Value::as_str);
+    // Codex's own shape: `source_type = "git" | "local"` and `source`.
+    if let Some(kind) = get("source_type") {
+        let mut out = format!("{kind} {}", get("source").unwrap_or("?"));
+        if let Some(r) = get("ref") {
+            out.push_str(&format!(", ref {r}"));
+        }
+        return out;
+    }
     let kind = get("source").unwrap_or("?");
     let place = get("repo")
         .or_else(|| get("url"))
@@ -246,8 +346,10 @@ pub fn describe_plugin(id: &str, p: &Plugin) -> String {
 /// What a plan, a withheld-list or `inspect` calls a plugin of `target`: for
 /// Antigravity the id is the path of a plugin folder.
 pub fn describe(target: &str, id: &str, p: &Plugin) -> String {
-    if target == "antigravity" {
+    if lists_folders(target) {
         format!("plugin folder '{}'", id.escape_default())
+    } else if target == "zed" {
+        format!("Zed extension '{}'", id.escape_default())
     } else {
         describe_plugin(id, p)
     }
@@ -317,6 +419,93 @@ fn source_issues(src: &Map<String, Value>) -> Vec<String> {
     out
 }
 
+/// What is wrong with a marketplace source in a `target` section: the shapes
+/// differ (Claude Code's and Copilot CLI's `source` objects, Codex's
+/// `source_type` / `source`).
+fn marketplace_issues(target: &str, src: &Map<String, Value>) -> Vec<String> {
+    if target == "codex" {
+        return codex_source_issues(src);
+    }
+    let mut out = source_issues(src);
+    let kind = src.get("source").and_then(Value::as_str).unwrap_or("");
+    if out.is_empty() && !source_kinds(target).contains(&kind) {
+        out.push(format!(
+            "a '{kind}' source isn't one {target} reads in its settings; they are {}",
+            source_kinds(target).join(", ")
+        ));
+    }
+    out
+}
+
+/// What is wrong with a Codex `[marketplaces.<name>]` source (`source_type`,
+/// `source`, `ref`, `sparse_paths`).
+fn codex_source_issues(src: &Map<String, Value>) -> Vec<String> {
+    let mut out = Vec::new();
+    let kind = src.get("source_type").and_then(Value::as_str).unwrap_or("");
+    if !matches!(kind, "git" | "local") {
+        out.push("source_type must be git or local".to_string());
+        return out;
+    }
+    let plain = |v: &Value| {
+        v.as_str()
+            .is_some_and(|s| !s.trim().is_empty() && !has_control(s) && s.len() <= 1024)
+    };
+    for (k, v) in src {
+        match k.as_str() {
+            "source_type" => {}
+            "source" | "ref" => {
+                if !plain(v) {
+                    out.push(format!("{k} must be a non-empty string"));
+                }
+            }
+            "sparse_paths" if kind == "git" => {
+                if !v
+                    .as_array()
+                    .is_some_and(|a| !a.is_empty() && a.iter().all(plain))
+                {
+                    out.push("sparse_paths must be a list of paths".to_string());
+                }
+            }
+            other => out.push(format!(
+                "{other} is not a key of a '{kind}' marketplace; they are source_type, source{}",
+                if kind == "git" {
+                    ", ref and sparse_paths"
+                } else {
+                    ""
+                }
+            )),
+        }
+    }
+    match src.get("source").and_then(Value::as_str) {
+        None => out.push("a marketplace needs a source".to_string()),
+        Some(v) if kind == "local" && !(is_absolute_path(v) || v.starts_with("~/")) => out.push(
+            "a local source must be an absolute path, or ~/... for a folder in your home directory"
+                .to_string(),
+        ),
+        Some(v) if kind == "git" && crate::source::strip_url_credentials(v) != v => out.push(
+            "source has credentials in it; kitbag doesn't store secrets, so use a URL without them and let git's credential helper sign in"
+                .to_string(),
+        ),
+        Some(_) => {}
+    }
+    out
+}
+
+/// What is wrong with a Grok Build plugin folder: it has to be a path that
+/// means the same wherever it is read, so absolute or `~/...`.
+fn grok_path_issue(path: &str) -> Option<String> {
+    if path.trim().is_empty() || has_control(path) || path.len() > 1024 {
+        return Some("a plugin folder path must be a short, plain, non-empty path".into());
+    }
+    if !(is_absolute_path(path) || path.starts_with("~/")) {
+        return Some(format!(
+            "'{}' must be an absolute path, or ~/... for a folder in your home directory (Grok Build's docs don't say what a relative path is read from)",
+            path.escape_default()
+        ));
+    }
+    None
+}
+
 fn is_repo(v: &str) -> bool {
     let ok = |s: &str| {
         !s.is_empty()
@@ -335,7 +524,7 @@ fn name_issue(what: &str, name: &str) -> Option<String> {
     }
     if RESERVED_ORIGINS.contains(&name) {
         return Some(format!(
-            "{what} '{name}' is reserved by Claude Code; it isn't a marketplace"
+            "{what} '{name}' is reserved; it isn't a marketplace"
         ));
     }
     None
@@ -376,24 +565,34 @@ pub fn validate(plugins: &mut BTreeMap<String, PluginSet>) -> (Vec<String>, Vec<
             ));
         }
         let at = format!("plugins.{target}");
-        if target == "opencode" && !set.marketplaces.is_empty() {
+        if !has_marketplaces(&target) && !set.marketplaces.is_empty() {
             issues.push(format!(
-                "{at}: opencode has no plugin marketplaces; list its npm packages under [{at}.enabled]"
-            ));
-        }
-        if target == "antigravity" && !set.marketplaces.is_empty() {
-            issues.push(format!(
-                "{at}: Antigravity has no marketplace setting kitbag can write; list local plugin folders under [{at}.enabled]"
+                "{at}: {}",
+                match target.as_str() {
+                    "opencode" =>
+                        "opencode has no plugin marketplaces; list its npm packages under [plugins.opencode.enabled]",
+                    "antigravity" =>
+                        "Antigravity has no marketplace setting kitbag can write; list local plugin folders under [plugins.antigravity.enabled]",
+                    "zed" =>
+                        "Zed installs extensions from its gallery; list them under [plugins.zed.enabled]",
+                    _ =>
+                        "Grok Build's marketplace sources have no documented layout kitbag can write; list local plugin folders under [plugins.grok-build.enabled]",
+                }
             ));
         }
         for (name, m) in &mut set.marketplaces {
             let label = format!("{at}.marketplaces.{}", name.escape_default());
             issues.extend(name_issue("marketplace", name).map(|i| format!("{at}: {i}")));
             issues.extend(
-                source_issues(&m.source)
+                marketplace_issues(&target, &m.source)
                     .into_iter()
                     .map(|i| format!("{label}: {i}")),
             );
+            if m.auto_update.is_some() && !matches!(target.as_str(), "claude-code" | "copilot") {
+                issues.push(format!(
+                    "{label}: autoUpdate is a Claude Code and Copilot CLI setting, not used for {target}"
+                ));
+            }
             targeting(
                 &label,
                 &mut m.targets,
@@ -411,67 +610,66 @@ pub fn validate(plugins: &mut BTreeMap<String, PluginSet>) -> (Vec<String>, Vec<
                     "{label}: include_only and exclude are Antigravity plugins.json fields, not used for {target}"
                 ));
             }
-            if target == "antigravity" {
-                issues.extend(antigravity_path_issue(id).map(|i| format!("{label}: {i}")));
-                if p.version.is_some() {
-                    issues.push(format!(
-                        "{label}: version is not used for Antigravity; a plugin folder has no version in plugins.json"
-                    ));
-                }
-                for (key, list) in [("include_only", &p.include_only), ("exclude", &p.exclude)] {
-                    if list
-                        .iter()
-                        .any(|v| v.trim().is_empty() || has_control(v) || v.len() > 256)
+            if target != "claude-code" && p.version.is_some() {
+                issues.push(format!(
+                    "{label}: version is not used for {target}{}",
+                    match target.as_str() {
+                        "opencode" => "; pin the package in its id (name@1.2.0)",
+                        "antigravity" | "grok-build" => "; a plugin folder has no version",
+                        "codex" | "copilot" => "; pin the marketplace with its ref instead",
+                        _ => "",
+                    }
+                ));
+            }
+            match target.as_str() {
+                "antigravity" => {
+                    issues.extend(antigravity_path_issue(id).map(|i| format!("{label}: {i}")));
+                    for (key, list) in [("include_only", &p.include_only), ("exclude", &p.exclude)]
                     {
+                        if list
+                            .iter()
+                            .any(|v| v.trim().is_empty() || has_control(v) || v.len() > 256)
+                        {
+                            issues.push(format!(
+                                "{label}: {key} must be short plain names (a folder name or a relative path)"
+                            ));
+                        }
+                    }
+                }
+                "grok-build" => {
+                    issues.extend(grok_path_issue(id).map(|i| format!("{label}: {i}")));
+                }
+                "opencode" => {
+                    issues.extend(opencode_spec_issue(id).map(|i| format!("{label}: {i}")));
+                }
+                "zed" => {
+                    if !is_valid_name(id) || id.len() > 128 {
                         issues.push(format!(
-                            "{label}: {key} must be short plain names (a folder name or a relative path)"
+                            "{label}: a Zed extension id may only contain letters, digits, '.', '_' and '-'"
                         ));
                     }
                 }
-                targeting(
-                    &label,
-                    &mut p.targets,
-                    &mut p.disabled_on,
-                    "plugin",
-                    &valid,
-                    &mut issues,
-                    &mut warnings,
-                );
-                continue;
-            }
-            if target == "opencode" {
-                issues.extend(opencode_spec_issue(id).map(|i| format!("{label}: {i}")));
-                if p.version.is_some() {
-                    issues.push(format!(
-                        "{label}: version is not used for opencode; pin the package in its id (name@1.2.0)"
-                    ));
-                }
-                targeting(
-                    &label,
-                    &mut p.targets,
-                    &mut p.disabled_on,
-                    "plugin",
-                    &valid,
-                    &mut issues,
-                    &mut warnings,
-                );
-                continue;
-            }
-            match split_id(id) {
-                Some((name, market)) => {
-                    if !is_valid_name(name) {
-                        issues.push(format!("{label}: the plugin name '{}' may only contain letters, digits, '.', '_' and '-'", name.escape_default()));
+                _ => {
+                    match split_id(id) {
+                        Some((name, market)) => {
+                            if !is_valid_name(name) {
+                                issues.push(format!("{label}: the plugin name '{}' may only contain letters, digits, '.', '_' and '-'", name.escape_default()));
+                            }
+                            issues.extend(
+                                name_issue("marketplace", market).map(|i| format!("{label}: {i}")),
+                            );
+                        }
+                        None => issues.push(format!(
+                            "{label}: a plugin id is <name>@<marketplace>, as {target} writes it"
+                        )),
                     }
-                    issues.extend(name_issue("marketplace", market).map(|i| format!("{label}: {i}")));
+                    if let Some(v) = &p.version
+                        && target == "claude-code"
+                        && (v.trim().is_empty() || has_control(v) || v.len() > 128)
+                    {
+                        issues.push(format!("{label}: version must be a short plain string"));
+                    }
                 }
-                None => issues.push(format!(
-                    "{label}: a plugin id is <name>@<marketplace>, as Claude Code writes it in enabledPlugins"
-                )),
-            }
-            if let Some(v) = &p.version
-                && (v.trim().is_empty() || has_control(v) || v.len() > 128)
-            {
-                issues.push(format!("{label}: version must be a short plain string"));
             }
             targeting(
                 &label,
@@ -579,7 +777,7 @@ pub fn capture(
     let mut set = PluginSet::default();
     if let Some(Value::Object(declared)) = settings.get(MARKETPLACES_KEY) {
         for (name, entry) in declared {
-            match marketplace_from_settings(name, entry, cap) {
+            match marketplace_from_settings(target, name, entry, cap) {
                 Ok(m) => {
                     set.marketplaces.insert(name.clone(), m);
                 }
@@ -668,11 +866,12 @@ pub fn capture(
     }
     for id in set.enabled.keys() {
         let market = split_id(id).map_or("", |(_, m)| m);
-        if !set.marketplaces.contains_key(market) && market != "claude-plugins-official" {
+        if !set.marketplaces.contains_key(market) && market != builtin_marketplace(target) {
             cap.info(
                 target,
                 format!(
-                    "plugin '{id}': its marketplace '{market}' is not declared in this settings file, so only the plugin is carried; add the marketplace on the other machine with claude plugin marketplace add"
+                    "plugin '{id}': its marketplace '{market}' is not declared in this settings file, so only the plugin is carried; add the marketplace on the other machine with {}",
+                    add_marketplace_hint(target)
                 ),
             );
         }
@@ -709,6 +908,7 @@ pub fn capture(
 }
 
 fn marketplace_from_settings(
+    target: &str,
     name: &str,
     entry: &Value,
     cap: &Captured,
@@ -717,7 +917,7 @@ fn marketplace_from_settings(
         return Err("it has no source".into());
     };
     let kind = src.get("source").and_then(Value::as_str).unwrap_or("");
-    if !matches!(kind, "github" | "git" | "url" | "file" | "directory") {
+    if !source_kinds(target).contains(&kind) {
         return Err(format!(
             "a '{}' source isn't one kitbag carries",
             kind.escape_default()
@@ -735,7 +935,7 @@ fn marketplace_from_settings(
     {
         *p = crate::portable::to_home_relative(p, home, *os);
     }
-    let issues = source_issues(&src);
+    let issues = marketplace_issues(target, &src);
     if !issues.is_empty() {
         return Err(issues.join("; "));
     }
@@ -753,21 +953,15 @@ fn marketplace_from_settings(
 // ---------------------------------------------------------------------------
 // Apply
 
-/// Add the profile's marketplaces and plugins for `target` to the Claude Code
-/// settings file at `path`: `extraKnownMarketplaces` entries and
-/// `enabledPlugins` keys, nothing else. An entry that is already there is left
-/// alone; a differing one is replaced (not with `--no-overwrite`).
-pub fn apply(
-    profile: &Profile,
-    env: &Env,
-    opts: &ApplyOptions,
-    work: &mut Work,
-    path: &Path,
-    target: &str,
-) -> Result<()> {
-    let Some(set) = profile.plugins.get(target) else {
-        return Ok(());
-    };
+/// The marketplaces and plugins of a set that apply to a target.
+type Applicable<'a> = (
+    Vec<(&'a String, &'a Marketplace)>,
+    Vec<(&'a String, &'a Plugin)>,
+);
+
+/// The marketplaces and plugins of `set` that apply to `target`; the others
+/// are listed in the plan as disabled in the profile.
+fn applicable<'a>(set: &'a PluginSet, target: &str, work: &mut Work) -> Applicable<'a> {
     let mut markets = Vec::new();
     let mut plugins = Vec::new();
     for (name, m) in &set.marketplaces {
@@ -789,11 +983,30 @@ pub fn apply(
                 target,
                 format!(
                     "{} skipped: disabled in profile ({why})",
-                    describe_plugin(id, p)
+                    describe(target, id, p)
                 ),
             ),
         }
     }
+    (markets, plugins)
+}
+
+/// Add the profile's marketplaces and plugins for `target` to the Claude Code
+/// or Copilot CLI settings file at `path`: `extraKnownMarketplaces` entries and
+/// `enabledPlugins` keys, nothing else. An entry that is already there is left
+/// alone; a differing one is replaced (not with `--no-overwrite`).
+pub fn apply(
+    profile: &Profile,
+    env: &Env,
+    opts: &ApplyOptions,
+    work: &mut Work,
+    path: &Path,
+    target: &str,
+) -> Result<()> {
+    let Some(set) = profile.plugins.get(target) else {
+        return Ok(());
+    };
+    let (markets, plugins) = applicable(set, target, work);
     if markets.is_empty() && plugins.is_empty() {
         return Ok(());
     }
@@ -881,12 +1094,25 @@ pub fn apply(
     for d in added_markets.iter().chain(&added_plugins) {
         work.info(target, format!("{d} added to {file}"));
     }
-    match env.scope {
-        Scope::User => work.warn(
+    let who = if target == "copilot" {
+        "Copilot CLI"
+    } else {
+        "Claude Code"
+    };
+    match (target, env.scope) {
+        ("copilot", Scope::User) => work.warn(
             target,
-            "kitbag doesn't download plugins. Claude Code fetches the marketplaces and plugins above itself the next time it starts (plugins can bundle hooks, MCP servers and commands); to install now, run `claude plugin marketplace add` and `claude plugin install <name>@<marketplace>`",
+            "kitbag doesn't download plugins. Copilot CLI installs the enabledPlugins entries above itself (declarative plugin auto-install) and fetches the marketplaces; plugins can bundle hooks, MCP servers and agents. To install now, run `copilot plugin marketplace add` and `copilot plugin install <name>@<marketplace>`",
         ),
-        Scope::Project => work.warn(
+        ("copilot", Scope::Project) => work.warn(
+            target,
+            "kitbag doesn't download plugins. .github/copilot/settings.json is a repository default: Copilot CLI and Copilot in the cloud enable these plugins for everyone who works in the repository, and a person can turn one off with `false` in .github/copilot/settings.local.json. VS Code reads the file for its workspace plugin recommendations. An autoUpdate on a marketplace there is ignored; only user settings turn auto-update on",
+        ),
+        (_, Scope::User) => work.warn(
+            target,
+            format!("kitbag doesn't download plugins. {who} fetches the marketplaces and plugins above itself the next time it starts (plugins can bundle hooks, MCP servers and commands); to install now, run `claude plugin marketplace add` and `claude plugin install <name>@<marketplace>`"),
+        ),
+        (_, Scope::Project) => work.warn(
             target,
             "still to do by hand: a plugin enabled in .claude/settings.json isn't installed by that. Each person runs `claude plugin install <name>@<marketplace> --scope project` once per clone, and the project's marketplaces are registered only after the folder is trusted",
         ),
@@ -1624,6 +1850,580 @@ pub fn apply_antigravity(
 }
 
 // ---------------------------------------------------------------------------
+// Codex
+
+/// A Codex `[marketplaces.<name>]` table as a profile marketplace: the keys
+/// Codex stores, `source_type`, `source`, `ref` and `sparse_paths`, as they are.
+fn codex_marketplace(
+    name: &str,
+    entry: &Value,
+    cap: &Captured,
+) -> std::result::Result<Marketplace, String> {
+    let Some(table) = entry.as_object() else {
+        return Err("it is not a table".into());
+    };
+    let mut src = Map::new();
+    for key in ["source_type", "source", "ref", "sparse_paths"] {
+        if let Some(v) = table.get(key) {
+            src.insert(key.to_string(), v.clone());
+        }
+    }
+    if let Some((home, os)) = &cap.home
+        && src.get("source_type").and_then(Value::as_str) == Some("local")
+        && let Some(Value::String(p)) = src.get_mut("source")
+    {
+        *p = crate::portable::to_home_relative(p, home, *os);
+    }
+    let issues = codex_source_issues(&src);
+    if !issues.is_empty() {
+        return Err(issues.join("; "));
+    }
+    if let Some(i) = name_issue("marketplace", name) {
+        return Err(i);
+    }
+    Ok(Marketplace {
+        source: src,
+        auto_update: None,
+        targets: None,
+        disabled_on: Vec::new(),
+    })
+}
+
+/// Read the `[marketplaces.*]` and `[plugins.*]` tables of a Codex
+/// `config.toml` (as JSON) into the profile, by reference. `file` is how the
+/// plan names the file.
+pub fn capture_codex(cap: &mut Captured, doc: &Value, file: &str) {
+    let target = "codex";
+    let mut set = PluginSet::default();
+    if let Some(Value::Object(declared)) = doc.get("marketplaces") {
+        for (name, entry) in declared {
+            match codex_marketplace(name, entry, cap) {
+                Ok(m) => {
+                    set.marketplaces.insert(name.clone(), m);
+                }
+                Err(why) => cap.info(
+                    target,
+                    format!(
+                        "plugin marketplace '{}' not captured: {why}",
+                        name.escape_default()
+                    ),
+                ),
+            }
+        }
+    }
+    let (mut off, mut no_switch, mut with_servers) = (0, 0, 0);
+    if let Some(Value::Object(configured)) = doc.get("plugins") {
+        for (id, v) in configured {
+            // `[plugins._default]` is the default for every plugin, not one.
+            if id == "_default" {
+                continue;
+            }
+            let ok_id = split_id(id).is_some_and(|(n, m)| {
+                is_valid_name(n) && is_valid_name(m) && name_issue("marketplace", m).is_none()
+            });
+            if !ok_id {
+                cap.info(
+                    target,
+                    format!(
+                        "plugin '{}' not captured: not a <name>@<marketplace> id kitbag writes to a profile",
+                        id.escape_default()
+                    ),
+                );
+                continue;
+            }
+            if v.get("mcp_servers").is_some() {
+                with_servers += 1;
+            }
+            match v.get("enabled").and_then(Value::as_bool) {
+                Some(true) => {
+                    set.enabled.insert(id.clone(), Plugin::default());
+                }
+                Some(false) => off += 1,
+                None => no_switch += 1,
+            }
+        }
+    }
+    if off > 0 {
+        cap.info(
+            target,
+            format!("{off} plugin(s) set to enabled = false in {file} are not carried"),
+        );
+    }
+    if no_switch > 0 {
+        cap.info(
+            target,
+            format!("{no_switch} [plugins.*] table(s) in {file} have no enabled key, so they are not carried"),
+        );
+    }
+    if with_servers > 0 {
+        cap.info(
+            target,
+            format!("the per-plugin MCP server settings (approval modes, tool lists) of {with_servers} plugin(s) in {file} are not carried"),
+        );
+    }
+    for id in set.enabled.keys() {
+        let market = split_id(id).map_or("", |(_, m)| m);
+        if !set.marketplaces.contains_key(market) && market != builtin_marketplace(target) {
+            cap.info(
+                target,
+                format!(
+                    "plugin '{id}': its marketplace '{market}' is not declared in {file}, so only the plugin is carried; add the marketplace on the other machine with {}",
+                    add_marketplace_hint(target)
+                ),
+            );
+        }
+    }
+    if set.is_empty() {
+        return;
+    }
+    cap.info(
+        target,
+        format!(
+            "{} marketplace(s) and {} plugin(s) captured by reference from {file}; the plugin cache (~/.codex/plugins/cache/) is not copied",
+            set.marketplaces.len(),
+            set.enabled.len()
+        ),
+    );
+    cap.profile.plugins.insert(target.to_string(), set);
+}
+
+/// Add the profile's marketplaces and plugins to a Codex `config.toml` that is
+/// being edited: `[marketplaces.<name>]` tables and `enabled = true` under
+/// `[plugins."<name>@<marketplace>"]`, nothing else. A marketplace that is
+/// already there with the same source is left alone; a different one is
+/// updated key by key (not with `--no-overwrite`). Returns whether the
+/// document changed.
+pub fn apply_codex(
+    profile: &Profile,
+    env: &Env,
+    opts: &ApplyOptions,
+    work: &mut Work,
+    doc: &mut toml_edit::DocumentMut,
+    path: &Path,
+) -> Result<bool> {
+    let target = "codex";
+    let Some(set) = profile.plugins.get(target) else {
+        return Ok(false);
+    };
+    let (markets, plugins) = applicable(set, target, work);
+    if markets.is_empty() && plugins.is_empty() {
+        return Ok(false);
+    }
+    let file = path
+        .file_name()
+        .map_or_else(String::new, |f| f.to_string_lossy().into_owned());
+    let mut added = Vec::new();
+    if !markets.is_empty() {
+        let table = crate::edit::toml::table_mut(doc, &["marketplaces"])?;
+        for (name, m) in markets {
+            let have = table.get(name).map(crate::edit::toml::item_to_json);
+            // Only what the profile sets is compared; a `ref` it leaves out
+            // is not an instruction to unpin.
+            let same = have
+                .as_ref()
+                .and_then(Value::as_object)
+                .is_some_and(|h| m.source.iter().all(|(k, v)| h.get(k) == Some(v)));
+            if same {
+                continue;
+            }
+            if have.is_some() && !opts.overwrite {
+                work.warn(
+                    target,
+                    format!(
+                        "kept the existing [marketplaces.{name}] in {} because --no-overwrite was given; the profile has {}",
+                        path.display(),
+                        describe_source(&m.source)
+                    ),
+                );
+                continue;
+            }
+            match table.get_mut(name).and_then(Item::as_table_like_mut) {
+                Some(t) => {
+                    for (k, v) in &m.source {
+                        if let Some(val) = crate::edit::toml::json_to_value(v) {
+                            t.insert(k, Item::Value(val));
+                        }
+                    }
+                }
+                None => {
+                    table.insert(
+                        name,
+                        Item::Table(crate::edit::toml::json_to_table(&m.source)),
+                    );
+                }
+            }
+            added.push(describe_marketplace(name, m));
+        }
+    }
+    if !plugins.is_empty() {
+        let table = crate::edit::toml::table_mut(doc, &["plugins"])?;
+        for (id, p) in plugins {
+            let have = table.get(id);
+            let on = have.and_then(|i| i.get("enabled")).and_then(Item::as_bool);
+            if on == Some(true) {
+                continue;
+            }
+            if have.is_some() && !have.is_some_and(Item::is_table_like) {
+                work.warn(
+                    target,
+                    format!(
+                        "kept plugins.'{id}' in {} as it is: it is not a table",
+                        path.display()
+                    ),
+                );
+                continue;
+            }
+            if on.is_some() && !opts.overwrite {
+                work.warn(
+                    target,
+                    format!(
+                        "kept plugins.'{id}' as it is in {} because --no-overwrite was given",
+                        path.display()
+                    ),
+                );
+                continue;
+            }
+            match table.get_mut(id).and_then(Item::as_table_like_mut) {
+                Some(t) => {
+                    t.insert("enabled", toml_edit::value(true));
+                }
+                None => {
+                    let mut t = toml_edit::Table::new();
+                    t.insert("enabled", toml_edit::value(true));
+                    table.insert(id, Item::Table(t));
+                }
+            }
+            added.push(describe_plugin(id, p));
+        }
+    }
+    if added.is_empty() {
+        return Ok(false);
+    }
+    for d in &added {
+        work.info(target, format!("{d} added to {file}"));
+    }
+    work.warn(
+        target,
+        "kitbag doesn't install plugins. Codex fetches a configured marketplace and installs or refreshes the plugins configured for it itself (`codex plugin marketplace upgrade` does it now); a plugin can bundle hooks, MCP servers and skills that run on this machine",
+    );
+    if env.scope == Scope::Project {
+        work.info(
+            target,
+            "Codex only loads .codex/config.toml in projects you have marked as trusted",
+        );
+    }
+    Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// Zed
+
+const ZED_KEY: &str = "auto_install_extensions";
+
+/// Read the extensions Zed's `auto_install_extensions` setting installs into
+/// the profile, by reference (the extension ids).
+pub fn capture_zed(cap: &mut Captured, settings: &Value, file: &str) {
+    let target = "zed";
+    let Some(Value::Object(listed)) = settings.get(ZED_KEY) else {
+        return;
+    };
+    let (mut never, mut other) = (0, Vec::new());
+    let mut found = Vec::new();
+    for (id, v) in listed {
+        match v {
+            Value::Bool(true) if is_valid_name(id) && id.len() <= 128 => found.push(id.clone()),
+            Value::Bool(false) => never += 1,
+            _ => other.push(id.escape_default().to_string()),
+        }
+    }
+    if never > 0 {
+        cap.info(
+            target,
+            format!("{never} extension(s) set to false (never install) in {file} are not carried"),
+        );
+    }
+    if !other.is_empty() {
+        cap.info(
+            target,
+            format!(
+                "{} entr{} of {ZED_KEY} in {file} not carried (not a plain id set to true): {}",
+                other.len(),
+                if other.len() == 1 { "y" } else { "ies" },
+                other.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+            ),
+        );
+    }
+    if found.is_empty() {
+        return;
+    }
+    let n = found.len();
+    let set = cap.profile.plugins.entry(target.to_string()).or_default();
+    for id in found {
+        set.enabled.entry(id).or_default();
+    }
+    cap.info(
+        target,
+        format!(
+            "{n} extension(s) captured by reference from {file}; extension files are not copied"
+        ),
+    );
+}
+
+/// Add the profile's extension ids to `auto_install_extensions` in the Zed
+/// settings file at `path`, as `true`, nothing else. Zed installs them from
+/// its gallery itself. User scope only: Zed's docs name no project-level
+/// `auto_install_extensions` (UNVERIFIED for `.zed/settings.json`).
+pub fn apply_zed(
+    profile: &Profile,
+    env: &Env,
+    opts: &ApplyOptions,
+    work: &mut Work,
+    path: &Path,
+) -> Result<()> {
+    let target = "zed";
+    let Some(set) = profile.plugins.get(target) else {
+        return Ok(());
+    };
+    let (_, wanted) = applicable(set, target, work);
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    if env.scope == Scope::Project {
+        work.info(
+            target,
+            format!(
+                "{} Zed extension(s) not written: Zed's docs describe {ZED_KEY} as a setting of the user's settings.json and say nothing of a project's .zed/settings.json (UNVERIFIED), so kitbag writes it at user scope only",
+                wanted.len()
+            ),
+        );
+        return Ok(());
+    }
+    let text = work.fs.read(path)?;
+    let mut doc = JsonDoc::parse(text.as_deref(), path)?;
+    doc.check_unique_keys(&[], &[ZED_KEY])?;
+    let current = doc.value();
+    if current.get(ZED_KEY).is_some_and(|v| !v.is_object()) {
+        bail!(
+            "{ZED_KEY} in {} is not an object; fix it by hand, kitbag won't overwrite it",
+            path.display()
+        );
+    }
+    let mut added = Vec::new();
+    for (id, p) in wanted {
+        let have = current.get(ZED_KEY).and_then(|v| v.get(id.as_str()));
+        if have == Some(&json!(true)) {
+            continue;
+        }
+        if have.is_some() && !opts.overwrite {
+            work.warn(
+                target,
+                format!(
+                    "kept {ZED_KEY} '{id}' as it is in {} because --no-overwrite was given",
+                    path.display()
+                ),
+            );
+            continue;
+        }
+        doc.set(&[ZED_KEY, id], &json!(true));
+        added.push(describe(target, id, p));
+    }
+    if added.is_empty() {
+        return Ok(());
+    }
+    work.fs.write(path, doc.render())?;
+    let file = path
+        .file_name()
+        .map_or_else(String::new, |f| f.to_string_lossy().into_owned());
+    for d in &added {
+        work.info(target, format!("{d} added to {file}"));
+    }
+    work.warn(
+        target,
+        "kitbag doesn't install extensions. Zed downloads the extensions above from its gallery itself the next time it starts (an extension can bundle language servers and MCP servers that run on this machine)",
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Grok Build
+
+/// Read the plugin folders of `[plugins] paths` in Grok Build's user
+/// `config.toml` (as JSON) into the profile, by reference.
+pub fn capture_grok(cap: &mut Captured, env: &Env, doc: &Value, file: &str) {
+    let target = "grok-build";
+    let plugins = doc.get("plugins");
+    let listed = plugins
+        .and_then(|p| p.get("paths"))
+        .and_then(Value::as_array);
+    let names = |k: &str| {
+        plugins
+            .and_then(|p| p.get(k))
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len)
+    };
+    let by_name = names("enabled") + names("disabled");
+    if by_name > 0 {
+        cap.info(
+            target,
+            format!("{by_name} plugin name(s) in [plugins] enabled / disabled in {file} are not carried: they name plugins that have to be installed first"),
+        );
+    }
+    let Some(listed) = listed else {
+        return;
+    };
+    if env.scope == Scope::Project {
+        cap.info(
+            target,
+            format!("[plugins] paths in {file} are not carried at project scope: Grok Build's docs don't say what a relative path there is read from, and an absolute one is specific to this machine"),
+        );
+        return;
+    }
+    let mut found = Vec::new();
+    let mut other = Vec::new();
+    for v in listed {
+        let Some(path) = v.as_str() else {
+            other.push(v.to_string());
+            continue;
+        };
+        let key = if is_absolute_path(path) {
+            home_relative(&fold_path(path), &env.home, env.os)
+        } else {
+            path.to_string()
+        };
+        if grok_path_issue(&key).is_some() {
+            other.push(path.to_string());
+        } else {
+            found.push(key);
+        }
+    }
+    if !other.is_empty() {
+        cap.info(
+            target,
+            format!(
+                "{} [plugins] paths entr{} in {file} not carried (relative paths are not carried, since Grok Build's docs don't say what they are read from): {}",
+                other.len(),
+                if other.len() == 1 { "y" } else { "ies" },
+                other
+                    .iter()
+                    .take(5)
+                    .map(|s| s.escape_default().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+    }
+    if found.is_empty() {
+        return;
+    }
+    let n = found.len();
+    let set = cap.profile.plugins.entry(target.to_string()).or_default();
+    for key in found {
+        set.enabled.entry(key).or_default();
+    }
+    cap.info(
+        target,
+        format!("{n} plugin folder(s) captured by reference from {file}; the plugins themselves are not copied"),
+    );
+}
+
+/// Add the profile's plugin folders to `[plugins] paths` in Grok Build's user
+/// `config.toml` that is being edited, nothing else. A folder already listed
+/// (by the same resolved path) is left alone. Returns whether the document
+/// changed. User scope only.
+pub fn apply_grok(
+    profile: &Profile,
+    env: &Env,
+    work: &mut Work,
+    doc: &mut toml_edit::DocumentMut,
+    path: &Path,
+) -> Result<bool> {
+    let target = "grok-build";
+    let Some(set) = profile.plugins.get(target) else {
+        return Ok(false);
+    };
+    let (_, wanted) = applicable(set, target, work);
+    if wanted.is_empty() {
+        return Ok(false);
+    }
+    if env.scope == Scope::Project {
+        work.info(
+            target,
+            format!(
+                "{} plugin folder(s) not written to .grok/config.toml: Grok Build's docs don't say what a relative path in [plugins] paths is read from, and an absolute one is specific to this machine; kitbag writes them to the user config",
+                wanted.len()
+            ),
+        );
+        return Ok(false);
+    }
+    let file = path
+        .file_name()
+        .map_or_else(String::new, |f| f.to_string_lossy().into_owned());
+    let mut todo = Vec::new();
+    for (key, p) in wanted {
+        if let Some(why) = grok_path_issue(key) {
+            work.warn(
+                target,
+                format!("{} not written: {why}", describe(target, key, p)),
+            );
+            continue;
+        }
+        todo.push((key, p));
+    }
+    if todo.is_empty() {
+        return Ok(false);
+    }
+    let table = crate::edit::toml::table_mut(doc, &["plugins"])?;
+    if table.get("paths").is_some_and(|i| !i.is_array()) {
+        bail!(
+            "[plugins] paths in {} is not a list; fix it by hand, kitbag won't overwrite it",
+            path.display()
+        );
+    }
+    if table.get("paths").is_none() {
+        table.insert("paths", toml_edit::value(toml_edit::Array::new()));
+    }
+    let Some(paths) = table.get_mut("paths").and_then(Item::as_array_mut) else {
+        return Ok(false);
+    };
+    let mut added = Vec::new();
+    for (key, p) in todo {
+        let want = resolve_entry(key, &env.home, env.os);
+        let listed = paths.iter().filter_map(|v| v.as_str()).any(|have| {
+            resolve_entry(
+                &crate::portable::expand_home(have, &env.home, env.os),
+                &env.home,
+                env.os,
+            ) == want
+        });
+        if listed {
+            continue;
+        }
+        paths.push(key.as_str());
+        added.push(describe(target, key, p));
+        if !Path::new(key).exists() {
+            work.warn(
+                target,
+                format!(
+                    "{} doesn't exist on this machine: Grok Build has nothing to load from it until the plugin is there (kitbag doesn't copy or fetch plugins)",
+                    describe(target, key, p)
+                ),
+            );
+        }
+    }
+    if added.is_empty() {
+        return Ok(false);
+    }
+    for d in &added {
+        work.info(target, format!("{d} added to {file}"));
+    }
+    work.warn(
+        target,
+        "kitbag doesn't install or enable plugins. Grok Build loads the folders above itself; a plugin can bundle hooks, MCP servers and skills that run on this machine (a project plugin may need to be enabled in [plugins] enabled)",
+    );
+    Ok(true)
+}
+
+// ---------------------------------------------------------------------------
 // Policy
 
 /// Take the plugins and marketplaces out of a profile from a git source that
@@ -1682,6 +2482,12 @@ pub fn review_lines(profile: &Profile) -> Vec<String> {
                 "antigravity" => {
                     "a folder on this machine Antigravity loads as a plugin, with whatever it bundles (hooks, MCP servers, skills) once it is enabled"
                 }
+                "grok-build" => {
+                    "a folder on this machine Grok Build loads as a plugin, with whatever it bundles (hooks, MCP servers, skills)"
+                }
+                "zed" => {
+                    "an extension Zed downloads from its gallery itself and runs, with whatever it bundles (language servers, MCP servers)"
+                }
                 _ => {
                     "runs whatever the plugin bundles (hooks, MCP servers, commands) once the tool installs it"
                 }
@@ -1729,20 +2535,30 @@ pub fn expand_paths(
     home: &Path,
     os: crate::adapters::Os,
 ) {
-    if let Some(set) = plugins.get_mut("antigravity") {
-        set.enabled = std::mem::take(&mut set.enabled)
-            .into_iter()
-            .map(|(k, v)| (crate::portable::expand_home(&k, home, os), v))
-            .collect();
+    for target in ["antigravity", "grok-build"] {
+        if let Some(set) = plugins.get_mut(target) {
+            set.enabled = std::mem::take(&mut set.enabled)
+                .into_iter()
+                .map(|(k, v)| (crate::portable::expand_home(&k, home, os), v))
+                .collect();
+        }
     }
     for m in plugins
         .values_mut()
         .flat_map(|s| s.marketplaces.values_mut())
     {
-        if matches!(
+        let local = if m.source.get("source_type").and_then(Value::as_str) == Some("local") {
+            Some("source")
+        } else if matches!(
             m.source.get("source").and_then(Value::as_str),
             Some("file" | "directory")
-        ) && let Some(Value::String(p)) = m.source.get_mut("path")
+        ) {
+            Some("path")
+        } else {
+            None
+        };
+        if let Some(key) = local
+            && let Some(Value::String(p)) = m.source.get_mut(key)
         {
             *p = crate::portable::expand_home(p, home, os);
         }

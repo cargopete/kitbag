@@ -2,6 +2,9 @@
 //! instructions, path-specific instructions (rules), prompt files (commands)
 //! and skills.
 //!
+//! * Plugins, by reference: `enabledPlugins` and `extraKnownMarketplaces` in
+//!   Copilot CLI's `settings.json` (`$COPILOT_HOME/settings.json`, or the
+//!   repository's `.github/copilot/settings.json`); see `crate::plugins`.
 //! * MCP: Copilot's native files use a top-level `mcpServers` object:
 //!   `$COPILOT_HOME/mcp-config.json` (default `~/.copilot/mcp-config.json`) for
 //!   the user, and `.mcp.json` at the workspace root for a project. Copilot CLI
@@ -416,12 +419,21 @@ fn capture_agents(cap: &mut Captured, dir: &Path, legacy: bool) -> Result<Vec<St
     Ok(modes)
 }
 
-/// Mark the captured servers that Copilot CLI's `disabledMcpServers` lists.
-fn capture_disabled(cap: &mut Captured, path: &Path) -> Result<()> {
+/// Read Copilot CLI's settings file: mark the captured servers that
+/// `disabledMcpServers` lists, and carry `enabledPlugins` and
+/// `extraKnownMarketplaces` by reference.
+fn capture_settings(cap: &mut Captured, env: &Env, path: &Path) -> Result<()> {
     let Some(text) = cap.read_config(path, ID)? else {
         return Ok(());
     };
     let doc = parse_value(Some(&text), path)?;
+    if let Value::Object(settings) = &doc {
+        let before = cap.profile.plugins.len();
+        crate::plugins::capture(cap, ID, env, settings, None);
+        if cap.profile.plugins.len() > before {
+            cap.sources.push(path.to_path_buf());
+        }
+    }
     let names = string_list(doc.get("disabledMcpServers"));
     if names.is_empty() {
         return Ok(());
@@ -562,7 +574,7 @@ impl Adapter for Copilot {
                 }
             }
         }
-        capture_disabled(&mut cap, &p.settings)?;
+        capture_settings(&mut cap, env, &p.settings)?;
 
         capture_instructions(&mut cap, &p.instructions, ID)?;
 
@@ -702,6 +714,7 @@ impl Adapter for Copilot {
                 "kitbag doesn't manage Copilot settings; settings.copilot was not applied",
             );
         }
+        crate::plugins::apply(profile, env, opts, work, &p.settings, ID)?;
         super::hook_files::apply_for(profile, env, opts, work, &super::hook_files::COPILOT)?;
         Ok(())
     }

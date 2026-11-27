@@ -536,17 +536,17 @@ fn a_plugin_section_for_a_tool_kitbag_does_not_carry_plugins_for_is_ignored_with
     profile_with(
         &sb,
         "p",
-        "[plugins.codex.enabled.\"x@y\"]\n[plugins.claude-code.enabled.\"a@b\"]\n",
+        "[plugins.cursor.enabled.\"x@y\"]\n[plugins.claude-code.enabled.\"a@b\"]\n",
     );
     let p = kitbag::profile_io::load(&sb.path("p")).unwrap();
     assert!(
         p.warnings
             .iter()
-            .any(|w| w.contains("plugins.codex") && w.contains("ignored")),
+            .any(|w| w.contains("plugins.cursor") && w.contains("ignored")),
         "{:?}",
         p.warnings
     );
-    let out = ok(&sb, &["apply", "p", "--to", "codex", "--yes"]);
+    let out = ok(&sb, &["apply", "p", "--to", "cursor", "--yes"]);
     assert!(!out.contains("x@y"), "{out}");
     assert!(!sb.path("home/.claude").exists());
 }
