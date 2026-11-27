@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-11-27
+
 ### Added
 
 - The `copilot` target is complete for what Copilot's official docs document today: MCP servers, instructions, rules (`*.instructions.md`), project prompt files, skills and custom agents (with legacy chat modes read at capture) at user and project scope, plus hooks. Re-checked against the current VS Code and GitHub Copilot CLI docs, which still match the paths kitbag uses. The README no longer says Copilot CLI reads `.claude/commands/`, which the docs don't say; it says the CLI's docs don't list prompt files. Kept as limits, not gaps: user prompt files and user agents in VS Code's own profile storage (no documented path), prompt files for Copilot CLI, the deprecated `.vscode/mcp.json` (capture only), and Copilot's own MCP and folder trust prompts (#22).
@@ -23,8 +25,6 @@ All notable changes to this project are documented here. The format follows
 ### Changed
 
 - `capture --force` of one tool no longer turns a server `disabled` everywhere when the profile's own `targets` / `disabled_on` already explain why that tool keeps it off (#33)
-
-### Changed
 
 - README: the opencode notes now say the target covers everything opencode's docs describe for MCP servers, instructions, rules, commands, skills and agents (checked against opencode.ai/docs on 2026-11-27), name `~/.claude/skills`, `.agents/skills` and `~/.agents/skills` as other places opencode reads skills, and point plugins to #12 and hooks to #13. Accepted limitations are unchanged: rules are folded into `AGENTS.md`; agents and commands defined in `opencode.json`, opencode 1's `mode/` agents, files listed under `instructions` and `{file:...}` references are not carried (#26)
 
@@ -254,7 +254,8 @@ All notable changes to this project are documented here. The format follows
 - `capture` with several tools (`--from all`, `detected` or a list) reports a tool whose config can't be read and captures the rest; it fails only if nothing could be read. A single `--from` still fails loudly.
 - `install.sh` and `install.ps1` download `kitbag-<target>.sha256`, the checksum name the release workflow uploads (found in the v0.1.0-rc.1 dry run).
 
-[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/cargopete/kitbag/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/cargopete/kitbag/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/cargopete/kitbag/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/cargopete/kitbag/compare/v0.1.5...v0.1.6
