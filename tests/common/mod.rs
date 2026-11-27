@@ -85,6 +85,7 @@ impl Sandbox {
             locations: HashMap::new(),
             os: Os::Linux,
             include_hooks: false,
+            include_memory: false,
         }
     }
 

@@ -192,8 +192,10 @@ my-profile/
 │   └── reviewer.md        # custom agents (GitHub Copilot)
 ├── output-styles/
 │   └── terse.md           # output styles (Claude Code; Hermes personalities)
-└── hooks/
-    └── typecheck.sh       # scripts the [[hooks]] of kitbag.toml run (optional)
+├── hooks/
+│   └── typecheck.sh       # scripts the [[hooks]] of kitbag.toml run (optional)
+└── memory/
+    └── claude-code/…      # memory notes, only with `capture --include memory` (optional)
 ```
 
 Every file is optional except `kitbag.toml`. A directory without one but with `rules/` at its
@@ -799,6 +801,46 @@ you added yourself are not looked at. Hook commands are never resolved from the 
 kitbag: `${VAR}` stays in the command for the shell to expand, so no hook file holds a secret
 kitbag resolved. Shell scripts need LF line endings to run; on Windows keep `hooks/*.sh` as LF
 (`* text eol=lf` in the profile's `.gitattributes`).
+
+### Memory notes: `memory/` (opt-in)
+
+What an agent has written down about you and your projects. **Off by default**: a bare
+`kitbag capture` never reads it, and a profile only holds notes if you ran
+`kitbag capture --include memory`. Notes often hold personal or client details, so capture
+redacts secrets like the rest of a profile and lists every note it took (with the `type` and
+`modified` its own frontmatter gives); read `memory/` before you commit or share the profile.
+Memory is captured and applied at user scope only.
+
+```text
+memory/<tool>/<scope>/<file>.md
+memory/claude-code/<project>/MEMORY.md, <topic>.md   <- ~/.claude/projects/<project>/memory/
+memory/codex/user/memories_v2/…                      <- $CODEX_HOME/memories_v2/ (or memories/)
+memory/hermes/default/MEMORY.md, USER.md             <- ~/.hermes/memories/
+memory/hermes/profile-<name>/MEMORY.md, USER.md      <- ~/.hermes/profiles/<name>/memories/
+```
+
+Plain Markdown, no extra metadata: the tool and scope are in the path, and `type` / `modified`
+stay in the note's own frontmatter. Docs re-read 2026-11-27 (`code.claude.com/docs/en/memory`,
+`learn.chatgpt.com/docs/customization/memories`, `hermes-agent.nousresearch.com/docs/user-guide/features/memory`):
+
+| Tool | Captured | Applied |
+| --- | --- | --- |
+| Claude Code | `MEMORY.md` and topic files of every `~/.claude/projects/<project>/memory/` | Into a `<project>` folder that already exists here with that name, only files that aren't there (a note that exists and differs is kept, never overwritten; an existing `MEMORY.md` is kept too, so added notes may not be listed in it). The docs say `<project>` is "derived from the git repository" but give no recipe and no portable key such as the remote URL, so notes are keyed by that folder name, a local key: they land only on a machine whose folder has the same name, and kitbag doesn't compute one. A custom `autoMemoryDirectory` is not followed |
+| Codex | `*.md` under `$CODEX_HOME/memories/` and `memories_v2/`, as a read-only copy | Never. The docs call these files generated state and say not to rely on editing them by hand; they document no import layout |
+| Hermes | `MEMORY.md` and `USER.md` of the default home and of each `profiles/<name>/` | Entries (separated by `§`) the file lacks are added at the end, up to the documented default limits (2,200 and 1,375 characters; raise `memory_char_limit` / `user_char_limit` and apply again for more). Needs the Hermes home (or profile folder) to exist |
+
+A note that still holds a `[REDACTED]` marker is not written (Hermes: that entry is left out). Apply
+is additive and `kitbag undo` puts back what it changed; the notes are listed in the plan. They are
+read into later sessions as context, so a profile from a **git source** has them withheld unless you
+pass `--trust-source`. Notes apply only to their own tool, and only if that tool is among the
+targets; per-note `targets` / `disabled_on` and folding notes into an instructions file are not
+offered. Not carried, with the reason: `CLAUDE.local.md` (documented as personal project
+*instructions*, not memory); Cursor (its Memories UI was removed in 2.1, nothing on disk); Windsurf
+(memories are workspace-bound and the docs name no folder); Gemini CLI (its auto memory page gives
+no path); Antigravity (no official page on its knowledge folder); Grok Build (its memory page shows
+relative paths only); Copilot (Copilot Memory is stored on GitHub; VS Code's experimental
+`.github/copilot-memories.jsonl` has no documented format); Cline's Memory Bank (a convention in
+your own project files); Amp, opencode, Roo Code, Continue and Zed document no memory store.
 
 ### Claude Code plugins, by reference: `[plugins.claude-code]`
 
@@ -1622,7 +1664,7 @@ wrapping of their own.
 | Command | What it does |
 |---|---|
 | `kitbag init [DIR]` | Write a commented starter profile |
-| `kitbag capture [--from IDS] [-o DIR] [--dry-run] [--force] [--prune] [--include hooks]` | Read the current setup into a profile (secrets redacted). Writes only into a new or empty directory. `--force` replaces an existing profile's files and leaves anything else in the directory alone; the profile's MCP servers (and rules, commands, skills and agents with `targets` / `disabled_on`) found in no tool are kept unless `--prune`. With several tools, one whose config can't be read is reported and the rest are captured |
+| `kitbag capture [--from IDS] [-o DIR] [--dry-run] [--force] [--prune] [--include hooks,memory]` | Read the current setup into a profile (secrets redacted). Writes only into a new or empty directory. `--force` replaces an existing profile's files and leaves anything else in the directory alone; the profile's MCP servers (and rules, commands, skills and agents with `targets` / `disabled_on`) found in no tool are kept unless `--prune`. With several tools, one whose config can't be read is reported and the rest are captured |
 | `kitbag disable ITEM [--on IDS] [PROFILE]`, `kitbag enable ...` | Turn an MCP server, rule, command, skill, agent or output style off or on for some tools (default: all) by editing its `targets` / `disabled_on` in a local profile; applies nothing |
 | `kitbag diff <SOURCE> [--to IDS] [--exit-code]` | Show exactly what `apply` would change; never writes |
 | `kitbag apply <SOURCE> [--to IDS] [--yes] [--dry-run] [--apply-hooks]` | Plan, confirm, write with backups; hooks only with `--apply-hooks` (and, from a git source, `--trust-source`) |
@@ -1914,8 +1956,8 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   the other tools' instructions, and says so; in a project, to `.hermes.md` or `HERMES.md` if there is
   one, since Hermes loads that before `AGENTS.md`, otherwise to `AGENTS.md`, with a warning when
   an `AGENTS.override.md` would shadow it. `.env`, `auth.json` and `mcp-tokens/` are never read
-  or written (capture warns when it finds them), and Hermes's memories, sessions, profiles and
-  skill bundles are not carried (capture says which of them it found and left). Skills
+  or written (capture warns when it finds them), and Hermes's sessions, profiles and
+  skill bundles are not carried, and its memories only with `--include memory` (capture says which of the others it found and left). Skills
   (docs: hermes-agent.nousresearch.com/docs/user-guide/features/skills, checked 2026-11-27)
   go to `$HERMES_HOME/skills/<name>/` ("the primary directory and source of truth") and, in a
   project, to `.hermes/skills/<name>/`, Hermes's own project folder, never to `.agents/skills/`,
