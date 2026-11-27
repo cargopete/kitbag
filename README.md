@@ -270,6 +270,9 @@ the section is an addition, but kitbag 0.1.10 and older reject `[targets]` as an
 ("unknown field"), so a profile captured from opencode or Continue with this kitbag does not
 load there. There is no `kitbag migrate`: the profile holds servers in kitbag's own shape, so
 rewriting the label would change nothing a tool reads. Recapture to update the recorded schema.
+Schemas for the other targets, and a tool version number, are dated skips (2026-11-27): official
+docs don't name a kitbag-writable schema or version field for them (Gemini CLI's flat-to-nested
+settings move still has no mapping).
 
 **Per-tool MCP servers.** One shared profile can keep a heavy server out of the tools that
 don't need it. `targets` lists the only tools a server is applied to; `disabled_on` lists the
@@ -427,7 +430,7 @@ Amp's `amp.updates.mode`) or the key reaches a provider, proxy, hook or command
 carried. Gaps, on purpose: Cursor's docs name no `settings.json` path or agent keys for the
 *editor*, and the editor keeps some settings in a `state.vscdb` database with no documented
 layout, so kitbag never reads or writes either. opencode's theme and terminal settings are in
-opencode 2's `cli.json`, which is not carried. Amp's docs name no model setting. Copilot's, Zed's
+opencode 2's `cli.json`, which is not carried yet (#142). Amp's docs name no model setting. Copilot's, Zed's
 and Amp's project-level files are not written, since their docs don't say these keys apply
 there. Cursor's CLI file is created with `"version": 1` when it doesn't exist (its docs say the
 CLI repairs missing fields) and follows `CURSOR_CONFIG_DIR`, then `XDG_CONFIG_HOME/cursor` on
@@ -586,7 +589,9 @@ say tokens are "stored securely and refreshed automatically" and name no path; i
 `~/.claude/.credentials.json` holds *login* credentials and is never touched (`/mcp` or `claude
 mcp login <name>`). opencode keeps credentials in a SQLite database its docs say not to edit
 (`opencode mcp auth <name>`). Amp keeps sign-ins on ampcode.com. Cursor, Hermes, Zed, Copilot
-and Claude Desktop name no local token file. No OS keychain is read.
+and Claude Desktop name no local token file. No OS keychain is read. There is no official
+merge schema for an existing Gemini token file, and kitbag does not refresh or validate tokens
+(Gemini's docs say it does both). That is the rest of #18.
 
 ### Rules: `rules/<name>.md`
 
@@ -772,6 +777,7 @@ not touch your git excludes. A capture of a project that has `outputStyle` there
 takes the value in `settings.json`; an apply never changes the local file, whose value still
 wins over the one kitbag writes (local settings sit above shared project settings). To carry a
 style you picked with `/output-style`, put the same name in `outputStyle` of `settings.json`.
+Nothing else remains on #15: the local file is not carried, on purpose.
 (The one other key kitbag writes in that file is `disabledMcpjsonServers`, the documented way to
 reject a server of a project's `.mcp.json`.) The managed-policy folder and a plugin's
 `output-styles/` are never read or written either: the first belongs to your administrator and the
@@ -1003,7 +1009,7 @@ stay in the note's own frontmatter. Docs re-read 2026-11-27 (`code.claude.com/do
 
 | Tool | Captured | Applied |
 | --- | --- | --- |
-| Claude Code | `MEMORY.md` and topic files of every `~/.claude/projects/<project>/memory/` | Into a `<project>` folder that already exists here with that name, only files that aren't there (a note that exists and differs is kept, never overwritten; an existing `MEMORY.md` is kept too, so added notes may not be listed in it). The docs say `<project>` is "derived from the git repository" but give no recipe and no portable key such as the remote URL, so notes are keyed by that folder name, a local key: they land only on a machine whose folder has the same name, and kitbag doesn't compute one. A custom `autoMemoryDirectory` is not followed |
+| Claude Code | `MEMORY.md` and topic files of every `~/.claude/projects/<project>/memory/` | Into a `<project>` folder that already exists here with that name, only files that aren't there (a note that exists and differs is kept, never overwritten; an existing `MEMORY.md` is kept too, so added notes may not be listed in it). The docs say `<project>` is "derived from the git repository" but give no recipe and no portable key such as the remote URL, so notes are keyed by that folder name, a local key: they land only on a machine whose folder has the same name, and kitbag doesn't compute one. A custom `autoMemoryDirectory` is not followed yet (#140) |
 | Codex | `*.md` under `$CODEX_HOME/memories/` and `memories_v2/`, as a read-only copy | Never. The docs call these files generated state and say not to rely on editing them by hand; they document no import layout |
 | Hermes | `MEMORY.md` and `USER.md` of the default home and of each `profiles/<name>/` | Entries (separated by `§`) the file lacks are added at the end, up to the documented default limits (2,200 and 1,375 characters; raise `memory_char_limit` / `user_char_limit` and apply again for more). Needs the Hermes home (or profile folder) to exist |
 
@@ -1012,7 +1018,8 @@ is additive and `kitbag undo` puts back what it changed; the notes are listed in
 read into later sessions as context, so a profile from a **git source** has them withheld unless you
 pass `--trust-source`. Notes apply only to their own tool, and only if that tool is among the
 targets; per-note `targets` / `disabled_on` and folding notes into an instructions file are not
-offered. Not carried, with the reason: `CLAUDE.local.md` (documented as personal project
+offered yet (#141). The missing portable `<project>` recipe, Codex's generated memory files,
+and the stores below that official docs don't name are dated skips (2026-11-27). Not carried, with the reason: `CLAUDE.local.md` (documented as personal project
 *instructions*, not memory); Cursor (its Memories UI was removed in 2.1, nothing on disk); Windsurf
 (memories are workspace-bound and the docs name no folder); Gemini CLI (its auto memory page gives
 no path); Antigravity (no official page on its knowledge folder); Grok Build (its memory page shows
@@ -1391,7 +1398,7 @@ leaves to the tool itself: Claude Code, Copilot CLI and Codex fetch the plugins;
 its packages; Zed downloads its extensions; Antigravity and Grok Build load the folders and keep
 their enabled state.
 
-**Documented, not carried yet (so #12 stays open)**: VS Code's user-level plugin settings for the
+**Documented, not carried (dated skip, 2026-11-27; #12 closes):** VS Code's user-level plugin settings for the
 Copilot agent. Re-read 2026-11-27 ([agent plugins](https://code.visualstudio.com/docs/agent-customization/agent-plugins),
 [plugin reference](https://code.visualstudio.com/docs/agents/reference/agent-plugin-reference),
 [AI settings](https://code.visualstudio.com/docs/agents/reference/ai-settings),
@@ -1459,8 +1466,8 @@ differently is noted). Both are idempotent, and `kitbag undo` restores the files
 (`%APPDATA%\Code\User` on Windows, `~/Library/Application Support/Code/User` on macOS,
 `~/.config/Code/User` on Linux). `User/profiles/<id>/` is never written: VS Code's profiles page
 says how to see the active profile in the UI but gives no way for a program to tell, so kitbag
-doesn't guess. A workspace's `.vscode/settings.json` is not written either (the target has user
-scope only). `code --user-data-dir` and portable mode are not followed.
+doesn't guess. A workspace's `.vscode/settings.json` is not written yet (today the target has user
+scope only; project-scope allow-listed settings are #144). `code --user-data-dir` and portable mode are not followed.
 
 **What is carried.**
 
@@ -1507,7 +1514,7 @@ list above is dropped with a note, so a hand-written profile can't install anyth
 **Undo restores `settings.json` and `keymap.json`, not extensions.** An extension kitbag installed
 stays installed when you undo; kitbag never uninstalls anything, so nothing you already had can go.
 Remove one yourself with `code --uninstall-extension publisher.extension`. (Recording which
-installs were new, to uninstall them safely on undo, is left for a later slice.)
+installs were new, to uninstall them safely on undo, is #143.)
 `--home` redirects the files but not `code`: `code` lists and installs for whoever runs kitbag.
 
 **Not carried, and why** (official docs checked 2026-11-27):
@@ -1527,7 +1534,9 @@ installs were new, to uninstall them safely on undo, is left for a later slice.)
   `codium` command. VS Code Insiders: the profiles page says only that its folder is
   `Code - Insiders` (profiles location), not its settings or command, so it is skipped too.
 - Non-default profiles (`User/profiles/<id>/`), workspace `.vscode/settings.json`, Zed's project
-  keymap, Continue as an editor contribution beyond its extension id, and the Experimental
+  keymap (Zed's keybindings docs, checked 2026-11-27, name only the user file
+  `~/.config/zed/keymap.json` / `%APPDATA%\Zed\keymap.json`, not a project keymap),
+  Continue as an editor contribution beyond its extension id, and the Experimental
   `chat.plugins.marketplaces` / `chat.pluginLocations` (#12) are left alone.
 
 ### Plugins: `rules/` at the root, no `kitbag.toml`
@@ -1676,7 +1685,7 @@ after the plugin directory is gone.
      is never printed.
    - **Where it goes.** `secrets.age` is written `0600` on Unix (on Windows it keeps the access
      of the folder it is in), and kitbag adds it to the profile's `.gitignore`, creating one if
-     needed. Committing it is left out of this first slice. Capturing again with `--force` and
+     needed. Committing it is opt-in and not done here (#138). Capturing again with `--force` and
      `--include secrets` replaces it; a bare re-capture leaves it as it is.
    - **Memory only.** Values are in memory only while a bundle is sealed or opened (zeroed on
      drop, and printed as `<redacted>` by every `Debug`). `apply --secrets-from PATH` decrypts
@@ -1691,10 +1700,11 @@ after the plugin directory is gone.
      (`secrets.json`, `secrets.toml`, `secrets.decrypted`, `.env` ...), when `secrets.age` isn't an
      age file, or when `kitbag.toml` itself holds a literal secret, and warns when a git
      repository doesn't ignore `secrets.age`.
-   - **Not done yet (#9 stays open):** resolving bundle values into tools that can't read env
-     vars (that needs a way to do it without the value reaching the undo record), an OS keychain
-     or helper, `secrets set` / `rotate`, committing the encrypted file, and opening a bundle on
-     a `--remote` host. Gemini CLI's MCP OAuth token file is carried (#18, see
+   - **Left as follow-ups, so #9 can close:** `secrets set` / `rotate` (#136), resolving bundle
+     values into tools that can't read env vars without the value reaching the undo record
+     (#137), committing the encrypted file (#138), and opening a bundle on a `--remote` host
+     (#139). An OS keychain or helper is a dated skip (2026-11-27): official docs name none
+     kitbag should write. Gemini CLI's MCP OAuth token file is carried (#18, see
      [MCP OAuth tokens in the secrets bundle](#mcp-oauth-tokens-in-the-secrets-bundle)); other
      tools' tokens are not.
    - **Skipped on purpose (checked 2026-11-27).** kitbag doesn't read the OS keychain, shell
@@ -1931,14 +1941,16 @@ What is sent, and what is not:
   no option to send values.
 - Only the host name given to `--remote` reaches `ssh`; one starting with `-` is refused.
 
-Limits of this first version: the source must be a profile or plugin directory on this machine
-(not a git URL; clone it first), at user scope (`--project` is not mapped to a path on the host, so
-SSH remote-development workspaces and devcontainer paths are not handled yet), and not on Windows.
-`--home` and `KITBAG_HOME` only affect this machine. The host's history records the temporary
-directory as the apply's source, so `kitbag status SOURCE` and `sync` there can't compare against
-it. Sending secrets themselves is not offered: `--secrets-from` is refused with `--remote`, and a
-`secrets.age` (and anything named like a plaintext secrets file) at the top of the profile is not
-copied to the host. Opening a bundle on the host is left for later (#9).
+Limits of this first version, each a follow-up: the source must be a profile or plugin directory
+on this machine (not a git URL; clone it first) (#147), at user scope (`--project` is not mapped
+to a path on the host, so SSH remote-development workspaces and devcontainer paths are not
+handled yet) (#146), and not on Windows (#148). `--home` and `KITBAG_HOME` only affect this
+machine. The host's history records the temporary directory as the apply's source, so
+`kitbag status SOURCE` and `sync` there can't compare against it (also #147). There is no
+`undo --remote`, and a `--remote-download` copy is deleted afterwards (#145). Sending secrets
+themselves is not offered: `--secrets-from` is refused with `--remote`, and a `secrets.age`
+(and anything named like a plaintext secrets file) at the top of the profile is not copied to
+the host. Opening a bundle on the host is #139.
 
 ## Which instruction files does a tool load?
 
