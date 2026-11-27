@@ -76,10 +76,15 @@ kitbag apply github:you/dotagents --to all
 
 # Someone else's bag: see what's in it, and what it would run and write, first
 kitbag inspect github:someone/agents@v1.0 --to all
+
+# A public starter profile, with no setup and nothing written
+kitbag diff github:cargopete/dotagents --to all
 ```
 
 Starting from scratch? `kitbag init my-profile` writes a commented starter profile, and
-[`examples/profile`](examples/profile) shows a realistic one.
+[`examples/profile`](examples/profile) shows a realistic one. The same profile is published
+at [`github:cargopete/dotagents`](https://github.com/cargopete/dotagents), which you can
+preview with `kitbag diff github:cargopete/dotagents --to all`.
 
 ## Targets
 
