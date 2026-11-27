@@ -5,6 +5,15 @@
 [![CI](https://github.com/cargopete/kitbag/actions/workflows/ci.yml/badge.svg)](https://github.com/cargopete/kitbag/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+![kitbag capturing a Claude Code setup, applying it to Cursor, and undoing](docs/demo.gif)
+
+Compared with ruler, rulesync and caliber, kitbag is for your personal setup: capture MCP servers, rules and skills from the tools you already use, keep secrets as env refs, and apply the same profile on every tool and every machine, with a plan and undo.
+
+| | kitbag | ruler | rulesync | caliber |
+|---|---|---|---|---|
+| Starts from | The setup already on your tools (`capture`) | A `.ruler/` folder in the project | Unified `.rulesync/` files | An agent-written setup, then continuous sync |
+| Ships as | One static binary (macOS, Linux, Windows) | Node.js | npm | npm / `npx` |
+
 kitbag captures your MCP servers, instructions, rules, slash commands, skills and settings
 from the AI coding tools you already use. It stores them as a small, git-friendly **profile** with secrets
 redacted and applies that profile to any other tool in one step. Claude Code, Cursor,
