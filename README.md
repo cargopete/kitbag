@@ -1112,7 +1112,7 @@ pub trait Adapter: Sync {
 5. **Test** it: add realistic configs under `tests/fixtures/{home,project}`, add capture and apply
    cases in `tests/adapters.rs`, and include it in the round-trip and idempotency tests.
 
-No further candidates are named here; open an issue for the tool you miss.
+No further candidates are named here; open an issue for the tool you miss. Issues labelled `good first issue` for new targets (currently #20–#28) are a good place to start; follow this section.
 
 ## Format notes and known limitations
 
