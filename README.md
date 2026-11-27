@@ -23,8 +23,9 @@ and xAI's Grok Build CLI are supported, at user and project scope.
 > - **Only apply profiles from git sources you trust.** A remote profile can define MCP
 >   servers that run commands on your machine. kitbag doesn't add or change them unless you
 >   name them with `--allow-git-mcp`, and drops the profile's permission rules, hooks and
->   shell snippets unless you pass `--trust-source`. `kitbag diff` shows what would change
->   before you apply.
+>   shell snippets unless you pass `--trust-source`. Hooks, which run commands by
+>   themselves, are never written without `--apply-hooks` either, from any source.
+>   `kitbag diff` shows what would change before you apply.
 >
 > Details and how to report a problem: [SECURITY.md](SECURITY.md).
 
@@ -151,8 +152,10 @@ my-profile/
 ├── skills/
 │   └── release-notes/     # Agent Skills: SKILL.md + any supporting files
 │       └── SKILL.md
-└── agents/
-    └── reviewer.md        # custom agents (GitHub Copilot)
+├── agents/
+│   └── reviewer.md        # custom agents (GitHub Copilot)
+└── hooks/
+    └── typecheck.sh       # scripts the [[hooks]] of kitbag.toml run (optional, Claude Code)
 ```
 
 Every file is optional except `kitbag.toml`. A directory without one but with `rules/` at its
@@ -250,7 +253,8 @@ with a bounded effect are applied. Anything else is dropped with a warning:
 | `codex` | `model`, `model_reasoning_effort`, `model_reasoning_summary`, `model_verbosity`, `approval_policy`, `sandbox_mode`, `web_search`, `file_opener` |
 | `gemini-cli` | `model`, `ui` |
 
-Hooks, `env` blocks, `apiKeyHelper`, provider endpoints and similar keys are never carried.
+`env` blocks, `apiKeyHelper`, provider endpoints and similar keys are never carried. Hooks
+are not a setting: they have their own opt-in path (see [Hooks](#hooks-hooks-in-kitbagtoml-and-hooks)).
 Anything that lets agents act without asking gets an explicit warning in the plan. That
 covers `permissions.defaultMode = bypassPermissions` (and `acceptEdits`, `dontAsk`, `auto`),
 `permissions.additionalDirectories`, allow rules (broad ones such as `Bash(*)` or
@@ -371,6 +375,70 @@ Apply is additive and undo removes only the files kitbag wrote. From a git sourc
 `bypassPermissions`) or a shell snippet is skipped unless you pass `--trust-source`. A plain
 `tools` list only narrows what an agent may use, so it doesn't count. The plan warns about
 such agents in a local profile.
+
+### Hooks: `[[hooks]]` in `kitbag.toml`, and `hooks/`
+
+Hooks are commands a tool runs by itself on an event (before a tool call, when a session
+starts ...). That makes them as sensitive as an MCP server's command, so kitbag carries them
+only when you ask, at every step. **Claude Code is the only tool that carries them so far;**
+other targets say so in the plan and write nothing (Cursor and Antigravity have hook files of
+their own; they are not carried yet).
+
+```toml
+[[hooks]]
+event = "pre-tool"                    # a neutral event name, see below
+matcher = "Bash"                      # optional, as the tool reads it
+command = "{{hooks_dir}}/typecheck.sh"
+timeout = 30                          # optional, seconds
+
+[hooks.extra]                         # the tool's other keys, kept as they are
+statusMessage = "Type-checking"
+```
+
+A script a hook runs lives in the profile's `hooks/` directory (`hooks/typecheck.sh`), and
+`{{hooks_dir}}` stands for where it is written on apply, so the profile holds no absolute path
+of the machine it came from. `hooks.extra` keeps every other key of the tool's entry (Claude
+Code's `args`, `shell`, `async`, `if`, `statusMessage` ...). Neutral events are
+`session-start`, `session-end`, `prompt-submit`, `pre-tool`, `post-tool`, `post-tool-failure`,
+`permission-request`, `notification`, `stop`, `subagent-start`, `subagent-stop`, `pre-compact`
+and `post-compact`; an event only Claude Code has is `claude-code:<Name>` (for example
+`claude-code:FileChanged`). A target without an equivalent for an event reports the hook; it
+is not guessed.
+
+**Capture** (`kitbag capture --include hooks`). Without the flag, hooks are counted and left
+out, as before. With it, kitbag reads the `hooks` of Claude Code's `settings.json`
+(`~/.claude/settings.json`, or `.claude/settings.json` with `--project`; `settings.local.json`
+is machine-specific and not read). It keeps `command` hooks; `http`, `mcp_tool`, `prompt` and
+`agent` hooks, and events kitbag doesn't know, are reported and left out. When a command runs
+a file (the command itself, or the file handed to `bash`, `sh`, `node`, `python3` and other
+interpreters) that sits in the Claude config directory (or the project), the file is copied
+to `hooks/` and the command rewritten to `{{hooks_dir}}/<path>`. Files it sources or calls in
+turn are not followed. A script outside that directory is not copied, with a warning. Commands
+and scripts are redacted like other text, and scripts that look like secret files are skipped.
+
+**Apply** (`kitbag apply --apply-hooks`). Without `--apply-hooks` nothing is written for
+hooks, with `--yes` or without: the plan lists every hook with its command in full and says
+where its script is in the profile. With it, scripts go to `~/.claude/hooks/kitbag/` (or
+`.claude/hooks/kitbag/` in a project), marked executable where they were, and the hooks are
+added to the `hooks` of `settings.json` (an existing entry with the same event, matcher and
+command is updated, others stay). Apply is additive: a profile without hooks removes none, and
+`kitbag undo` puts back the settings and removes the script files kitbag wrote. A second apply
+with nothing changed is "Up to date". A hook (or script) that capture removed a secret from
+is not applied: edit it in the profile to read the secret from the environment. `kitbag
+inspect` and `kitbag diff` describe hooks; `--dry-run` never writes.
+
+**From a git source, `--apply-hooks` is not enough: it also needs `--trust-source`.** Without
+both, the plan lists the hooks it withheld, command in full, and nothing is written for them.
+This is on top of the removal of `hooks` from skill, command and agent frontmatter described
+above, which still applies.
+
+**Doctor.** Every hook kitbag applies is recorded with a hash of its entry and of its scripts
+(`applied-hooks.json` in the state directory). `kitbag doctor` reports one that no longer
+matches ("this hook no longer matches what kitbag applied") and counts it as a problem. Hooks
+you added yourself are not looked at. Hook commands are never resolved from the environment by
+kitbag: `${VAR}` stays in the command for the shell to expand, so no hook file holds a secret
+kitbag resolved. Shell scripts need LF line endings to run; on Windows keep `hooks/*.sh` as LF
+(`* text eol=lf` in the profile's `.gitattributes`).
 
 ### Plugins: `rules/` at the root, no `kitbag.toml`
 
@@ -785,9 +853,9 @@ wrapping of their own.
 | Command | What it does |
 |---|---|
 | `kitbag init [DIR]` | Write a commented starter profile |
-| `kitbag capture [--from IDS] [-o DIR] [--dry-run] [--force] [--prune]` | Read the current setup into a profile (secrets redacted). Writes only into a new or empty directory. `--force` replaces an existing profile's files and leaves anything else in the directory alone; the profile's MCP servers found in no tool are kept unless `--prune`. With several tools, one whose config can't be read is reported and the rest are captured |
+| `kitbag capture [--from IDS] [-o DIR] [--dry-run] [--force] [--prune] [--include hooks]` | Read the current setup into a profile (secrets redacted). Writes only into a new or empty directory. `--force` replaces an existing profile's files and leaves anything else in the directory alone; the profile's MCP servers found in no tool are kept unless `--prune`. With several tools, one whose config can't be read is reported and the rest are captured |
 | `kitbag diff <SOURCE> [--to IDS] [--exit-code]` | Show exactly what `apply` would change; never writes |
-| `kitbag apply <SOURCE> [--to IDS] [--yes] [--dry-run]` | Plan, confirm, write with backups |
+| `kitbag apply <SOURCE> [--to IDS] [--yes] [--dry-run] [--apply-hooks]` | Plan, confirm, write with backups; hooks only with `--apply-hooks` (and, from a git source, `--trust-source`) |
 | `kitbag inspect <SOURCE> [--to IDS] [--json]` | What a profile or plugin holds, what in it runs commands, reads env vars, installs executables or connects to the network, and (for the tools in `--to`, default `detected`) which files `apply` would write; never writes or starts anything |
 | `kitbag status [SOURCE] [--to IDS] [--exit-code [--strict]] [--json]` | Which managed instructions and rules differ from the profile, or changed since the last apply; never writes |
 | `kitbag sync <SOURCE> [--to IDS] [--from ID [--adopt] \| --overwrite]` | Apply without overwriting instructions edited in a tool; pull an edit back with `--from`, and what is only in that tool with `--adopt` |
@@ -803,8 +871,8 @@ Common options:
 - `--to` / `--from` take target ids (comma-separated; `claude` means `claude-code`), `all`,
   or `detected` (the default).
 - `--scope user|project` and `--project DIR` choose between global and per-project config.
-- `--secrets resolve|never`, `--no-overwrite`, `--allow-git-mcp [NAMES]` and
-  `--allow-risky-settings` (`--trust-source`) apply to `apply`, `diff` and `inspect`.
+- `--secrets resolve|never`, `--no-overwrite`, `--allow-git-mcp [NAMES]`,
+  `--allow-risky-settings` (`--trust-source`) and `--apply-hooks` apply to `apply`, `diff` and `inspect`.
 - `--path SUBDIR` selects a profile inside a repository.
 - `--require-pin` (`apply`, `diff`, `inspect`, `status`, `sync`, `doctor`) refuses a git
   source that names no branch, tag or commit.
@@ -986,7 +1054,10 @@ Good next candidates: Windsurf, Zed.
   `.agent.md` wins over a `.md`, and an agent over a chat mode. Agents VS Code keeps in its
   own profile storage aren't read. Copilot's own MCP and folder trust prompts are left alone.
 - Apply is additive and doesn't delete entries that were removed from the profile (see above).
-- **Not carried yet:** output styles (`output-styles/`), plugins and hooks. Capture lists what it found of these and leaves them out. It also drops
+- **Not carried yet:** output styles (`output-styles/`)
+  and plugins; hooks only for Claude Code, and only with `--include hooks` (see
+  [Hooks](#hooks-hooks-in-kitbagtoml-and-hooks)). Capture lists what it found of these and
+  leaves them out. It also drops
   `outputStyle` when it names a custom style (built-ins such as `Explanatory` are kept),
   since the style file wouldn't be in the profile.
 - **Encodings.** Capture reads UTF-8 (with or without a byte-order mark) and UTF-16 with a

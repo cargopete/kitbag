@@ -436,10 +436,26 @@ pub fn drop_risky_content(profile: &mut crate::model::Profile) -> Vec<String> {
     out
 }
 
+/// Take the hooks (and the scripts they run) out of a profile from a git
+/// source that isn't trusted: they run commands automatically. Returns each
+/// hook as it would have run, command in full.
+pub fn drop_hooks(profile: &mut crate::model::Profile) -> Vec<String> {
+    let out = profile.hooks.iter().map(crate::hooks::describe).collect();
+    profile.hooks.clear();
+    profile.hook_files.clear();
+    out
+}
+
 /// Commands, skills and agents that pre-approve tools, define hooks or run
 /// shell commands when used, and agents that start MCP servers of their own.
 pub fn risky_content(profile: &crate::model::Profile) -> Vec<String> {
     let mut out = Vec::new();
+    for h in &profile.hooks {
+        out.push(format!(
+            "hook that runs by itself (applied only with --apply-hooks): {}",
+            crate::hooks::describe(h)
+        ));
+    }
     let tools = |v: &Value| match v {
         Value::String(s) => s.clone(),
         Value::Array(a) => a

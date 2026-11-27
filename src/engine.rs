@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::adapters::{
-    Adapter, ApplyOptions, Env, Feature, Level, Note, Scope, ServerWrite, Support, Work,
+    Adapter, ApplyOptions, Env, Feature, HookWrite, Level, Note, Scope, ServerWrite, Support, Work,
 };
 use crate::model::Profile;
 use crate::plan_fs::{FileChange, PlanFs};
@@ -136,6 +136,16 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
         merge_named!(commands, "command");
         merge_named!(skills, "skill");
         merge_named!(agents, "agent");
+        for h in c.profile.hooks {
+            if !merged.hooks.contains(&h) {
+                merged.hooks.push(h);
+            }
+        }
+        for f in c.profile.hook_files {
+            if !merged.hook_files.iter().any(|x| x.path == f.path) {
+                merged.hook_files.push(f);
+            }
+        }
         for (t, s) in c.profile.settings {
             merged.settings.entry(t).or_insert(s);
         }
@@ -266,6 +276,9 @@ pub struct Plan {
     /// MCP server entries the plan writes or removes, with the real config
     /// file (recorded after a write, see [`crate::sync::record`]).
     pub server_writes: Vec<ServerWrite>,
+    /// Hook entries the plan writes, with the real settings and script files
+    /// (recorded after a write, see [`crate::hooks::record`]).
+    pub hook_writes: Vec<HookWrite>,
     /// Where the profile comes from ([`ApplyOptions::source`]).
     pub source: Option<String>,
     /// At project scope, the project directory (as given, and canonical):
@@ -354,6 +367,15 @@ pub fn plan(
             );
             work.info(a.id(), message);
         }
+        if !profile.hooks.is_empty() && a.id() != crate::adapters::claude_code::ID {
+            work.info(
+                a.id(),
+                format!(
+                    "{} hook(s) not applied: kitbag carries hooks to Claude Code only so far",
+                    profile.hooks.len()
+                ),
+            );
+        }
         a.apply(profile, env, opts, &mut work)?;
         applied.push(a.id().to_string());
     }
@@ -368,6 +390,20 @@ pub fn plan(
                 .fs
                 .real_path(&w.path)
                 .unwrap_or_else(|_| w.path.clone()),
+            ..w.clone()
+        })
+        .collect();
+    let real = |p: &Path| work.fs.real_path(p).unwrap_or_else(|_| p.to_path_buf());
+    let hook_writes: Vec<HookWrite> = work
+        .hook_writes
+        .iter()
+        .map(|w| HookWrite {
+            path: real(&w.path),
+            scripts: w
+                .scripts
+                .iter()
+                .map(|(p, h)| (real(p), h.clone()))
+                .collect(),
             ..w.clone()
         })
         .collect();
@@ -482,6 +518,7 @@ pub fn plan(
         removed_servers,
         withheld_removals,
         server_writes,
+        hook_writes,
         source: opts.source.clone(),
         confine_to: (env.scope == Scope::Project).then(|| {
             let root = env

@@ -9,6 +9,7 @@
 //! commands/<name>.md       reusable prompts / slash commands
 //! agents/<name>.md         custom agents (Copilot `.agent.md`; chat modes)
 //! skills/<name>/SKILL.md   agent skills, plus any supporting files
+//! hooks/<path>             scripts the `[[hooks]]` of the manifest run (optional)
 //! ```
 //!
 //! Everything in a [`Profile`] is secret-free by construction: values that are
@@ -326,6 +327,31 @@ pub struct Agent {
     pub body: String,
 }
 
+/// A hook: a shell command a tool runs on an event (before a tool call, when
+/// a session starts ...). Hooks run automatically, so kitbag carries them only
+/// when asked (see [`crate::hooks`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hook {
+    /// A neutral event name (`pre-tool`, `session-start` ...), or `claude-code:Name`
+    /// for an event only that tool has. See [`crate::hooks::EVENTS`].
+    pub event: String,
+    /// What the event is narrowed to (a tool name for `pre-tool`), as the tool
+    /// reads it. Absent: every time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matcher: Option<String>,
+    /// The shell command. A script in the profile's `hooks/` directory is
+    /// written as `{{hooks_dir}}/<path>`.
+    pub command: String,
+    /// Seconds the tool waits for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+    /// Other keys of the tool's hook entry (`args`, `shell`, `async`, `if`,
+    /// `statusMessage` ...), kept verbatim.
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub extra: Map<String, Value>,
+}
+
 /// One file inside a skill directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillFile {
@@ -365,6 +391,11 @@ pub struct Profile {
     pub commands: Vec<Command>,
     pub skills: Vec<Skill>,
     pub agents: Vec<Agent>,
+    /// Hooks, in the order they were captured. Optional: most profiles have none.
+    pub hooks: Vec<Hook>,
+    /// The scripts the hooks run (`hooks/<path>` in the profile; `path` is
+    /// relative to `hooks/`).
+    pub hook_files: Vec<SkillFile>,
     /// Problems found while loading that don't stop the profile from loading.
     pub warnings: Vec<String>,
 }
@@ -385,6 +416,7 @@ impl Profile {
             && self.commands.is_empty()
             && self.skills.is_empty()
             && self.agents.is_empty()
+            && self.hooks.is_empty()
     }
 
     pub fn sort(&mut self) {
@@ -392,6 +424,7 @@ impl Profile {
         self.commands.sort_by(|a, b| a.name.cmp(&b.name));
         self.skills.sort_by(|a, b| a.name.cmp(&b.name));
         self.agents.sort_by(|a, b| a.name.cmp(&b.name));
+        self.hook_files.sort_by(|a, b| a.path.cmp(&b.path));
     }
 }
 
@@ -463,6 +496,17 @@ pub fn portable_name_issues(p: &Profile) -> Vec<String> {
         p.agents.iter().map(|a| a.name.clone()).collect(),
         &mut issues,
     );
+    let mut hook_paths: Vec<String> = Vec::new();
+    for f in &p.hook_files {
+        let parts: Vec<&str> = f.path.split('/').collect();
+        for i in 1..parts.len() {
+            hook_paths.push(parts[..i].join("/"));
+        }
+        hook_paths.push(f.path.clone());
+    }
+    hook_paths.sort();
+    hook_paths.dedup();
+    check("hooks/", hook_paths, &mut issues);
     for s in &p.skills {
         // Every directory along a path counts, so `a/x` and `A/y` clash too.
         let mut paths: Vec<String> = Vec::new();

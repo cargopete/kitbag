@@ -18,6 +18,7 @@ use crate::secrets::{Redaction, RenderState};
 pub mod antigravity;
 pub mod claude_code;
 pub mod claude_desktop;
+mod claude_hooks;
 pub mod codex;
 pub mod common;
 pub mod copilot;
@@ -76,6 +77,9 @@ pub struct Env {
     /// Kept separate so `--home` sandboxes can ignore the real ones.
     pub locations: HashMap<String, String>,
     pub os: Os,
+    /// Capture hooks too (`capture --include hooks`). Without it they are
+    /// only counted, because they run commands automatically.
+    pub include_hooks: bool,
 }
 
 impl Env {
@@ -191,6 +195,9 @@ pub struct ApplyOptions {
     /// id; `None` for a whole rule file): `sync` holds back the ones edited
     /// by hand. Empty for `apply`.
     pub hold: BTreeSet<(PathBuf, Option<String>)>,
+    /// Write the profile's hooks (`apply --apply-hooks`). Hooks run commands
+    /// automatically, so without this they are only listed in the plan.
+    pub apply_hooks: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -223,6 +230,8 @@ pub struct Work {
     pub withheld_removals: Vec<(String, String)>,
     /// MCP server entries the plan writes or removes, for the state records.
     pub server_writes: Vec<ServerWrite>,
+    /// Hook entries the plan writes, for the state records.
+    pub hook_writes: Vec<HookWrite>,
     /// Instruction blocks and rule files kitbag manages, written or not, for
     /// drift detection (`kitbag status`).
     pub tracked: Vec<Tracked>,
@@ -243,6 +252,23 @@ pub struct ServerWrite {
     pub path: PathBuf,
     pub name: String,
     pub hash: Option<String>,
+}
+
+/// One hook entry a plan writes, with the scripts that go with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookWrite {
+    pub target: String,
+    /// The settings file, as the adapter spelled it until the plan resolves it.
+    pub path: PathBuf,
+    /// The tool's own event name.
+    pub event: String,
+    pub matcher: Option<String>,
+    pub command: String,
+    /// [`crate::sync::entry_hash`] of the entry as written.
+    pub hash: String,
+    /// The scripts it runs that the plan writes: path (as the adapter spelled
+    /// it) and SHA-256 of the content.
+    pub scripts: Vec<(PathBuf, String)>,
 }
 
 /// One instructions item kitbag manages in a tool: a managed block in a
