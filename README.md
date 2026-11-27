@@ -1177,6 +1177,18 @@ No further candidates are named here; open an issue for the tool you miss. Issue
 - **Codex custom prompts** are written for commands at user scope only. Codex now favours skills,
   and kitbag notes this. Codex loads `.codex/config.toml` only in trusted projects and reads the
   first 32 KiB of `AGENTS.md` by default. kitbag warns about both.
+- **Commands not carried, by design** (docs checked 2026-11-27; the Commands column says `-` or `user`
+  for these). Hermes Agent: its `quick_commands` in `config.yaml` map a slash command to a shell
+  command or another slash command and, in its docs' words, "string-only prompt shortcuts are not
+  supported"; there is no commands folder. Installed skills also appear as slash commands, and
+  kitbag already carries Hermes skills, but profile `commands/` are not rewritten as Hermes skills.
+  Claude Desktop (the chat app) has no standalone commands folder; official docs
+  (claude.com/docs/third-party/claude-desktop/extensions, checked 2026-11-27) place slash-command
+  definitions in a plugin's `commands/` directory, which is plugin layout and is tracked in #12.
+  Copilot's user-level prompt files live in VS Code's profile storage, with no path the docs
+  name, and VS Code is deprecating prompt files in favour of skills. Codex custom prompts are
+  documented for `~/.codex/prompts/` only, and are deprecated for skills. Continue documents no
+  prompts folder. Zed and Antigravity workflows: see their notes.
 - **Claude Desktop** has no official Linux build. The `~/.config/Claude` path matches community
   builds.
 - At project scope, Cursor, Codex and opencode all read `AGENTS.md`. When Cursor is targeted
