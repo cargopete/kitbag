@@ -187,6 +187,7 @@ fn codex_server(
             if !from_env.is_empty() {
                 t.insert("env_http_headers".into(), Value::Object(from_env));
             }
+            super::common::add_oauth(work, ID, name, (s, s), &mut t);
         }
         Transport::Sse => {
             work.warn(ID, format!("MCP server '{name}': Codex supports stdio and streamable HTTP only; SSE server skipped"));
@@ -223,7 +224,7 @@ fn import(cap: &mut Captured, name: &str, def: &Map<String, Value>) {
     let dropped: Vec<&str> = def
         .keys()
         .map(String::as_str)
-        .filter(|k| !MANAGED_KEYS.contains(k))
+        .filter(|k| !MANAGED_KEYS.contains(k) && !crate::oauth::KEYS.contains(k))
         .collect();
     if !dropped.is_empty() {
         cap.info(
@@ -242,6 +243,7 @@ fn import(cap: &mut Captured, name: &str, def: &Map<String, Value>) {
         url: str_of(def.get("url")),
         headers,
         disabled: def.get("enabled") == Some(&Value::Bool(false)),
+        oauth: crate::oauth::read(ID, def),
         ..Default::default()
     };
     import_server(cap, ID, name, s, false);
@@ -537,6 +539,7 @@ impl Adapter for Codex {
                     &p.config,
                     &merged.dropped,
                 );
+                super::common::note_refused_oauth(work, ID, &name, &p.config, &merged.refused);
                 match servers.get_mut(&name).and_then(Item::as_table_mut) {
                     // Update in place so the table keeps its position and comments.
                     Some(t) => {
@@ -545,11 +548,13 @@ impl Adapter for Codex {
                             .copied()
                             .chain(merged.dropped.iter().map(String::as_str))
                         {
-                            if !want.contains_key(k) {
+                            if !merged.def.contains_key(k) {
                                 t.remove(k);
                             }
                         }
-                        for (k, v) in &want {
+                        // `merged.def` is the wanted keys over what is already
+                        // there, so OAuth settings the user keeps beside ours stay.
+                        for (k, v) in &merged.def {
                             if let Some(val) = json_to_value(v)
                                 && t.get(k).map(item_to_json).as_ref() != Some(v)
                             {

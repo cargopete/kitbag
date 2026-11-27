@@ -477,6 +477,70 @@ names broad rules, judged case-insensitively and ignoring extra whitespace: bare
 (`Read(//**)`, `Edit(~/**)`), shells, interpreters, package runners and containers with open
 arguments (`Bash(npx:*)`, `Bash(docker run:*)`), and piping into a shell (`… | sh`).
 
+### MCP OAuth: `[mcp_servers.<name>.oauth]`
+
+A remote server that needs a pre-registered OAuth client can carry the client's *configuration*,
+so the server is ready to sign in on the tool you apply to:
+
+```toml
+[mcp_servers.linear]
+url = "https://mcp.example.com/mcp"
+
+[mcp_servers.linear.oauth]
+client_id = "your-client-id"
+client_secret = "${LINEAR_CLIENT_SECRET}"   # an env reference only, never the value
+scopes = ["read", "write"]
+callback_port = 8080
+```
+
+Other keys: `enabled` (`false` for a server that doesn't use OAuth, such as one with a header
+credential; `true` marks one that does), `redirect_uri`, `auth_server_metadata_url`,
+`authorization_url`, `token_url`, `issuer` and `resource`. Each is written under the tool's own
+name and only where the tool's official docs name a key (read 2026-11-27):
+
+| Tool | Written | Sign in with |
+|---|---|---|
+| `claude-code` | `oauth.clientId`, `callbackPort`, `scopes` (one space-separated string), `authServerMetadataUrl`. Its docs keep the client secret in the keychain or a credentials file, "not in your config", so none is written | `/mcp`, or `claude mcp login <name>` |
+| `gemini-cli` | `oauth.enabled`, `clientId`, `clientSecret`, `authorizationUrl`, `issuer`, `tokenUrl`, `scopes`, `redirectUri` (`tokenParamName`, `audiences` and the other keys on the entry are left as they are) | `/mcp auth <name>` |
+| `opencode` | `oauth.client_id`, `client_secret` (as `{env:NAME}`), `scope` (space-separated), `callback_port`, `redirect_uri`, `auth_server_metadata_url`, or `oauth: false` | `opencode mcp auth <name>` (or `/mcps`) |
+| `codex` | `oauth.client_id`, `oauth.callback_port`, `scopes`, `oauth_resource`. `oauth.client_secret` is "stored in configuration" as plain text and no env reference is documented, so none is written | `codex mcp login <name>` |
+| `cursor` | `auth.CLIENT_ID`, `auth.CLIENT_SECRET` (as `${env:NAME}`); the docs don't say what type `scopes` has, so they are not written | none named in the docs |
+| `hermes` | `auth: oauth`, `oauth.client_id`, `client_secret` (`${VAR}`), `redirect_uri`; its `redirect_host`, `redirect_port`, `timeout` and `flow` are left as they are | `hermes mcp login <name>` |
+
+Capture reads the same keys from each tool's own server entry, and only there: no keychain, no
+token file, no credentials store is opened. Two tools that each name some of a server's OAuth
+settings make one server with both sets.
+
+**What is never carried.** Access tokens, refresh tokens, expiry times, and the files and
+keychain items that hold them (`~/.gemini/mcp-oauth-tokens.json`, `$CODEX_HOME/.credentials.json`,
+Hermes's `auth.json` and `mcp-tokens/`, Amp's and Claude Code's stored sign-ins) are not read,
+written, copied or printed, and kitbag never starts a sign-in. A client secret is a
+credential: it is carried only as an env reference (`${VAR}`, or the tool's own `{env:VAR}` /
+`${env:VAR}` spelling, which capture turns back into `${VAR}`). A literal secret found in a
+tool's config is left out of the profile with a warning that says so (never what it was), and a
+literal in a `kitbag.toml` is refused. Where the tool has no documented place for the secret, it
+isn't written there at all, and the plan says so.
+
+**A different URL, a different server.** OAuth settings are written to an entry only if it is new
+or still connects to the same URL. An entry that now points somewhere else loses the old
+entry's OAuth settings (as before) and does not get the profile's either; the plan warns, and you
+sign in again.
+
+**Sign-in checklist.** After the plan and again after an apply, kitbag lists the servers that
+still need a sign-in on each tool, with that tool's own command: servers whose profile has
+OAuth settings (or `auth: oauth` from Hermes), and, on opencode, remote servers with no header
+credentials, which its docs say use OAuth unless `oauth` is `false`. Local servers and
+`oauth.enabled = false` servers are never listed, and neither is every HTTP server. Signing in
+is yours to do; across tools, sign in again.
+
+**Documented skips (2026-11-27).** GitHub Copilot's MCP docs don't name `oauthClientId`,
+`oauthScopes`, `oauthPublicClient` or `oauthGrantType`, so those stay unread, as before. Zed
+documents an in-app sign-in prompt and no keys. Amp's `amp.mcpServers` has no `oauth` keys (its
+docs show only `amp mcp oauth login` flags, whose use needs `--server-url` and more), so its
+existing `oauth` object is kept while the URL is unchanged, as before, and nothing is captured
+or listed. Claude Desktop's docs name none. Moving a *signed-in* session to another tool or
+machine is not done here; it waits for the encrypted secrets bundle (#9).
+
 ### Rules: `rules/<name>.md`
 
 ```markdown

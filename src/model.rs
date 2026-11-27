@@ -285,6 +285,135 @@ pub struct McpServer {
     /// Keep the definition but mark it disabled where the target supports that.
     #[serde(default, skip_serializing_if = "is_false")]
     pub disabled: bool,
+    /// OAuth client configuration for a remote server (never tokens).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<McpOauth>,
+}
+
+/// The OAuth client configuration of a remote MCP server: what a tool needs
+/// to start the sign-in. Never an access or refresh token, and never a
+/// literal client secret: `client_secret` may only be an env reference
+/// (`${VAR}`), which each tool gets in its own spelling where it documents one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpOauth {
+    /// `true`: the server signs in with OAuth. `false`: it does not (a header
+    /// credential, say), where the tool can be told so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// A pre-registered client's id, as the server's publisher issued it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// An env reference to the client secret, `${VAR}`; a literal is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    /// The fixed local port of the sign-in callback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_server_metadata_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    /// The RFC 8707 resource parameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+}
+
+impl McpOauth {
+    /// Every string value, with its location below `oauth.`.
+    pub fn strings(&self) -> Vec<(String, &str)> {
+        let mut out = Vec::new();
+        for (k, v) in [
+            ("client_id", &self.client_id),
+            ("client_secret", &self.client_secret),
+            ("redirect_uri", &self.redirect_uri),
+            ("auth_server_metadata_url", &self.auth_server_metadata_url),
+            ("authorization_url", &self.authorization_url),
+            ("token_url", &self.token_url),
+            ("issuer", &self.issuer),
+            ("resource", &self.resource),
+        ] {
+            if let Some(v) = v {
+                out.push((format!("oauth.{k}"), v.as_str()));
+            }
+        }
+        for (i, v) in self.scopes.iter().enumerate() {
+            out.push((format!("oauth.scopes[{i}]"), v.as_str()));
+        }
+        out
+    }
+
+    fn slot(&mut self, location: &str) -> Option<&mut String> {
+        let k = location.strip_prefix("oauth.")?;
+        match k {
+            "client_id" => self.client_id.as_mut(),
+            "client_secret" => self.client_secret.as_mut(),
+            "redirect_uri" => self.redirect_uri.as_mut(),
+            "auth_server_metadata_url" => self.auth_server_metadata_url.as_mut(),
+            "authorization_url" => self.authorization_url.as_mut(),
+            "token_url" => self.token_url.as_mut(),
+            "issuer" => self.issuer.as_mut(),
+            "resource" => self.resource.as_mut(),
+            _ => k
+                .strip_prefix("scopes[")
+                .and_then(|r| r.strip_suffix(']'))
+                .and_then(|i| i.parse::<usize>().ok())
+                .and_then(|i| self.scopes.get_mut(i)),
+        }
+    }
+
+    /// Take the settings `other` has and this lacks (what another tool's
+    /// config for the same server says).
+    pub fn fill_from(&mut self, other: &McpOauth) {
+        let o = other.clone();
+        self.enabled = self.enabled.or(o.enabled);
+        self.client_id = self.client_id.take().or(o.client_id);
+        self.client_secret = self.client_secret.take().or(o.client_secret);
+        if self.scopes.is_empty() {
+            self.scopes = o.scopes;
+        }
+        self.callback_port = self.callback_port.or(o.callback_port);
+        self.redirect_uri = self.redirect_uri.take().or(o.redirect_uri);
+        self.auth_server_metadata_url = self
+            .auth_server_metadata_url
+            .take()
+            .or(o.auth_server_metadata_url);
+        self.authorization_url = self.authorization_url.take().or(o.authorization_url);
+        self.token_url = self.token_url.take().or(o.token_url);
+        self.issuer = self.issuer.take().or(o.issuer);
+        self.resource = self.resource.take().or(o.resource);
+    }
+
+    /// Does this say the server signs in with OAuth?
+    pub fn is_on(&self) -> bool {
+        self.enabled != Some(false)
+    }
+
+    /// Problems that make this unusable. A client secret must be one env
+    /// reference without a fallback value.
+    pub fn validate(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+        if let Some(s) = &self.client_secret
+            && !crate::secrets::sole_ref(s).is_some_and(|r| r.fallback.is_none())
+        {
+            issues.push(
+                "oauth.client_secret must be an env reference such as ${CLIENT_SECRET} (a secret is not kept in a profile)"
+                    .to_string(),
+            );
+        }
+        if self.callback_port == Some(0) {
+            issues.push("oauth.callback_port must be from 1 to 65535".to_string());
+        }
+        issues
+    }
 }
 
 impl McpServer {
@@ -347,6 +476,9 @@ impl McpServer {
         for (k, v) in &self.headers {
             out.push((format!("headers.{k}"), v.as_str()));
         }
+        if let Some(o) = &self.oauth {
+            out.extend(o.strings());
+        }
         out
     }
 
@@ -359,6 +491,14 @@ impl McpServer {
         s.cwd = s.cwd.as_deref().map(&mut f);
         s.url = s.url.as_deref().map(&mut f);
         s.headers = s.headers.iter().map(|(k, v)| (k.clone(), f(v))).collect();
+        if let Some(o) = &mut s.oauth {
+            let locations: Vec<String> = o.strings().into_iter().map(|(l, _)| l).collect();
+            for l in locations {
+                if let Some(v) = o.slot(&l) {
+                    *v = f(v);
+                }
+            }
+        }
         s
     }
 
@@ -379,6 +519,8 @@ impl McpServer {
             self.env.get_mut(k)
         } else if let Some(k) = location.strip_prefix("headers.") {
             self.headers.get_mut(k)
+        } else if location.starts_with("oauth.") {
+            self.oauth.as_mut().and_then(|o| o.slot(location))
         } else {
             None
         };
@@ -404,6 +546,12 @@ impl McpServer {
         }
         if t == Transport::Stdio && !self.headers.is_empty() {
             issues.push("'headers' only apply to remote servers".into());
+        }
+        if let Some(o) = &self.oauth {
+            if t == Transport::Stdio {
+                issues.push("'oauth' only applies to remote servers".into());
+            }
+            issues.extend(o.validate());
         }
         issues
     }

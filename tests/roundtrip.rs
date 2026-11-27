@@ -163,7 +163,10 @@ fn opencode_to_claude_code_user() {
             assert!(!b.mcp_servers.contains_key(name), "disabled: {name}");
             continue;
         }
-        assert_eq!(&b.mcp_servers[name], s, "server {name}");
+        // `oauth: false` is a switch only opencode has a key for.
+        let mut s = s.clone();
+        s.oauth = None;
+        assert_eq!(&b.mcp_servers[name], &s, "server {name}");
     }
     assert_eq!(b.instructions, a.instructions);
 }

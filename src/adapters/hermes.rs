@@ -887,7 +887,7 @@ fn capture_server(cap: &mut Captured, name: &str, def: &Map<String, Value>) {
     let other: Vec<&str> = def
         .keys()
         .map(String::as_str)
-        .filter(|k| !MANAGED_KEYS.contains(k))
+        .filter(|k| !MANAGED_KEYS.contains(k) && !matches!(*k, "auth" | "oauth"))
         .collect();
     if !other.is_empty() {
         cap.info(
@@ -902,10 +902,11 @@ fn capture_server(cap: &mut Captured, name: &str, def: &Map<String, Value>) {
         cap.warn(
             ID,
             format!(
-                "MCP server '{name}' signs in with OAuth; kitbag doesn't carry the sign-in or its tokens, so other tools will ask you to sign in"
+                "MCP server '{name}' signs in with OAuth; kitbag carries its OAuth settings, never the sign-in or its tokens, so other tools will ask you to sign in"
             ),
         );
     }
+    s.oauth = crate::oauth::read(ID, def);
     import_server(cap, ID, name, s, false);
 }
 
@@ -959,12 +960,14 @@ fn apply_servers(
     let mut servers: Vec<(String, Value)> = Vec::new();
     let mut with_refs = false;
     for (name, s) in servers_for(profile, ID, work, true) {
+        let original = s;
         let s = render_server(s, RefStyle::DollarPlain, env, work);
         with_refs |= crate::secrets::has_ref(&format!(
             "{:?}{:?}{:?}{:?}",
             s.command, s.args, s.env, s.headers
         )) || s.url.as_deref().is_some_and(crate::secrets::has_ref);
-        let def = entry_for(name, &s, work);
+        let mut def = entry_for(name, &s, work);
+        super::common::add_oauth(work, ID, name, (original, &s), &mut def);
         servers.push((name.clone(), Value::Object(def)));
     }
     if with_refs {
@@ -1042,6 +1045,7 @@ fn merge_yaml_servers(
             continue;
         }
         note_dropped_server_keys(work, ID, name, path, &merged.dropped);
+        super::common::note_refused_oauth(work, ID, name, path, &merged.refused);
         let def = Value::Object(merged.def);
         doc.set(SECTION, name, &def)?;
         work.changed_servers.push((ID.to_string(), name.clone()));

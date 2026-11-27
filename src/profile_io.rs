@@ -1273,6 +1273,15 @@ pub fn scan_for_secrets(p: &Profile) -> Vec<String> {
                 ));
             }
         }
+        // A client secret is only ever an env reference.
+        if let Some(o) = &s.oauth
+            && o.client_secret.is_some()
+            && !crate::oauth::secret_is_ref(o)
+        {
+            out_extra.push(format!(
+                "mcp_servers.{n}.oauth.client_secret: looks like a secret (client-secret-literal)"
+            ));
+        }
         // Anything capture-time redaction would still replace is a secret too.
         // (Secret fallbacks are reported above, with a clearer message.)
         for r in redact_server(n, s).1 {

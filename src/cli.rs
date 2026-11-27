@@ -1220,6 +1220,22 @@ fn change_line(c: &crate::plan_fs::FileChange, env: &Env) -> String {
     )
 }
 
+/// The servers that still need a sign-in, with each tool's own command.
+fn print_signins(plan: &Plan, heading: &str) {
+    if plan.signins.is_empty() {
+        return;
+    }
+    println!("\n{}", paint(YELLOW, heading));
+    for s in &plan.signins {
+        println!(
+            "  {}  {}  {}",
+            visible_line(&s.server),
+            paint(DIM, format!("({})", s.target)),
+            paint(BOLD, visible_line(&s.command))
+        );
+    }
+}
+
 fn print_plan_extras(plan: &Plan, remote: bool) {
     if !plan.notes.is_empty() {
         println!();
@@ -1234,6 +1250,10 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
             println!("  - {}", visible_line(r));
         }
     }
+    print_signins(
+        plan,
+        "Sign in to these MCP servers after applying (kitbag never signs in or touches tokens):",
+    );
     if !plan.extensions.is_empty() {
         println!(
             "\n{}",
@@ -2429,6 +2449,7 @@ fn present(
                         tx.entries.len(),
                         paint(BOLD, format!("kitbag undo {}", tx.id))
                     );
+                    print_signins(plan, "Next, sign in to these MCP servers:");
                 }
                 None => {
                     record(None)?;

@@ -743,6 +743,9 @@ pub struct MergedServer {
     /// Keys of the existing entry that were not carried over, because the
     /// server now runs a different command or args, or connects to a different URL.
     pub dropped: Vec<String>,
+    /// OAuth settings the profile wanted that were not written, because the
+    /// entry now connects to a different URL than the one that was there.
+    pub refused: Vec<String>,
 }
 
 /// Combine an existing server definition with the one kitbag wants: keys kitbag
@@ -762,21 +765,47 @@ pub fn merge_server_def(
         return Some(MergedServer {
             def: want.clone(),
             dropped: Vec::new(),
+            refused: Vec::new(),
         });
     };
     let extra = cur.iter().filter(|(k, _)| !managed.contains(&k.as_str()));
     let mut dropped = Vec::new();
-    let mut out: Map<String, Value> = if same_server(cur, want) {
+    let mut refused = Vec::new();
+    let same_url = same_server(cur, want);
+    let mut out: Map<String, Value> = if same_url {
         extra.map(|(k, v)| (k.clone(), v.clone())).collect()
     } else {
         dropped = extra.map(|(k, _)| k.clone()).collect();
         Map::new()
     };
     for (k, v) in want {
-        out.insert(k.clone(), v.clone());
+        let oauth = crate::oauth::KEYS.contains(&k.as_str());
+        // OAuth configuration belongs to one server: it is not written onto an
+        // entry that now connects somewhere else (`oauth: false` only says the
+        // server doesn't use it, so that one is).
+        if oauth && !same_url && *v != Value::Bool(false) {
+            refused.push(k.clone());
+            continue;
+        }
+        match (out.get_mut(k), v) {
+            // Keep what the user set inside the tool's own OAuth table
+            // (`audiences`, a registered redirect...) next to what we write.
+            (Some(Value::Object(have)), Value::Object(add)) if oauth => {
+                for (ik, iv) in add {
+                    have.insert(ik.clone(), iv.clone());
+                }
+            }
+            _ => {
+                out.insert(k.clone(), v.clone());
+            }
+        }
     }
     let same = out.len() == cur.len() && out.iter().all(|(k, v)| cur.get(k) == Some(v));
-    (!same).then_some(MergedServer { def: out, dropped })
+    (!same).then_some(MergedServer {
+        def: out,
+        dropped,
+        refused,
+    })
 }
 
 /// Note the keys a replaced server entry lost.
@@ -794,6 +823,73 @@ pub fn note_dropped_server_keys(
                 "MCP server '{name}' in {} now runs a different command, arguments or URL, so settings of the old entry were not kept: {}",
                 path.display(),
                 dropped.join(", ")
+            ),
+        );
+    }
+}
+
+/// Add `original`'s OAuth configuration to `def`, in `target`'s own keys.
+/// `rendered` is the same server with its references in the tool's style.
+/// Says what was left out, and why, in notes. A client secret is written only
+/// where the tool documents a place for it in the entry and only as the
+/// reference it is in the profile, never as a value.
+pub fn add_oauth(
+    work: &mut Work,
+    target: &str,
+    name: &str,
+    (original, rendered): (&McpServer, &McpServer),
+    def: &mut Map<String, Value>,
+) {
+    let (Some(o), Some(r)) = (&original.oauth, &rendered.oauth) else {
+        return;
+    };
+    let w = crate::oauth::write(target, r, crate::oauth::secret_is_ref(o));
+    for (k, v) in w.keys {
+        def.insert(k, v);
+    }
+    if !w.unsupported.is_empty() {
+        work.info(
+            target,
+            format!(
+                "MCP server '{name}': no documented {target} key for OAuth setting(s) {}; not written",
+                w.unsupported.join(", ")
+            ),
+        );
+    }
+    if w.secret_not_written && o.client_secret.is_some() {
+        let why = match target {
+            "claude-code" => {
+                "Claude Code keeps it in the system keychain or a credentials file, not in the config"
+            }
+            "codex" => {
+                "Codex stores it in config.toml as plain text and documents no env reference there"
+            }
+            _ if !crate::oauth::secret_is_ref(o) => "it is not an env reference",
+            _ => "its docs name no place for it in the entry",
+        };
+        work.warn(
+            target,
+            format!(
+                "MCP server '{name}': the OAuth client secret was not written to {target} ({why}); set it up in the tool"
+            ),
+        );
+    }
+}
+
+/// Note OAuth settings that were not written because the server's URL changed.
+pub fn note_refused_oauth(
+    work: &mut Work,
+    target: &str,
+    name: &str,
+    path: &Path,
+    refused: &[String],
+) {
+    if !refused.is_empty() {
+        work.warn(
+            target,
+            format!(
+                "MCP server '{name}' in {} now connects to a different URL, so the profile's OAuth settings were not written onto it (an OAuth client belongs to one server); sign in again, or remove the entry and apply once more",
+                path.display()
             ),
         );
     }
@@ -884,6 +980,7 @@ pub fn merge_json_servers_off(
             continue;
         }
         note_dropped_server_keys(work, target, name, path, &merged.dropped);
+        note_refused_oauth(work, target, name, path, &merged.refused);
         let mut full: Vec<&str> = key_path.to_vec();
         full.push(name);
         let def = Value::Object(merged.def);
@@ -1668,6 +1765,19 @@ pub fn import_server(
             format!("skipped MCP server '{name}': no command or url"),
         );
         return;
+    }
+    if s.oauth.is_some() && s.url.is_none() {
+        s.oauth = None;
+    }
+    // A client secret is a credential, not configuration: only an env
+    // reference to it comes along. The value is never shown.
+    if crate::oauth::drop_literal_secret(&mut s) {
+        cap.warn(
+            target,
+            format!(
+                "MCP server '{name}': its OAuth client_secret is a literal value and was left out of the profile (kitbag keeps credentials out of profiles; the encrypted secrets bundle, #9, may carry it later). Use an env reference such as ${{CLIENT_SECRET}} in the tool to have it carried"
+            ),
+        );
     }
     // An explicit transport is only needed when inference would get it wrong.
     if s.transport == Some(Transport::Http)
