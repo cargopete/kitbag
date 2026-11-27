@@ -169,6 +169,22 @@ enum Cmd {
         #[command(flatten)]
         apply: ApplyArgs,
     },
+    /// Turn an MCP server, rule, command, skill or agent off for one tool, or
+    /// all of them, in a profile on this machine (sets 'disabled_on' /
+    /// 'targets'; applies nothing, run 'kitbag apply' after)
+    #[command(after_help = TOGGLE_HELP)]
+    Disable {
+        #[command(flatten)]
+        args: ToggleArgs,
+    },
+    /// Turn an MCP server, rule, command, skill or agent back on for one
+    /// tool, or all of them, in a profile on this machine (applies nothing,
+    /// run 'kitbag apply' after)
+    #[command(after_help = TOGGLE_HELP)]
+    Enable {
+        #[command(flatten)]
+        args: ToggleArgs,
+    },
     /// Revert the most recent apply (or the one with this id)
     Undo {
         /// Transaction id or unique prefix (see 'kitbag history')
@@ -248,6 +264,37 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+}
+
+const TOGGLE_HELP: &str = "\
+Only the profile's files change: its 'targets' / 'disabled_on' on the item.
+Nothing is written to a tool until you run 'kitbag apply' (which then skips the
+item on a tool it is off for, and removes what kitbag wrote there earlier).
+
+The profile must be a directory on this machine; to change one from a git
+source, copy it first. A name used by more than one kind of item needs a
+prefix: mcp:NAME, rule:NAME, command:NAME, skill:NAME or agent:NAME. Hooks have
+no per-tool setting and can't be enabled or disabled here.
+
+Examples:
+  kitbag disable github --on codex ~/dotagents
+  kitbag disable skill:review --on cursor,codex
+  kitbag enable github --on codex ~/dotagents
+  kitbag disable deploy            (off everywhere)
+  kitbag enable deploy             (on everywhere again)";
+
+#[derive(Args, Debug, Clone)]
+struct ToggleArgs {
+    /// MCP server, rule, command, skill or agent name; with a prefix
+    /// (mcp:, rule:, command:, skill:, agent:) when the name is not unique
+    item: String,
+    /// Profile directory [default: the current directory]
+    profile: Option<String>,
+    /// Only for these tools: ids, comma-separated (claude-code (alias: claude),
+    /// cursor, codex, gemini-cli, claude-desktop, antigravity, opencode,
+    /// copilot, grok-build, windsurf, zed, hermes). Without it, every tool
+    #[arg(long, value_name = "IDS", value_delimiter = ',')]
+    on: Vec<String>,
 }
 
 /// What `capture --include` adds to a capture.
@@ -662,6 +709,8 @@ pub fn run(cli: Cli) -> Result<i32> {
             &apply,
             &sync,
         ),
+        Cmd::Disable { args } => cmd_toggle(false, &args),
+        Cmd::Enable { args } => cmd_toggle(true, &args),
         Cmd::Undo { id, force } => cmd_undo(&context(home, None)?, id.as_deref(), force),
         Cmd::History { json } => cmd_history(&context(home, None)?, json),
         Cmd::Doctor {
@@ -732,6 +781,55 @@ fn check_name_flag(name: Option<&str>) -> Result<()> {
         bail!("--name {why}");
     }
     Ok(())
+}
+
+/// Does `src` look like a git URL (or shorthand) rather than a directory?
+fn looks_remote(src: &str) -> bool {
+    src.contains("://")
+        || src.starts_with("github:")
+        || src.starts_with("gh:")
+        || src.starts_with("git@")
+        || src.ends_with(".git")
+}
+
+fn cmd_toggle(enable: bool, a: &ToggleArgs) -> Result<i32> {
+    let verb = if enable { "enable" } else { "disable" };
+    let src = a.profile.as_deref().unwrap_or(".");
+    let dir = Path::new(src);
+    if !dir.is_dir() {
+        if looks_remote(src) {
+            bail!(
+                "'kitbag {verb}' edits a profile directory on this machine, not a git source; clone or copy {src} first, edit the copy, and apply that"
+            );
+        }
+        bail!("{src} is not a directory; give the profile directory to edit");
+    }
+    let out = crate::toggle::toggle(dir, &a.item, enable, &a.on)?;
+    let all = adapters::ids();
+    let what = format!("{} '{}'", out.kind.label(), out.name);
+    let file = out.file.display();
+    if out.changed {
+        println!(
+            "{} {what}: {}  (was: {})",
+            paint(GREEN, if enable { "Enabled" } else { "Disabled" }),
+            crate::toggle::describe(&out.after, &all),
+            crate::toggle::describe(&out.before, &all),
+        );
+        println!("  edited {file}");
+        println!(
+            "{}",
+            paint(
+                DIM,
+                format!("Nothing was applied. Run 'kitbag apply {src}' to update your tools.")
+            )
+        );
+    } else {
+        println!(
+            "{what} is already {}; {file} is unchanged.",
+            crate::toggle::describe(&out.after, &all)
+        );
+    }
+    Ok(0)
 }
 
 fn cmd_init(dir: &Path, name: Option<String>, force: bool) -> Result<i32> {
