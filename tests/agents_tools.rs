@@ -490,3 +490,52 @@ fn list_targets_reports_native_agents_and_their_folders() {
         assert!(std::path::Path::new(dir).ends_with(want), "{}: {dir}", t.id);
     }
 }
+
+/// Tools whose official docs give no agent file format (Cline, Grok Build), or keep
+/// agents elsewhere (Amp plugins, Zed settings, Roo modes, Continue checks, Windsurf, Hermes)
+/// get no agent files; the plan says the agents were skipped.
+#[test]
+fn tools_without_agent_files_write_nothing_and_say_so() {
+    for id in [
+        "cline",
+        "grok-build",
+        "amp",
+        "continue",
+        "roo",
+        "zed",
+        "windsurf",
+        "hermes",
+    ] {
+        let sb = Sandbox::empty();
+        profile(&sb, &[("reviewer", PLAIN)]);
+        let (ok, out) = run(&sb, &["apply", "p", "--to", id, "--yes"]);
+        assert!(ok, "{id}: {out}");
+        assert!(
+            out.contains("skipped: 1 agents") || out.contains("custom agent(s) not written"),
+            "{id}: {out}"
+        );
+        for dir in [
+            "home/.cline/agents",
+            "home/.grok/agents",
+            "home/.continue/agents",
+            "home/.roo/agents",
+            "home/.zed/agents",
+            "home/.hermes/agents",
+            "home/.config/amp/agents",
+            "home/.devin",
+            "home/.config/devin",
+        ] {
+            assert!(!sb.path(dir).exists(), "{id}: {dir} was created");
+        }
+    }
+}
+
+/// The Grok Build note says what the docs lack, not that kitbag hasn't got round to it.
+#[test]
+fn grok_build_note_cites_the_missing_format() {
+    let sb = Sandbox::empty();
+    profile(&sb, &[("reviewer", PLAIN)]);
+    let (ok, out) = run(&sb, &["apply", "p", "--to", "grok-build", "--yes"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("documents no agent file format"), "{out}");
+}
