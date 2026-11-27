@@ -87,6 +87,9 @@ pub struct Env {
     /// Capture hooks too (`capture --include hooks`). Without it they are
     /// only counted, because they run commands automatically.
     pub include_hooks: bool,
+    /// Capture memory notes too (`capture --include memory`). Off by default:
+    /// notes can hold personal or client details (see [`crate::memory`]).
+    pub include_memory: bool,
 }
 
 impl Env {

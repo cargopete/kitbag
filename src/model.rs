@@ -11,6 +11,7 @@
 //! output-styles/<name>.md  Claude Code output styles (response role, tone and format)
 //! skills/<name>/SKILL.md   agent skills, plus any supporting files
 //! hooks/<path>             scripts the `[[hooks]]` of the manifest run (optional)
+//! memory/<tool>/<scope>/<file>.md  memory notes, only with `capture --include memory` (see [`crate::memory`])
 //! ```
 //!
 //! Everything in a [`Profile`] is secret-free by construction: values that are
@@ -558,6 +559,10 @@ pub struct Profile {
     /// The scripts the hooks run (`hooks/<path>` in the profile; `path` is
     /// relative to `hooks/`).
     pub hook_files: Vec<SkillFile>,
+    /// Memory notes (`memory/<tool>/<scope>/<file>.md`; `path` is relative to
+    /// `memory/`). Optional, and only there when captured with
+    /// `--include memory` (see [`crate::memory`]).
+    pub memory: Vec<SkillFile>,
     /// Plugins and the marketplaces they come from, by reference, per target
     /// (see [`crate::plugins`]).
     pub plugins: BTreeMap<String, crate::plugins::PluginSet>,
@@ -583,6 +588,7 @@ impl Profile {
             && self.agents.is_empty()
             && self.output_styles.is_empty()
             && self.hooks.is_empty()
+            && self.memory.is_empty()
             && self
                 .plugins
                 .values()
@@ -596,6 +602,7 @@ impl Profile {
         self.agents.sort_by(|a, b| a.name.cmp(&b.name));
         self.output_styles.sort_by(|a, b| a.name.cmp(&b.name));
         self.hook_files.sort_by(|a, b| a.path.cmp(&b.path));
+        self.memory.sort_by(|a, b| a.path.cmp(&b.path));
     }
 }
 
@@ -746,6 +753,17 @@ pub fn portable_name_issues(p: &Profile) -> Vec<String> {
     hook_paths.sort();
     hook_paths.dedup();
     check("hooks/", hook_paths, &mut issues);
+    let mut memory_paths: Vec<String> = Vec::new();
+    for f in &p.memory {
+        let parts: Vec<&str> = f.path.split('/').collect();
+        for i in 1..parts.len() {
+            memory_paths.push(parts[..i].join("/"));
+        }
+        memory_paths.push(f.path.clone());
+    }
+    memory_paths.sort();
+    memory_paths.dedup();
+    check("memory/", memory_paths, &mut issues);
     for s in &p.skills {
         // Every directory along a path counts, so `a/x` and `A/y` clash too.
         let mut paths: Vec<String> = Vec::new();

@@ -303,6 +303,8 @@ struct ToggleArgs {
 enum Include {
     /// Hooks, and the scripts they run
     Hooks,
+    /// Memory notes: Claude Code auto memory, Codex memories, Hermes MEMORY.md and USER.md
+    Memory,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -564,6 +566,7 @@ fn context(home_flag: Option<&Path>, place: Option<&Place>) -> Result<Ctx> {
             locations,
             os: Os::current(),
             include_hooks: false,
+            include_memory: false,
         },
         state_dir,
     })
@@ -656,6 +659,7 @@ pub fn run(cli: Cli) -> Result<i32> {
         } => {
             let mut ctx = context(home, Some(&place))?;
             ctx.env.include_hooks = include.contains(&Include::Hooks);
+            ctx.env.include_memory = include.contains(&Include::Memory);
             cmd_capture(&ctx, &from, &out, name, force, prune, dry_run)
         }
         Cmd::Apply {
@@ -960,6 +964,18 @@ fn cmd_capture(
             });
         }
     }
+    if let Some(old) = old.as_ref().filter(|_| !env.include_memory) {
+        let n = profile_io::keep_memory(&mut r.profile, old);
+        if n > 0 {
+            r.notes.push(adapters::Note {
+                level: adapters::Level::Info,
+                target: PROFILE_NOTE.to_string(),
+                message: format!(
+                    "kept the {n} memory note(s) of the existing profile: memory is only captured with --include memory"
+                ),
+            });
+        }
+    }
     if !kept.is_empty() {
         r.notes.push(adapters::Note {
             level: adapters::Level::Info,
@@ -1014,7 +1030,7 @@ fn cmd_capture(
         println!("  {} {}", paint(DIM, "read"), tildify(s, &env.home));
     }
     println!(
-        "\n  {} MCP server(s), {} rule(s), {} command(s), {} skill(s){}{}{}{}{}{}",
+        "\n  {} MCP server(s), {} rule(s), {} command(s), {} skill(s){}{}{}{}{}{}{}",
         p.mcp_servers.len(),
         p.rules.len(),
         p.commands.len(),
@@ -1022,6 +1038,7 @@ fn cmd_capture(
         agent_count(p),
         output_style_count(p),
         hook_count(p),
+        memory_count(p),
         plugin_count(p),
         if p.instructions.is_some() {
             ", instructions"
@@ -1391,6 +1408,11 @@ fn cmd_inspect(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, as_json: boo
         .iter()
         .map(|h| visible_line(&crate::secrets::mask_line(&crate::hooks::describe(h))).into_owned())
         .collect();
+    let memory: Vec<String> = profile
+        .memory
+        .iter()
+        .map(|f| visible_line(&crate::memory::describe(f)).into_owned())
+        .collect();
     let plugins: Vec<String> = crate::plugins::list(&profile)
         .iter()
         .map(|l| visible_line(l).into_owned())
@@ -1518,6 +1540,7 @@ fn cmd_inspect(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, as_json: boo
             "output_styles": output_styles,
             "settings": settings,
             "hooks": hooks,
+            "memory": memory,
             "plugins": plugins,
             "mcp_servers": server_json,
             "safety": {
@@ -1569,6 +1592,12 @@ fn cmd_inspect(ctx: &Ctx, src: &str, t: &TargetArgs, a: &ApplyArgs, as_json: boo
         println!("  {:<15}", format!("hooks ({})", hooks.len()));
         for h in &hooks {
             println!("    {h}");
+        }
+    }
+    if !memory.is_empty() {
+        println!("  {:<15}", format!("memory ({})", memory.len()));
+        for m in &memory {
+            println!("    {m}");
         }
     }
     if !plugins.is_empty() {
@@ -1752,6 +1781,13 @@ fn plan_apply(
     } else {
         Vec::new()
     };
+    // Memory notes are read into later sessions as context, so they can carry
+    // instructions: from a git source they are withheld unless it is trusted.
+    let withheld_memory = if untrusted {
+        policy::drop_memory(&mut profile)
+    } else {
+        Vec::new()
+    };
     // Plugins can bundle hooks, MCP servers and commands, and the tool fetches
     // them itself: from a git source they are withheld unless it is trusted.
     let withheld_plugins = if untrusted {
@@ -1858,6 +1894,17 @@ fn plan_apply(
                 ),
             });
         }
+    }
+    if !withheld_memory.is_empty() && !plan.targets.is_empty() {
+        plan.notes.push(adapters::Note {
+            level: adapters::Level::Warn,
+            target: PROFILE_NOTE.to_string(),
+            message: format!(
+                "{} memory note(s) not applied, because the profile comes from a remote repository (needs --trust-source): {}",
+                withheld_memory.len(),
+                withheld_memory.join(", ")
+            ),
+        });
     }
     for (target, d) in withheld_plugins {
         if plan.targets.contains(&target) {
@@ -2599,6 +2646,15 @@ fn hook_count(p: &Profile) -> String {
         String::new()
     } else {
         format!(", {} hook(s)", p.hooks.len())
+    }
+}
+
+/// `, N memory note(s)` for a profile with memory notes, else nothing.
+fn memory_count(p: &Profile) -> String {
+    if p.memory.is_empty() {
+        String::new()
+    } else {
+        format!(", {} memory note(s)", p.memory.len())
     }
 }
 

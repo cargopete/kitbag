@@ -511,6 +511,15 @@ pub fn drop_hooks(profile: &mut crate::model::Profile) -> Vec<String> {
     out
 }
 
+/// Take the memory notes out of a profile from a git source that isn't
+/// trusted: whatever they say is read into later sessions as context, so
+/// they can carry instructions. Returns each note as the plan shows it.
+pub fn drop_memory(profile: &mut crate::model::Profile) -> Vec<String> {
+    let out = profile.memory.iter().map(crate::memory::describe).collect();
+    profile.memory.clear();
+    out
+}
+
 /// Commands, skills and agents that pre-approve tools, define hooks or run
 /// shell commands when used, and agents that start MCP servers of their own.
 pub fn risky_content(profile: &crate::model::Profile) -> Vec<String> {

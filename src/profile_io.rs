@@ -755,6 +755,11 @@ fn load_with_limit(dir: &Path, limit: u64, name_hint: Option<&str>) -> Result<Pr
             issues.extend(crate::hooks::validate(&p.hooks, Some(&p.hook_files)));
         }
     }
+    // Memory notes (captured only with `--include memory`); not a plugin thing.
+    if !plugin {
+        read_skill_dir(&dir.join("memory"), "", &mut p.memory, budget)?;
+        issues.extend(crate::memory::issues(&p));
+    }
     issues.extend(portable_name_issues(&p));
     if !issues.is_empty() {
         return Err(ProfileError::new(
@@ -908,6 +913,9 @@ pub fn profile_files(p: &Profile) -> BTreeMap<String, Vec<u8>> {
     for f in &p.hook_files {
         out.insert(format!("hooks/{}", f.path), f.content.clone());
     }
+    for f in &p.memory {
+        out.insert(format!("memory/{}", f.path), f.content.clone());
+    }
     out
 }
 
@@ -944,6 +952,16 @@ pub fn keep_hooks(new: &mut Profile, old: &Profile) -> usize {
     new.hooks.clone_from(&old.hooks);
     new.hook_files.clone_from(&old.hook_files);
     new.hooks.len()
+}
+
+/// Copy over `old`'s memory notes, for a capture that wasn't asked for memory
+/// (`--include memory`), so re-capturing doesn't silently drop them. Returns how many.
+pub fn keep_memory(new: &mut Profile, old: &Profile) -> usize {
+    if !new.memory.is_empty() || old.memory.is_empty() {
+        return 0;
+    }
+    new.memory.clone_from(&old.memory);
+    new.memory.len()
 }
 
 /// Carry the per-tool targeting of `old`'s rules, commands, skills and agents
@@ -1266,6 +1284,13 @@ pub fn scan_for_secrets(p: &Profile) -> Vec<String> {
         }
         if let Some(why) = sensitive_file(&f.path, &f.content) {
             out_extra.push(format!("hooks/{}: {why}", f.path));
+        }
+    }
+    for f in &p.memory {
+        if let Ok(t) = std::str::from_utf8(&f.content)
+            && let Some(k) = crate::secrets::text_secret_kind(t)
+        {
+            out.push(format!("memory/{}: looks like a secret ({k})", f.path));
         }
     }
     for s in &p.skills {

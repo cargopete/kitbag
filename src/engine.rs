@@ -200,6 +200,9 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
             s.disabled_on = off;
         }
     }
+    if env.include_memory {
+        crate::memory::capture(targets, env, &mut out)?;
+    }
     dedupe_env_vars(&mut out);
     out.profile.sort();
     Ok(out)
@@ -460,6 +463,7 @@ pub fn plan(
         remove_disabled_items(&mut work, *a, env, opts, original, &skipped)?;
         applied.push(a.id().to_string());
     }
+    crate::memory::plan(profile, &applied, env, &mut work)?;
     let file_writes: Vec<FileWrite> = work
         .file_writes
         .iter()
