@@ -1759,6 +1759,38 @@ fn present(
             print_held_back(plan);
         }
         print_plan_extras(plan, resolved.remote);
+        // The files already match, but the source moved: remember the commit
+        // in a transaction with no files, so `status` stops calling it drift.
+        if matches!(mode, Mode::Apply { dry_run: false, .. })
+            && !plan.targets.is_empty()
+            && plan.withheld.is_empty()
+            && plan.withheld_removals.is_empty()
+            && let (Some(commit), Some(_)) = (&resolved.commit, source_moved(ctx, resolved)?)
+        {
+            let desc = format!(
+                "apply {} -> {} ({}), files unchanged",
+                resolved.origin,
+                plan.targets.join(", "),
+                where_
+            );
+            let git = crate::txn::GitCommit {
+                source: resolved.source.clone(),
+                commit: commit.clone(),
+            };
+            let tx = Store::new(&ctx.state_dir).commit_from(
+                &[],
+                &desc,
+                &plan.targets,
+                &crate::txn::WriteOptions::default(),
+                Some(git),
+            )?;
+            println!(
+                "Recorded commit {} for {}; no files changed. Undo with {}",
+                visible_line(commit),
+                visible_line(&resolved.source),
+                paint(BOLD, format!("kitbag undo {}", tx.id))
+            );
+        }
         record(None)?;
         return Ok(0);
     }

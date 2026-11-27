@@ -809,9 +809,9 @@ SHA with its transaction. When this machine already applied the same source (the
 sub-directory, whatever the ref) at another commit, `apply`, `diff` and `sync` warn that it
 moved and print both SHAs before asking to go on, and `status` shows a `source commit` row as
 `profile changed`, which `--exit-code` counts as drift. Without a source, `status` names the
-commit of each git source it compares against. Only applies that wrote files record a SHA,
-and applies made before kitbag recorded them have none, so there is nothing to compare with
-until the next one.
+commit of each git source it compares against. An apply that finds every file already matching still records the new SHA, in a transaction
+with no files, when the source moved; if the SHA is the same, nothing is recorded. Applies
+made before kitbag recorded SHAs have none, so there is nothing to compare with until the next one.
 
 kitbag fetches with your own `git` (shallow, no prompts) into a temporary directory that is
 removed afterwards; an abbreviated SHA, which `git fetch` can't ask for, fetches the

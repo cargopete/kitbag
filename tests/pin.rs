@@ -263,3 +263,73 @@ fn old_transactions_without_a_commit_still_work() {
         .success();
     assert_eq!(recorded(&sb)[1]["commit"], second.as_str());
 }
+
+/// The number of files in each transaction, oldest first.
+fn entry_counts(sb: &Sandbox) -> Vec<usize> {
+    let mut txs: Vec<(u64, usize)> = std::fs::read_dir(sb.state().join("backups"))
+        .unwrap()
+        .map(|e| {
+            let text = std::fs::read_to_string(e.unwrap().path().join("transaction.json")).unwrap();
+            let t: serde_json::Value = serde_json::from_str(&text).unwrap();
+            (
+                t["created_ms"].as_u64().unwrap(),
+                t["entries"].as_array().unwrap().len(),
+            )
+        })
+        .collect();
+    txs.sort();
+    txs.into_iter().map(|(_, n)| n).collect()
+}
+
+#[test]
+fn a_moved_source_with_unchanged_files_records_the_new_commit() {
+    if !has_git() {
+        return;
+    }
+    let sb = Sandbox::empty();
+    let (url, first, _) = two_commits(&sb);
+    let repo = sb.path("repo");
+    git(&repo, &["reset", "-q", "--hard", &first]);
+    let src = format!("{url}@main");
+    sb.cli()
+        .args(["apply", &src, "--to", "claude-code", "--yes"])
+        .assert()
+        .success();
+    let before = claude_md(&sb);
+    // An unrelated commit: the instructions stay as they were.
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "unrelated"]);
+    let moved = git_out(&repo, &["rev-parse", "HEAD"]);
+    sb.cli()
+        .args(["status", &src, "--to", "claude-code", "--exit-code"])
+        .assert()
+        .code(1);
+    sb.cli()
+        .args(["apply", &src, "--to", "claude-code", "--yes"])
+        .assert()
+        .success()
+        .stdout(contains(format!("Recorded commit {moved}")));
+    assert_eq!(claude_md(&sb), before, "no profile file was rewritten");
+    let git = recorded(&sb);
+    assert_eq!(git.len(), 2);
+    assert_eq!(git[1]["commit"], moved.as_str(), "full SHA recorded");
+    assert_eq!(entry_counts(&sb), vec![1, 0], "no files in the new one");
+    sb.cli()
+        .args(["status", &src, "--to", "claude-code", "--exit-code"])
+        .assert()
+        .success()
+        .stdout(contains("moved").not());
+    // The same commit again is a true no-op.
+    sb.cli()
+        .args(["apply", &src, "--to", "claude-code", "--yes"])
+        .assert()
+        .success()
+        .stdout(contains("Up to date").and(contains("Recorded").not()));
+    assert_eq!(
+        recorded(&sb).len(),
+        2,
+        "no transaction for an unmoved source"
+    );
+    // Undoing the empty transaction restores nothing.
+    sb.cli().args(["undo"]).assert().success();
+    assert_eq!(claude_md(&sb), before);
+}

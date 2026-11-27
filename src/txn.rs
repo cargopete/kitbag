@@ -64,7 +64,7 @@ pub struct Transaction {
     pub created_dirs: Vec<PathBuf>,
     /// For an apply from a git source, the source and the commit it was
     /// applied at. Missing for local sources and in transactions recorded by
-    /// kitbag 0.1.5 and older.
+    /// kitbag 0.1.6 and older.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<GitCommit>,
 }
