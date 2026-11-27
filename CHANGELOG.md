@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-27
+
 ### Added
 
 - `kitbag status PROFILE` lists what a tool has that never made it back to the profile, as `tool only`: a rule file of its own that the profile doesn't have (a one-off `~/.claude/rules/hotfix.md`, `.cursor/rules/hotfix.mdc` or `.github/instructions/hotfix.instructions.md`; rule files another profile applied are left out), and paragraphs outside kitbag's block in an instructions file where the profile has its block (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`) that the profile's instructions don't hold. Both used to show nothing, or `in sync`. Text of your own around the block is allowed, so like `removed` it is not drift for `--exit-code`; the new `--strict` (with `--exit-code`) counts both. `kitbag diff` adds a note naming them, and `kitbag doctor PROFILE` lists them without counting them as problems.
@@ -180,7 +182,8 @@ All notable changes to this project are documented here. The format follows
 - `capture` with several tools (`--from all`, `detected` or a list) reports a tool whose config can't be read and captures the rest; it fails only if nothing could be read. A single `--from` still fails loudly.
 - `install.sh` and `install.ps1` download `kitbag-<target>.sha256`, the checksum name the release workflow uploads (found in the v0.1.0-rc.1 dry run).
 
-[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/cargopete/kitbag/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/cargopete/kitbag/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/cargopete/kitbag/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/cargopete/kitbag/compare/v0.1.2...v0.1.3
