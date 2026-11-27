@@ -21,8 +21,8 @@ use crate::profile_io::{
     skill_description,
 };
 use crate::secrets::{
-    RefStyle, has_redaction_marker, has_ref, is_redacted_form_of, normalize_refs, redact_server,
-    redact_text, render_refs,
+    RefStyle, has_redaction_marker, has_ref, is_redacted_form_of, normalize_refs, redact_text,
+    render_refs,
 };
 
 /// Suffix of the managed block holding folded rules.
@@ -1771,11 +1771,18 @@ pub fn import_server(
     }
     // A client secret is a credential, not configuration: only an env
     // reference to it comes along. The value is never shown.
-    if crate::oauth::drop_literal_secret(&mut s) {
+    // With `--include secrets` it is carried instead: redaction below turns it
+    // into a `${VAR}` and the value goes to the encrypted bundle.
+    let carries = cap.keep_secrets
+        && s.oauth
+            .as_ref()
+            .and_then(|o| o.client_secret.as_deref())
+            .is_some_and(|v| !v.trim().is_empty());
+    if !carries && crate::oauth::drop_literal_secret(&mut s) {
         cap.warn(
             target,
             format!(
-                "MCP server '{name}': its OAuth client_secret is a literal value and was left out of the profile (kitbag keeps credentials out of profiles; the encrypted secrets bundle, #9, may carry it later). Use an env reference such as ${{CLIENT_SECRET}} in the tool to have it carried"
+                "MCP server '{name}': its OAuth client_secret is a literal value and was left out of the profile (kitbag keeps credentials out of profiles; `capture --include secrets` carries it, encrypted, in secrets.age, see #9). Use an env reference such as ${{CLIENT_SECRET}} in the tool to have it carried"
             ),
         );
     }
@@ -1785,7 +1792,7 @@ pub fn import_server(
     {
         s.transport = None;
     }
-    let (redacted, redactions) = redact_server(name, &s);
+    let (redacted, redactions) = crate::secrets::redact_server_keeping(name, &s, cap.keep_secrets);
     if cap.profile.mcp_servers.contains_key(name) {
         return;
     }

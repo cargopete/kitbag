@@ -276,6 +276,13 @@ fn check_tmp(tmp: &str) -> Result<()> {
 /// `.git` or `.env*` files, which are not part of a profile and may hold
 /// secrets. Returns the number of files.
 fn stage(from: &Path, to: &Path, total: &mut u64) -> Result<usize> {
+    stage_dir(from, to, total, true)
+}
+
+/// [`stage`] for one directory; `top` is the profile's own folder, where the
+/// encrypted secrets bundle (and anything that looks like a plaintext one)
+/// stays behind: no secret, even encrypted, is sent to the host.
+fn stage_dir(from: &Path, to: &Path, total: &mut u64, top: bool) -> Result<usize> {
     let mut n = 0;
     fs::create_dir_all(to)?;
     for entry in fs::read_dir(from).with_context(|| format!("reading {}", from.display()))? {
@@ -290,9 +297,15 @@ fn stage(from: &Path, to: &Path, total: &mut u64) -> Result<usize> {
             if lossy == ".git" {
                 continue;
             }
-            n += stage(&entry.path(), &to.join(&name), total)?;
+            n += stage_dir(&entry.path(), &to.join(&name), total, false)?;
         } else if kind.is_file() {
             if lossy == ".env" || lossy.starts_with(".env.") {
+                continue;
+            }
+            if top
+                && (lossy == crate::bundle::FILE
+                    || crate::bundle::plaintext_secret_files_named(&lossy))
+            {
                 continue;
             }
             *total += entry.metadata()?.len();
@@ -581,10 +594,19 @@ mod tests {
         fs::write(p.join(".env"), "TOKEN=fake").unwrap();
         fs::write(p.join(".env.local"), "TOKEN=fake").unwrap();
         std::os::unix::fs::symlink("/etc/hostname", p.join("link")).unwrap();
+        // The encrypted bundle and a plaintext one stay behind at the top;
+        // a rule that happens to be called secrets.md does not.
+        fs::write(p.join("secrets.age"), "x").unwrap();
+        fs::write(p.join("secrets.json"), "x").unwrap();
+        fs::write(p.join("rules/secrets.md"), "s").unwrap();
         let files = staged_files(p).unwrap();
         assert_eq!(
             files,
-            vec![PathBuf::from("kitbag.toml"), PathBuf::from("rules/a.md")]
+            vec![
+                PathBuf::from("kitbag.toml"),
+                PathBuf::from("rules/a.md"),
+                PathBuf::from("rules/secrets.md")
+            ]
         );
     }
 

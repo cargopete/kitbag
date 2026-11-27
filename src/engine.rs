@@ -114,6 +114,24 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
                     s.oauth = b;
                 }
             }
+            // A client secret only this tool's config had: its variable is in
+            // the merged server now, so its value (kept for the bundle) joins.
+            if let Some(held) = merged
+                .mcp_servers
+                .get(&n)
+                .and_then(|m| m.oauth.as_ref())
+                .and_then(|o| o.client_secret.as_deref())
+            {
+                for r in c.redactions.iter().filter(|r| {
+                    r.server.as_ref() == Some(&n)
+                        && r.reason == "oauth-client-secret"
+                        && reference(&r.env_var) == held
+                }) {
+                    if !out.redactions.iter().any(|x| x.location == r.location) {
+                        out.redactions.push(r.clone());
+                    }
+                }
+            }
             match merged.mcp_servers.get(&n) {
                 None => {
                     out.redactions.extend(c.redactions.iter().filter(|r| r.server.as_ref() == Some(&n)).cloned());
@@ -129,7 +147,9 @@ pub fn capture(targets: &[&dyn Adapter], env: &Env, name: &str) -> Result<Captur
                 Some(_) if {
                     let fps = |list: &[Redaction]| -> Vec<(String, Option<String>)> {
                         list.iter()
-                            .filter(|r| r.server.as_ref() == Some(&n))
+                            .filter(|r| {
+                                r.server.as_ref() == Some(&n) && r.reason != "oauth-client-secret"
+                            })
                             .map(|r| (r.location.clone(), r.fingerprint.clone()))
                             .collect()
                     };

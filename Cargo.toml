@@ -13,6 +13,7 @@ categories = ["command-line-utilities", "development-tools", "config"]
 exclude = ["/.github", "/tests/fixtures"]
 
 [dependencies]
+age = { version = "0.12.1", features = ["ssh"] }
 anstream = "1.0.0"
 anstyle = "1.0.14"
 anyhow = "1.0.105"
@@ -20,6 +21,7 @@ clap = { version = "4.6.10", features = ["derive", "wrap_help", "env"] }
 hex = "0.4.3"
 jsonc-parser = { version = "0.34.0", features = ["cst", "serde", "serde_json"] }
 regex = "1.13.2"
+rpassword = "7.5.5"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 serde_norway = "0.9.42"
@@ -30,6 +32,7 @@ thiserror = "2.0.21"
 time = { version = "0.3.55", features = ["formatting", "macros"] }
 toml = { version = "1.2.3", features = ["preserve_order"] }
 toml_edit = { version = "0.25.21", features = ["serde"] }
+zeroize = "1.9.2"
 
 # Already built for tempfile; used to stop an MCP server's whole process group.
 [target.'cfg(unix)'.dependencies]

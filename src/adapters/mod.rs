@@ -91,6 +91,9 @@ pub struct Env {
     /// Capture memory notes too (`capture --include memory`). Off by default:
     /// notes can hold personal or client details (see [`crate::memory`]).
     pub include_memory: bool,
+    /// Keep the values capture redacts, for the encrypted bundle
+    /// (`capture --include secrets`). They stay in memory, on the redactions.
+    pub include_secrets: bool,
 }
 
 impl Env {
@@ -387,6 +390,8 @@ pub struct Captured {
     /// This machine's home directory and OS: paths under it are captured as
     /// `~/...` (see [`crate::portable`]).
     pub home: Option<(PathBuf, Os)>,
+    /// Keep redacted values on `redactions` (`capture --include secrets`).
+    pub keep_secrets: bool,
 }
 
 impl Captured {
@@ -402,6 +407,7 @@ impl Captured {
         Captured {
             project,
             home: Some((env.home.clone(), env.os)),
+            keep_secrets: env.include_secrets,
             ..Self::default()
         }
     }
