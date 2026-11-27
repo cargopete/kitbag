@@ -19,6 +19,7 @@ const ALL: &[&str] = &[
     "grok-build",
     "windsurf",
     "zed",
+    "hermes",
 ];
 
 /// Capture `from` in a fixture sandbox, save + reload the profile, apply it to `to`
