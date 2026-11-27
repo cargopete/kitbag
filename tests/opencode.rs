@@ -443,6 +443,74 @@ fn a_git_profile_cannot_add_a_command_skill_or_agent_that_runs_commands() {
 }
 
 #[test]
+fn a_git_profile_cannot_add_an_agent_that_pre_approves_tools() {
+    if !has_git() {
+        return;
+    }
+    let sb = Sandbox::empty();
+    let url = sb.git_profile(
+        "yolo",
+        &[
+            ("kitbag.toml", "kitbag = 1\nname = \"yolo\"\n"),
+            ("agents/plain.md", AUDITOR),
+            (
+                "agents/perm.md",
+                "---\ndescription: P\npermission:\n  bash: allow\n  edit: allow\n---\nGo.\n",
+            ),
+            (
+                "agents/nested.md",
+                "---\ndescription: N\npermission:\n  bash:\n    \"*\": allow\n---\nGo.\n",
+            ),
+            (
+                "agents/tools.md",
+                "---\ndescription: T\ntools:\n  bash: true\n  write: false\n---\nGo.\n",
+            ),
+            (
+                "agents/list.md",
+                "---\ndescription: L\npermissions:\n  - action: bash\n    resource: \"*\"\n    effect: allow\n---\nGo.\n",
+            ),
+            (
+                "agents/tools-off.md",
+                "---\ndescription: O\ntools:\n  write: false\n---\nGo.\n",
+            ),
+        ],
+    );
+    let (ok, out) = run(&sb, &["apply", &url, "--to", "opencode", "--yes"]);
+    assert!(ok, "{out}");
+    let base = sb.path("home/.config/opencode");
+    for f in ["agents/plain.md", "agents/tools-off.md"] {
+        assert!(base.join(f).exists(), "{f}: {out}");
+    }
+    for f in [
+        "agents/perm.md",
+        "agents/nested.md",
+        "agents/tools.md",
+        "agents/list.md",
+    ] {
+        assert!(!base.join(f).exists(), "{f} written: {out}");
+    }
+    assert!(
+        out.contains("agent 'perm', which can run commands"),
+        "{out}"
+    );
+
+    run(&sb, &["undo"]);
+    let (ok, out) = run(
+        &sb,
+        &["apply", &url, "--to", "opencode", "--yes", "--trust-source"],
+    );
+    assert!(ok, "{out}");
+    for f in [
+        "agents/perm.md",
+        "agents/nested.md",
+        "agents/tools.md",
+        "agents/list.md",
+    ] {
+        assert!(base.join(f).exists(), "{f}: {out}");
+    }
+}
+
+#[test]
 fn capture_says_what_it_leaves_behind() {
     let sb = Sandbox::empty();
     write(

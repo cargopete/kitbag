@@ -659,7 +659,9 @@ fn opencode_agent(a: &Agent) -> (String, Vec<String>) {
 }
 
 fn apply_agent(work: &mut Work, dir: &Path, a: &Agent, opts: &ApplyOptions) -> Result<()> {
-    let (text, dropped) = opencode_agent(a);
+    let (text, mut dropped) = opencode_agent(a);
+    // opencode takes the agent's name from the file name, so a `name` is not lost.
+    dropped.retain(|k| k != "name");
     if !dropped.is_empty() {
         work.warn(
             ID,

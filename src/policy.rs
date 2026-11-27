@@ -334,9 +334,60 @@ fn agent_permissive_mode(a: &crate::model::Agent) -> Option<&str> {
     .then_some(k.as_str())
 }
 
+/// Whether `v` holds an `allow` anywhere: opencode's `permission` maps
+/// (`{bash: allow}`, `{bash: {"*": allow}}`) and rule lists
+/// (`effect: allow`) say that a tool runs without asking.
+fn mentions_allow(v: &Value) -> bool {
+    match v {
+        Value::String(s) => s.eq_ignore_ascii_case("allow"),
+        Value::Array(a) => a.iter().any(mentions_allow),
+        Value::Object(m) => m.values().any(mentions_allow),
+        _ => false,
+    }
+}
+
+/// What an opencode agent pre-approves without asking, as a short
+/// description: allow rules under `permission` / `permissions`, and the
+/// entries of a `tools` map that are switched on (`{bash: true}`). A `tools`
+/// list, as Claude Code and Copilot use, is not looked at here.
+fn agent_preapproval(a: &crate::model::Agent) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (k, v) in &a.extra {
+        let lower = k.to_ascii_lowercase();
+        if (lower == "permission" || lower == "permissions") && mentions_allow(v) {
+            let what = match v {
+                Value::Object(m) => {
+                    let keys: Vec<&str> = m
+                        .iter()
+                        .filter(|(_, v)| mentions_allow(v))
+                        .map(|(k, _)| k.as_str())
+                        .collect();
+                    if keys.is_empty() {
+                        "allow".to_string()
+                    } else {
+                        format!("allows {}", keys.join(", "))
+                    }
+                }
+                _ => "allow rules".to_string(),
+            };
+            out.push((k.clone(), what));
+        } else if let (true, Value::Object(m)) = (lower == "tools", v) {
+            let on: Vec<&str> = m
+                .iter()
+                .filter(|(_, v)| v.as_bool() == Some(true))
+                .map(|(k, _)| k.as_str())
+                .collect();
+            if !on.is_empty() {
+                out.push((k.clone(), format!("enables {}", on.join(", "))));
+            }
+        }
+    }
+    out
+}
+
 /// What makes a custom agent run commands: hooks, pre-approved tools, MCP
-/// servers it starts itself, a permission mode that never asks, or a shell
-/// snippet in its body.
+/// servers it starts itself, a permission mode that never asks, allow rules
+/// or enabled tools in an opencode agent, or a shell snippet in its body.
 fn agent_risks(a: &crate::model::Agent) -> Vec<String> {
     let mut out: Vec<String> = a
         .extra
@@ -345,6 +396,11 @@ fn agent_risks(a: &crate::model::Agent) -> Vec<String> {
         .cloned()
         .collect();
     out.extend(agent_permissive_mode(a).map(str::to_string));
+    for (k, _) in agent_preapproval(a) {
+        if !out.contains(&k) {
+            out.push(k);
+        }
+    }
     if let Some(syntax) = shell_snippet(&a.body) {
         out.push(format!("a shell snippet ({syntax})"));
     }
@@ -503,6 +559,11 @@ pub fn risky_content(profile: &crate::model::Profile) -> Vec<String> {
                 mode.as_str().unwrap_or_default()
             ));
         }
+        for (k, what_it_does) in agent_preapproval(a) {
+            out.push(format!(
+                "{what} pre-approves tools in {k} ({what_it_does}; acts without asking)"
+            ));
+        }
         if let Some(syntax) = shell_snippet(&a.body) {
             out.push(format!("{what} has a shell snippet ({syntax})"));
         }
@@ -569,6 +630,50 @@ mod tests {
         assert_eq!(dropped.len(), 3, "{dropped:?}");
         let left: Vec<&str> = p.agents.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(left, ["plain"]);
+    }
+
+    #[test]
+    fn opencode_agents_that_allow_tools_are_risky() {
+        let agent = |name: &str, extra: Value| crate::model::Agent {
+            name: name.into(),
+            description: None,
+            extra: extra.as_object().cloned().unwrap_or_default(),
+            body: "Go.".into(),
+        };
+        let mut p = crate::model::Profile::new("p");
+        p.agents = vec![
+            agent(
+                "deny",
+                json!({"permission": {"bash": "deny", "edit": "ask"}}),
+            ),
+            agent("list", json!({"tools": ["bash"]})),
+            agent("off", json!({"tools": {"write": false}})),
+            agent(
+                "allow",
+                json!({"permission": {"bash": "allow", "edit": "ask"}}),
+            ),
+            agent("deep", json!({"permission": {"bash": {"*": "Allow"}}})),
+            agent("rules", json!({"permissions": [{"effect": "allow"}]})),
+            agent("on", json!({"tools": {"bash": true, "write": false}})),
+        ];
+        let risky = risky_content(&p);
+        let mentions = |n: &str| risky.iter().any(|r| r.contains(&format!("agent '{n}'")));
+        for n in ["allow", "deep", "rules", "on"] {
+            assert!(mentions(n), "{n}: {risky:?}");
+        }
+        for n in ["deny", "list", "off"] {
+            assert!(!mentions(n), "{n}: {risky:?}");
+        }
+        assert!(
+            risky
+                .iter()
+                .any(|r| r.contains("(allows bash; acts without asking)")),
+            "{risky:?}"
+        );
+        let dropped = drop_risky_content(&mut p);
+        assert_eq!(dropped.len(), 4, "{dropped:?}");
+        let left: Vec<&str> = p.agents.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(left, ["deny", "list", "off"]);
     }
 
     #[test]
