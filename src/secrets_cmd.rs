@@ -1,16 +1,17 @@
 //! The command-line side of the encrypted secrets bundle: the flags of
-//! `capture --include secrets`, `apply --secrets-from` and `kitbag secrets`.
+//! `capture --include secrets`, `apply --secrets-from` and `kitbag secrets`
+//! (`list`, `set`, `rotate`).
 //! The crypto and file handling are in [`crate::bundle`].
 //!
 //! Passphrases come from a file or a terminal prompt, never from the command
 //! line, and nothing here prints a value: only variable names.
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
-use age::secrecy::SecretString;
+use age::secrecy::{ExposeSecret, SecretString};
 use anstream::println;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 
 use crate::adapters::{Level, Note};
@@ -97,7 +98,55 @@ pub enum SecretsCmd {
         #[command(flatten)]
         unlock: UnlockArgs,
     },
+    /// Add or replace one variable in a secrets bundle. The value is read from
+    /// --value-file (never the command line) and never shown
+    Set {
+        /// The variable name (GITHUB_TOKEN)
+        name: String,
+        /// The bundle, or the profile directory holding secrets.age [default: .].
+        /// Created if it doesn't exist
+        file: Option<PathBuf>,
+        /// A file holding the value ('-' for stdin). One trailing newline is
+        /// dropped
+        #[arg(long, value_name = "PATH", required = true)]
+        value_file: PathBuf,
+        /// A file whose first line is the passphrase: the bundle's, to open it
+        /// and encrypt it again with the same one, or a new bundle's. Never put
+        /// a passphrase on the command line
+        #[arg(long, value_name = "PATH")]
+        secrets_passphrase_file: Option<PathBuf>,
+        /// An age identity file or unprotected SSH private key that opens a
+        /// key-encrypted bundle. Repeatable
+        #[arg(long, value_name = "PATH")]
+        secrets_identity: Vec<PathBuf>,
+        /// Encrypt a new or key-encrypted bundle to this age or SSH public key,
+        /// or a file of them. Repeatable; needed to rewrite a key-encrypted
+        /// bundle. Can't be combined with a passphrase
+        #[arg(long, value_name = "KEY")]
+        secrets_recipient: Vec<String>,
+    },
+    /// Encrypt a secrets bundle again to a new passphrase or new keys, with the
+    /// same variables and token stores. The values are never shown
+    Rotate {
+        /// The bundle, or the profile directory holding secrets.age [default: .]
+        file: Option<PathBuf>,
+        #[command(flatten)]
+        unlock: UnlockArgs,
+        /// A file whose first line is the new passphrase. Never put a
+        /// passphrase on the command line
+        #[arg(long, value_name = "PATH")]
+        new_secrets_passphrase_file: Option<PathBuf>,
+        /// Encrypt to this age or SSH public key instead, or a file of them.
+        /// Repeatable. Can't be combined with a new passphrase
+        #[arg(long, value_name = "KEY")]
+        new_secrets_recipient: Vec<String>,
+    },
 }
+
+/// Where a capture location is for a variable `secrets set` added.
+const SET_AT: &str = "secrets set";
+/// The most a value file may hold.
+const MAX_VALUE_BYTES: u64 = 64 * 1024;
 
 /// What to encrypt a bundle to, before any prompt.
 pub enum SealPlan {
@@ -197,19 +246,25 @@ fn open_bundle(file: &Path, a: &UnlockArgs) -> Result<Bundle> {
     bundle::open(&bytes, &u).map_err(|e| anyhow::anyhow!("{}: {e:#}", file.display()))
 }
 
-/// `kitbag secrets list`.
-pub fn list(file: Option<&Path>, a: &UnlockArgs) -> Result<i32> {
+/// The bundle file `file` names: itself, or `secrets.age` in it if it is a
+/// directory. Never a git source.
+fn local_bundle_path(file: Option<&Path>) -> Result<PathBuf> {
     let given = file.unwrap_or_else(|| Path::new("."));
     if let Some(s) = given.to_str()
         && looks_remote(s)
     {
         bail!("a secrets bundle is read from a file on this machine, never from a git source");
     }
-    let path = if given.is_dir() {
+    Ok(if given.is_dir() {
         given.join(bundle::FILE)
     } else {
         given.to_path_buf()
-    };
+    })
+}
+
+/// `kitbag secrets list`.
+pub fn list(file: Option<&Path>, a: &UnlockArgs) -> Result<i32> {
+    let path = local_bundle_path(file)?;
     let b = open_bundle(&path, a)?;
     let names = b.names();
     let stores: Vec<String> = b
@@ -239,6 +294,213 @@ pub fn list(file: Option<&Path>, a: &UnlockArgs) -> Result<i32> {
             println!("  {}", paint(GREEN, visible_line(&s)));
         }
     }
+    Ok(0)
+}
+
+/// The value in `path` (`-` is stdin), without one trailing newline. An
+/// error names the file, never its content.
+fn read_value(path: &Path) -> Result<bundle::Secret> {
+    let mut buf = zeroize::Zeroizing::new(Vec::new());
+    let what = if path == Path::new("-") {
+        "standard input".to_string()
+    } else {
+        format!("the value file {}", path.display())
+    };
+    let got = if path == Path::new("-") {
+        std::io::stdin()
+            .lock()
+            .take(MAX_VALUE_BYTES + 1)
+            .read_to_end(&mut buf)
+    } else {
+        std::fs::File::open(path).and_then(|f| f.take(MAX_VALUE_BYTES + 1).read_to_end(&mut buf))
+    };
+    got.with_context(|| format!("reading {what}"))?;
+    if buf.len() as u64 > MAX_VALUE_BYTES {
+        bail!("{what} is larger than a secret value kitbag keeps");
+    }
+    let end = if buf.ends_with(b"\r\n") {
+        buf.len() - 2
+    } else if buf.ends_with(b"\n") {
+        buf.len() - 1
+    } else {
+        buf.len()
+    };
+    let Ok(text) = std::str::from_utf8(&buf[..end]) else {
+        bail!("{what} is not UTF-8 text");
+    };
+    if text.is_empty() {
+        bail!("{what} is empty; no value was set");
+    }
+    Ok(bundle::Secret::new(text))
+}
+
+/// The arguments of `kitbag secrets set`.
+pub struct SetArgs<'a> {
+    pub name: &'a str,
+    pub file: Option<&'a Path>,
+    pub value_file: &'a Path,
+    pub passphrase_file: Option<&'a Path>,
+    pub identities: &'a [PathBuf],
+    pub recipients: &'a [String],
+}
+
+/// `kitbag secrets set`: add or replace one variable, encrypt the bundle
+/// again and replace the file in one rename. The value is never shown.
+pub fn set(a: &SetArgs) -> Result<i32> {
+    if !bundle::valid_name(a.name) {
+        bail!(
+            "'{}' is not a usable variable name (letters, digits and _, not starting with a digit)",
+            a.name
+        );
+    }
+    let path = local_bundle_path(a.file)?;
+    if a.passphrase_file.is_some() && !a.recipients.is_empty() {
+        bail!(
+            "--secrets-passphrase-file and --secrets-recipient can't be combined: age encrypts to a passphrase or to keys, not both"
+        );
+    }
+    let exists = std::fs::symlink_metadata(&path).is_ok();
+    // Settle how it will be encrypted before reading anything secret.
+    let (mut b, seal) = if exists {
+        let bytes = bundle::read_bundle(&path)?;
+        if bundle::needs_passphrase(&bytes) {
+            if !a.recipients.is_empty() {
+                bail!(
+                    "{} is encrypted to a passphrase; 'secrets set' keeps it so. To encrypt it to keys, use 'kitbag secrets rotate --new-secrets-recipient'",
+                    path.display()
+                );
+            }
+        } else if bundle::looks_like_age(&bytes) {
+            if a.passphrase_file.is_some() {
+                bail!(
+                    "{} is encrypted to keys; 'secrets set' keeps it so. To change it to a passphrase, use 'kitbag secrets rotate --new-secrets-passphrase-file'",
+                    path.display()
+                );
+            }
+            if a.recipients.is_empty() {
+                bail!(
+                    "{} is encrypted to keys: give --secrets-recipient (the keys to encrypt it to again) as well as --secrets-identity to open it",
+                    path.display()
+                );
+            }
+        }
+        let unlock_args = UnlockArgs {
+            secrets_passphrase_file: a.passphrase_file.map(Path::to_path_buf),
+            secrets_identity: a.identities.to_vec(),
+        };
+        let u = unlock(&unlock_args, &bytes)?;
+        let b =
+            bundle::open(&bytes, &u).map_err(|e| anyhow::anyhow!("{}: {e:#}", path.display()))?;
+        let seal = match u.passphrase {
+            Some(p) if bundle::needs_passphrase(&bytes) => Seal::Passphrase(p),
+            _ => resolve_seal(seal_plan(&SealArgs {
+                secrets_passphrase_file: None,
+                secrets_recipient: a.recipients.to_vec(),
+            })?)?,
+        };
+        (b, seal)
+    } else {
+        if !a.identities.is_empty() {
+            bail!(
+                "{} doesn't exist, so there is nothing to open with --secrets-identity; give --secrets-recipient to encrypt a new bundle",
+                path.display()
+            );
+        }
+        let plan = seal_plan(&SealArgs {
+            secrets_passphrase_file: a.passphrase_file.map(Path::to_path_buf),
+            secrets_recipient: a.recipients.to_vec(),
+        })?;
+        (Bundle::default(), resolve_seal(plan)?)
+    };
+    let value = read_value(a.value_file)?;
+    let replaced = b.set(a.name, value, SET_AT)?;
+    let sealed = bundle::seal(&b, &seal)?;
+    let count = b.len();
+    drop(b);
+    bundle::write_to(&path, &sealed)?;
+    let ignored = if exists {
+        false
+    } else {
+        match path.parent() {
+            Some(dir) if path.file_name() == Some(bundle::FILE.as_ref()) => {
+                let dir = if dir.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    dir
+                };
+                dir.join("kitbag.toml").is_file() && bundle::ensure_gitignored(dir)?
+            }
+            _ => false,
+        }
+    };
+    println!(
+        "{} {} in {} ({} variable(s), encrypted to {}); the value is never shown",
+        paint(GREEN, if replaced { "Replaced" } else { "Added" }),
+        paint(BOLD, visible_line(a.name)),
+        visible_line(&path.display().to_string()),
+        count,
+        describe(&seal)
+    );
+    if ignored {
+        println!("  and listed secrets.age in the profile's .gitignore");
+    }
+    Ok(0)
+}
+
+/// What a bundle is encrypted to, for a message.
+fn describe(seal: &Seal) -> String {
+    match seal {
+        Seal::Passphrase(_) => "a passphrase".to_string(),
+        Seal::Keys(k) => format!("{} key(s)", k.len()),
+    }
+}
+
+/// `kitbag secrets rotate`: open the bundle, encrypt the same variables and
+/// token stores to a new passphrase or new keys, and replace the file in one
+/// rename. Nothing is written in plain text, and a failure leaves the file
+/// as it was.
+pub fn rotate(
+    file: Option<&Path>,
+    current: &UnlockArgs,
+    new_passphrase_file: Option<&Path>,
+    new_recipients: &[String],
+) -> Result<i32> {
+    let path = local_bundle_path(file)?;
+    let plan = match (new_passphrase_file, new_recipients.is_empty()) {
+        (Some(_), false) => bail!(
+            "--new-secrets-passphrase-file and --new-secrets-recipient can't be combined: age encrypts to a passphrase or to keys, not both"
+        ),
+        (None, true) => bail!(
+            "give the new encryption: --new-secrets-passphrase-file PATH or --new-secrets-recipient KEY (rotate never keeps the old one)"
+        ),
+        _ => seal_plan(&SealArgs {
+            secrets_passphrase_file: new_passphrase_file.map(Path::to_path_buf),
+            secrets_recipient: new_recipients.to_vec(),
+        })?,
+    };
+    let bytes = bundle::read_bundle(&path)?;
+    let u = unlock(current, &bytes)?;
+    let b = bundle::open(&bytes, &u).map_err(|e| anyhow::anyhow!("{}: {e:#}", path.display()))?;
+    if let (SealPlan::Passphrase(new), Some(old)) = (&plan, &u.passphrase)
+        && bundle::needs_passphrase(&bytes)
+        && new.expose_secret() == old.expose_secret()
+    {
+        bail!("the new passphrase is the same as the current one; nothing was written");
+    }
+    drop(u);
+    let seal = resolve_seal(plan)?;
+    let sealed = bundle::seal(&b, &seal)?;
+    let (count, stores) = (b.len(), b.token_stores().len());
+    drop(b);
+    bundle::write_to(&path, &sealed)?;
+    println!(
+        "{} {} to {}: {} variable(s) and {} token store(s), the same as before; the values are never shown",
+        paint(GREEN, "Encrypted"),
+        paint(BOLD, visible_line(&path.display().to_string())),
+        describe(&seal),
+        count,
+        stores
+    );
     Ok(0)
 }
 

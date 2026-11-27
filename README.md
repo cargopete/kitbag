@@ -1680,6 +1680,10 @@ after the plugin directory is gone.
    kitbag capture -o ~/dotagents --include secrets --secrets-passphrase-file ~/.kitbag-pass
    kitbag capture -o ~/dotagents --include secrets --secrets-recipient age1ql3z7hjy...
    kitbag secrets list ~/dotagents --secrets-passphrase-file ~/.kitbag-pass   # names only
+   kitbag secrets set NEW_TOKEN ~/dotagents --value-file ~/new-token.txt \
+     --secrets-passphrase-file ~/.kitbag-pass
+   kitbag secrets rotate ~/dotagents --secrets-passphrase-file ~/.kitbag-pass \
+     --new-secrets-passphrase-file ~/.kitbag-pass-2
    kitbag apply ~/dotagents --to cursor --secrets-from ~/dotagents/secrets.age \
      --secrets-passphrase-file ~/.kitbag-pass
    ```
@@ -1704,11 +1708,28 @@ after the plugin directory is gone.
      write could name any variable) and with `--remote` (nothing is sent to the host).
    - **`kitbag secrets list [FILE|DIR]`** prints variable names and capture locations, and any
      MCP OAuth token store by tool and path, never values.
+   - **`kitbag secrets set NAME [FILE|DIR] --value-file PATH`** adds a variable, or replaces
+     its value (a replaced one keeps where capture found it). The value comes only from
+     `--value-file` (`-` is stdin; one trailing newline is dropped), never from the command
+     line, and is never printed. An existing bundle is opened with `--secrets-passphrase-file`
+     or `--secrets-identity` and written back the same way: a passphrase bundle with the same
+     passphrase, a key bundle to the keys you give again with `--secrets-recipient`. A missing
+     bundle is created, encrypted to `--secrets-passphrase-file` or `--secrets-recipient`
+     (`0600`, and listed in the `.gitignore` of a profile directory). Every other variable and
+     token store stays.
+   - **`kitbag secrets rotate [FILE|DIR]`** changes only the encryption: it opens the bundle with
+     the current `--secrets-passphrase-file` / `--secrets-identity` and writes the same variables
+     and token stores encrypted to `--new-secrets-passphrase-file` or `--new-secrets-recipient`
+     (one of them is required, never both, and a new passphrase must differ from the old one).
+   - Both write the new ciphertext to a temporary file in the same directory and rename it over
+     the old one, so a failure leaves the bundle as it was and no plaintext file, backup or
+     sidecar is ever written. They work on a file on this machine only (a git URL is refused),
+     have no `--remote`, and write no undo record.
    - **`kitbag doctor SOURCE`** fails when the profile directory holds a plaintext secrets file
      (`secrets.json`, `secrets.toml`, `secrets.decrypted`, `.env` ...), when `secrets.age` isn't an
      age file, or when `kitbag.toml` itself holds a literal secret, and warns when a git
      repository doesn't ignore `secrets.age`.
-   - **Left as follow-ups, so #9 can close:** `secrets set` / `rotate` (#136), resolving bundle
+   - **Left as follow-ups, so #9 can close:** resolving bundle
      values into tools that can't read env vars without the value reaching the undo record
      (#137), committing the encrypted file (#138), and opening a bundle on a `--remote` host
      (#139). An OS keychain or helper is a dated skip (2026-11-27): official docs name none
@@ -2076,6 +2097,8 @@ wrapping of their own.
 | `kitbag doctor [SOURCE] --mcp-tokens [--mcp-timeout SECS] [--allow-git-mcp [NAMES]] [--trust-source]` | Also start each local MCP server to list its tools, and estimate the tokens its tool definitions take up in each tool |
 | `kitbag doctor --why [DIR] [--to IDS]` | Which instruction files each tool loads in `DIR` (default: the current directory), in order, which it skips and why, and known traps |
 | `kitbag secrets list [FILE\|DIR] [--secrets-passphrase-file PATH \| --secrets-identity PATH]` | The variable names in an encrypted `secrets.age` (never values) |
+| `kitbag secrets set NAME [FILE\|DIR] --value-file PATH [--secrets-passphrase-file PATH \| --secrets-identity PATH --secrets-recipient KEY]` | Add or replace one variable in `secrets.age` (created if missing); the value comes from a file or stdin (`-`), never the command line, and is never shown |
+| `kitbag secrets rotate [FILE\|DIR] [--secrets-passphrase-file PATH \| --secrets-identity PATH] (--new-secrets-passphrase-file PATH \| --new-secrets-recipient KEY)` | Encrypt `secrets.age` again to a new passphrase or new keys; the same variables and token stores, rewritten in place with no plaintext file |
 | `kitbag list-targets [--json]` | Targets, what they support, which are detected, file locations |
 
 Common options:

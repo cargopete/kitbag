@@ -1,6 +1,7 @@
 //! The opt-in encrypted secrets bundle (#9, first slice): `capture --include
 //! secrets` writes the redacted values only to `secrets.age`; `apply
-//! --secrets-from` and `secrets list` open it in memory and show names only.
+//! --secrets-from` and `secrets list` open it in memory and show names only;
+//! `secrets set` and `secrets rotate` (#136) rewrite it, still encrypted.
 //! Every secret and passphrase here is a made-up one; the tests look for each
 //! in every place a leak could land: the profile directory, the state
 //! (undo) directory, the tools' config files, and stdout and stderr.
@@ -615,4 +616,699 @@ fn captured_values_stay_off_every_library_output() {
     // Without the flag, nothing keeps a value.
     let r = kitbag::engine::capture(&[a], &sb.env(Scope::User), "x").unwrap();
     assert!(r.redactions.iter().all(|x| x.value.is_none()));
+}
+
+// ---- `secrets set` and `secrets rotate` (#136) ----
+
+const SET_VALUE: &str = "fake-set-value-0000-not-real";
+const SET_VALUE_2: &str = "fake-replaced-value-1111-not-real";
+const STORE_TOKEN: &str = "fake-oauth-access-token-2222";
+const NEW_PASS: &str = "fake-new-passphrase-not-real";
+
+/// Every fake value and passphrase these tests use.
+fn all_fakes() -> Vec<&'static str> {
+    let mut v = everything();
+    v.extend([SET_VALUE, SET_VALUE_2, STORE_TOKEN, NEW_PASS]);
+    v
+}
+
+fn unlock_pass(p: &str) -> bundle::Unlock {
+    bundle::Unlock {
+        passphrase: Some(age::secrecy::SecretString::from(p.to_string())),
+        identities: vec![],
+    }
+}
+
+fn unlock_key(id: &age::x25519::Identity) -> bundle::Unlock {
+    bundle::Unlock {
+        passphrase: None,
+        identities: vec![Box::new(id.clone())],
+    }
+}
+
+/// The file names in `dir`, sorted.
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+/// No fake value in the profile (ciphertext, temps and all), the state
+/// directory, the home, or the command's output.
+#[track_caller]
+fn assert_no_leak(sb: &Sandbox, out: &std::process::Output) {
+    assert_absent_under(&sb.path("prof"), &all_fakes());
+    assert_absent_under(&sb.state(), &all_fakes());
+    assert_absent_under(&sb.home(), &[SET_VALUE, SET_VALUE_2, STORE_TOKEN, NEW_PASS]);
+    assert_silent(out, &all_fakes());
+}
+
+#[cfg(unix)]
+#[track_caller]
+fn assert_private(p: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(fs::metadata(p).unwrap().permissions().mode() & 0o777, 0o600);
+}
+
+#[cfg(not(unix))]
+fn assert_private(_: &Path) {}
+
+#[test]
+fn secrets_set_adds_and_replaces_a_value_in_a_passphrase_bundle() {
+    let sb = Sandbox::empty();
+    let pass = source_setup(&sb);
+    capture_with_bundle(&sb, &pass);
+    let before = open_bundle(&sb).names();
+    write(&sb, "vals/new.txt", &format!("{SET_VALUE}\n"));
+
+    // Add a name, from a file.
+    let out = sb
+        .cli()
+        .args(["secrets", "set", "NEW_API_KEY"])
+        .arg(sb.path("prof"))
+        .arg("--value-file")
+        .arg(sb.path("vals/new.txt"))
+        .arg("--secrets-passphrase-file")
+        .arg(&pass)
+        .assert()
+        .success()
+        .stdout(contains("Added NEW_API_KEY"))
+        .stdout(contains("4 variable(s)"))
+        .get_output()
+        .clone();
+    assert_no_leak(&sb, &out);
+    assert_eq!(
+        names_in(&sb.path("prof")),
+        [".gitignore", "kitbag.toml", "secrets.age"]
+    );
+    assert_private(&sb.path("prof/secrets.age"));
+    let raw = fs::read(sb.path("prof/secrets.age")).unwrap();
+    assert!(bundle::looks_like_age(&raw) && bundle::needs_passphrase(&raw));
+    let b = open_bundle(&sb);
+    assert_eq!(b.len(), 4);
+    assert_eq!(b.get("NEW_API_KEY").unwrap().expose(), SET_VALUE);
+    assert_eq!(
+        b.get("GITHUB_PERSONAL_ACCESS_TOKEN").unwrap().expose(),
+        TOKEN
+    );
+    assert_eq!(
+        b.get("LINEAR_CLIENT_SECRET").unwrap().expose(),
+        CLIENT_SECRET
+    );
+
+    // Replace a captured one, from stdin: its capture location stays.
+    let out = sb
+        .cli()
+        .args(["secrets", "set", "GITHUB_PERSONAL_ACCESS_TOKEN", "prof"])
+        .args(["--value-file", "-", "--secrets-passphrase-file"])
+        .arg(&pass)
+        .write_stdin(format!("{SET_VALUE_2}\n"))
+        .assert()
+        .success()
+        .stdout(contains("Replaced GITHUB_PERSONAL_ACCESS_TOKEN"))
+        .get_output()
+        .clone();
+    assert_no_leak(&sb, &out);
+    let b = open_bundle(&sb);
+    assert_eq!(b.len(), 4);
+    assert_eq!(
+        b.get("GITHUB_PERSONAL_ACCESS_TOKEN").unwrap().expose(),
+        SET_VALUE_2
+    );
+    assert_eq!(b.get("NEW_API_KEY").unwrap().expose(), SET_VALUE);
+    let after = b.names();
+    for (name, at) in &before {
+        assert!(after.contains(&(name.clone(), at.clone())), "{name} moved");
+    }
+    assert!(after.contains(&("NEW_API_KEY".to_string(), "secrets set".to_string())));
+
+    // list still shows names only.
+    let out = sb
+        .cli()
+        .args(["secrets", "list", "prof", "--secrets-passphrase-file"])
+        .arg(&pass)
+        .assert()
+        .success()
+        .stdout(contains("NEW_API_KEY"))
+        .stdout(contains("4 variable(s)"))
+        .get_output()
+        .clone();
+    assert_no_leak(&sb, &out);
+}
+
+#[test]
+fn secrets_set_creates_a_key_encrypted_bundle_and_rewrites_it_with_keys() {
+    let sb = Sandbox::empty();
+    write(&sb, "prof/kitbag.toml", "kitbag = 1\nname = \"p\"\n");
+    write(&sb, "vals/one.txt", SET_VALUE);
+    write(&sb, "vals/two.txt", &format!("{SET_VALUE_2}\r\n"));
+    let id = age::x25519::Identity::generate();
+    write(
+        &sb,
+        "id.txt",
+        &format!("{}\n", id.to_string().expose_secret()),
+    );
+    let key = id.to_public().to_string();
+
+    // A missing bundle is created, private, and kept out of git.
+    let out = sb
+        .cli()
+        .args([
+            "secrets",
+            "set",
+            "FIRST",
+            "prof/secrets.age",
+            "--value-file",
+        ])
+        .arg(sb.path("vals/one.txt"))
+        .args(["--secrets-recipient", &key])
+        .assert()
+        .success()
+        .stdout(contains("Added FIRST"))
+        .get_output()
+        .clone();
+    assert_no_leak(&sb, &out);
+    assert_eq!(
+        names_in(&sb.path("prof")),
+        [".gitignore", "kitbag.toml", "secrets.age"]
+    );
+    assert!(bundle::gitignore_covers(&sb.read("prof/.gitignore")));
+    assert_private(&sb.path("prof/secrets.age"));
+    let raw = fs::read(sb.path("prof/secrets.age")).unwrap();
+    assert!(bundle::looks_like_age(&raw) && !bundle::needs_passphrase(&raw));
+
+    // Rewriting a key-encrypted bundle needs the keys to encrypt it to.
+    for extra in [
+        &["--secrets-identity", "id.txt"][..],
+        &[
+            "--secrets-identity",
+            "id.txt",
+            "--secrets-passphrase-file",
+            "pass.txt",
+        ][..],
+    ] {
+        write(&sb, "pass.txt", &format!("{PASS}\n"));
+        let out = sb
+            .cli()
+            .args(["secrets", "set", "SECOND", "prof", "--value-file"])
+            .arg(sb.path("vals/two.txt"))
+            .args(extra)
+            .assert()
+            .failure()
+            .get_output()
+            .clone();
+        assert_no_leak(&sb, &out);
+        assert_eq!(fs::read(sb.path("prof/secrets.age")).unwrap(), raw);
+    }
+
+    // With identity and recipient, the first name stays.
+    let out = sb
+        .cli()
+        .args(["secrets", "set", "SECOND", "prof", "--value-file"])
+        .arg(sb.path("vals/two.txt"))
+        .args(["--secrets-identity", "id.txt", "--secrets-recipient", &key])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    assert_no_leak(&sb, &out);
+    let b = bundle::open_file(&sb.path("prof/secrets.age"), &unlock_key(&id)).unwrap();
+    assert_eq!(b.len(), 2);
+    assert_eq!(b.get("FIRST").unwrap().expose(), SET_VALUE);
+    // One trailing newline (here CRLF) is dropped, nothing else.
+    assert_eq!(b.get("SECOND").unwrap().expose(), SET_VALUE_2);
+    assert_eq!(
+        names_in(&sb.path("prof")),
+        [".gitignore", "kitbag.toml", "secrets.age"]
+    );
+}
+
+#[test]
+fn secrets_set_refuses_bad_input_and_writes_nothing() {
+    let sb = Sandbox::empty();
+    let pass = source_setup(&sb);
+    capture_with_bundle(&sb, &pass);
+    write(&sb, "vals/new.txt", SET_VALUE);
+    write(&sb, "vals/empty.txt", "\n");
+    let raw = fs::read(sb.path("prof/secrets.age")).unwrap();
+    let key = age::x25519::Identity::generate().to_public().to_string();
+    let v = sb.path("vals/new.txt");
+    let v = v.to_str().unwrap();
+    let p = pass.to_str().unwrap();
+    let cases: Vec<(Vec<&str>, &str)> = vec![
+        // Not a variable name.
+        (
+            vec![
+                "1BAD",
+                "prof",
+                "--value-file",
+                v,
+                "--secrets-passphrase-file",
+                p,
+            ],
+            "usable variable name",
+        ),
+        // The value never comes from the command line.
+        (
+            vec!["NEW", "prof", "--secrets-passphrase-file", p],
+            "--value-file",
+        ),
+        // A passphrase and keys together.
+        (
+            vec![
+                "NEW",
+                "prof",
+                "--value-file",
+                v,
+                "--secrets-passphrase-file",
+                p,
+                "--secrets-recipient",
+                &key,
+            ],
+            "can't be combined",
+        ),
+        // Keys for a passphrase bundle: that is rotate's job.
+        (
+            vec![
+                "NEW",
+                "prof",
+                "--value-file",
+                v,
+                "--secrets-recipient",
+                &key,
+            ],
+            "secrets rotate",
+        ),
+        // An empty value.
+        (
+            vec![
+                "NEW",
+                "prof",
+                "--value-file",
+                "vals/empty.txt",
+                "--secrets-passphrase-file",
+                p,
+            ],
+            "empty",
+        ),
+        // No passphrase and no terminal.
+        (
+            vec!["NEW", "prof", "--value-file", v],
+            "--secrets-passphrase-file",
+        ),
+        // A wrong passphrase.
+        (
+            vec![
+                "NEW",
+                "prof",
+                "--value-file",
+                v,
+                "--secrets-passphrase-file",
+                "vals/new.txt",
+            ],
+            "decrypt",
+        ),
+        // Git-looking places are never written.
+        (
+            vec![
+                "NEW",
+                "https://example.invalid/profile.git",
+                "--value-file",
+                v,
+                "--secrets-passphrase-file",
+                p,
+            ],
+            "git source",
+        ),
+        (
+            vec![
+                "NEW",
+                "git@example.invalid:x/y.git",
+                "--value-file",
+                v,
+                "--secrets-passphrase-file",
+                p,
+            ],
+            "git source",
+        ),
+        (
+            vec![
+                "NEW",
+                "github:someone/profile",
+                "--value-file",
+                v,
+                "--secrets-passphrase-file",
+                p,
+            ],
+            "git source",
+        ),
+    ];
+    for (args, says) in cases {
+        let out = sb
+            .cli()
+            .args(["secrets", "set"])
+            .args(&args)
+            .assert()
+            .failure()
+            .stderr(contains(says))
+            .get_output()
+            .clone();
+        assert_no_leak(&sb, &out);
+        assert_eq!(
+            fs::read(sb.path("prof/secrets.age")).unwrap(),
+            raw,
+            "{args:?}"
+        );
+        assert_eq!(
+            names_in(&sb.path("prof")),
+            [".gitignore", "kitbag.toml", "secrets.age"]
+        );
+    }
+    // A new bundle: an identity opens nothing, so it is refused.
+    let out = sb
+        .cli()
+        .args(["secrets", "set", "NEW", "fresh.age", "--value-file", v])
+        .args(["--secrets-identity", "vals/new.txt"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    assert_silent(&out, &all_fakes());
+    assert!(!sb.path("fresh.age").exists());
+    assert!(!sb.state().exists() || bytes_under(&sb.state()).is_empty());
+}
+
+/// A passphrase bundle holding two variables and a token store, written with
+/// the library as capture would.
+fn bundle_with_store(sb: &Sandbox) -> PathBuf {
+    let mut b = bundle::Bundle::default();
+    b.insert(
+        "ALPHA",
+        bundle::Secret::new(TOKEN),
+        "mcp_servers.a.env.ALPHA",
+    )
+    .unwrap();
+    b.insert("BETA", bundle::Secret::new(BEARER), "mcp_servers.b.headers")
+        .unwrap();
+    b.add_token_store(bundle::TokenStore {
+        tool: "gemini-cli".to_string(),
+        kind: kitbag::oauth_tokens::GEMINI_KIND.to_string(),
+        servers: [("linear".to_string(), URL.to_string())].into(),
+        content: bundle::Secret::new(&format!("{{\"access_token\":\"{STORE_TOKEN}\"}}")),
+    });
+    let sealed = bundle::seal(
+        &b,
+        &bundle::Seal::Passphrase(age::secrecy::SecretString::from(PASS.to_string())),
+    )
+    .unwrap();
+    write(sb, "prof/kitbag.toml", "kitbag = 1\nname = \"p\"\n");
+    write(sb, "pass.txt", &format!("{PASS}\n"));
+    write(sb, "new-pass.txt", &format!("{NEW_PASS}\n"));
+    bundle::write(&sb.path("prof"), &sealed).unwrap()
+}
+
+#[track_caller]
+fn assert_same_contents(b: &bundle::Bundle) {
+    assert_eq!(b.len(), 2);
+    assert_eq!(b.get("ALPHA").unwrap().expose(), TOKEN);
+    assert_eq!(b.get("BETA").unwrap().expose(), BEARER);
+    assert_eq!(
+        b.names()[0],
+        ("ALPHA".to_string(), "mcp_servers.a.env.ALPHA".to_string())
+    );
+    let stores = b.token_stores();
+    assert_eq!(stores.len(), 1);
+    assert_eq!(stores[0].tool, "gemini-cli");
+    assert!(stores[0].content.expose().contains(STORE_TOKEN));
+    assert_eq!(
+        stores[0].servers.get("linear").map(String::as_str),
+        Some(URL)
+    );
+}
+
+#[test]
+fn secrets_set_keeps_token_stores() {
+    let sb = Sandbox::empty();
+    let file = bundle_with_store(&sb);
+    write(&sb, "vals/new.txt", SET_VALUE);
+    let out = sb
+        .cli()
+        .args([
+            "secrets",
+            "set",
+            "GAMMA",
+            "prof",
+            "--value-file",
+            "vals/new.txt",
+        ])
+        .args(["--secrets-passphrase-file", "pass.txt"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    assert_no_leak(&sb, &out);
+    let b = bundle::open_file(&file, &unlock_pass(PASS)).unwrap();
+    assert_eq!(b.get("GAMMA").unwrap().expose(), SET_VALUE);
+    assert_eq!(b.token_stores().len(), 1);
+    assert!(b.token_stores()[0].content.expose().contains(STORE_TOKEN));
+}
+
+#[test]
+fn secrets_rotate_changes_the_passphrase_and_keeps_everything_else() {
+    let sb = Sandbox::empty();
+    let file = bundle_with_store(&sb);
+    let old = fs::read(&file).unwrap();
+    let out = sb
+        .cli()
+        .args(["secrets", "rotate", "prof"])
+        .args(["--secrets-passphrase-file", "pass.txt"])
+        .args(["--new-secrets-passphrase-file", "new-pass.txt"])
+        .assert()
+        .success()
+        .stdout(contains("2 variable(s) and 1 token store(s)"))
+        .get_output()
+        .clone();
+    assert_no_leak(&sb, &out);
+    // Only the new ciphertext: no plaintext sidecar, backup or temp file.
+    assert_eq!(names_in(&sb.path("prof")), ["kitbag.toml", "secrets.age"]);
+    assert_private(&file);
+    let raw = fs::read(&file).unwrap();
+    assert_ne!(raw, old);
+    assert!(bundle::looks_like_age(&raw) && bundle::needs_passphrase(&raw));
+    assert!(bundle::open(&raw, &unlock_pass(PASS)).is_err());
+    assert_same_contents(&bundle::open(&raw, &unlock_pass(NEW_PASS)).unwrap());
+
+    // list opens it with the new passphrase only, and shows names only.
+    sb.cli()
+        .args([
+            "secrets",
+            "list",
+            "prof",
+            "--secrets-passphrase-file",
+            "pass.txt",
+        ])
+        .assert()
+        .failure();
+    let out = sb
+        .cli()
+        .args(["secrets", "list", "prof"])
+        .args(["--secrets-passphrase-file", "new-pass.txt"])
+        .assert()
+        .success()
+        .stdout(contains("ALPHA"))
+        .stdout(contains("BETA"))
+        .stdout(contains("gemini-cli MCP OAuth tokens"))
+        .get_output()
+        .clone();
+    assert_no_leak(&sb, &out);
+}
+
+#[test]
+fn secrets_rotate_moves_between_passphrase_and_keys() {
+    let sb = Sandbox::empty();
+    let file = bundle_with_store(&sb);
+    let ids: Vec<age::x25519::Identity> =
+        (0..2).map(|_| age::x25519::Identity::generate()).collect();
+    for (i, id) in ids.iter().enumerate() {
+        write(
+            &sb,
+            &format!("id{i}.txt"),
+            &format!("{}\n", id.to_string().expose_secret()),
+        );
+    }
+    let key = |i: usize| ids[i].to_public().to_string();
+
+    // Passphrase -> key 0.
+    let out = sb
+        .cli()
+        .args(["secrets", "rotate", "prof/secrets.age"])
+        .args(["--secrets-passphrase-file", "pass.txt"])
+        .args(["--new-secrets-recipient", &key(0)])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    assert_no_leak(&sb, &out);
+    let raw = fs::read(&file).unwrap();
+    assert!(!bundle::needs_passphrase(&raw));
+    assert_same_contents(&bundle::open(&raw, &unlock_key(&ids[0])).unwrap());
+
+    // Key 0 -> key 1: the old key no longer opens it.
+    let out = sb
+        .cli()
+        .args(["secrets", "rotate", "prof", "--secrets-identity", "id0.txt"])
+        .args(["--new-secrets-recipient", &key(1)])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    assert_no_leak(&sb, &out);
+    let raw = fs::read(&file).unwrap();
+    assert!(bundle::open(&raw, &unlock_key(&ids[0])).is_err());
+    assert_same_contents(&bundle::open(&raw, &unlock_key(&ids[1])).unwrap());
+
+    // Key 1 -> the new passphrase.
+    let out = sb
+        .cli()
+        .args(["secrets", "rotate", "prof", "--secrets-identity", "id1.txt"])
+        .args(["--new-secrets-passphrase-file", "new-pass.txt"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    assert_no_leak(&sb, &out);
+    assert_same_contents(&bundle::open_file(&file, &unlock_pass(NEW_PASS)).unwrap());
+    assert_eq!(names_in(&sb.path("prof")), ["kitbag.toml", "secrets.age"]);
+}
+
+#[test]
+fn a_refused_or_failed_rotate_leaves_the_bundle_as_it_was() {
+    let sb = Sandbox::empty();
+    let file = bundle_with_store(&sb);
+    let raw = fs::read(&file).unwrap();
+    write(&sb, "wrong.txt", "fake-wrong-passphrase-xyz\n");
+    let key = age::x25519::Identity::generate().to_public().to_string();
+    let cases: Vec<(Vec<&str>, &str)> = vec![
+        // No new encryption: rotate never keeps the old one.
+        (
+            vec!["prof", "--secrets-passphrase-file", "pass.txt"],
+            "--new-secrets",
+        ),
+        // A new passphrase and new keys together.
+        (
+            vec![
+                "prof",
+                "--secrets-passphrase-file",
+                "pass.txt",
+                "--new-secrets-passphrase-file",
+                "new-pass.txt",
+                "--new-secrets-recipient",
+                &key,
+            ],
+            "can't be combined",
+        ),
+        // The same passphrase again.
+        (
+            vec![
+                "prof",
+                "--secrets-passphrase-file",
+                "pass.txt",
+                "--new-secrets-passphrase-file",
+                "pass.txt",
+            ],
+            "same as the current one",
+        ),
+        // The wrong current passphrase.
+        (
+            vec![
+                "prof",
+                "--secrets-passphrase-file",
+                "wrong.txt",
+                "--new-secrets-passphrase-file",
+                "new-pass.txt",
+            ],
+            "decrypt",
+        ),
+        // No current passphrase and no terminal.
+        (
+            vec!["prof", "--new-secrets-passphrase-file", "new-pass.txt"],
+            "--secrets-passphrase-file",
+        ),
+        // Not a key.
+        (
+            vec![
+                "prof",
+                "--secrets-passphrase-file",
+                "pass.txt",
+                "--new-secrets-recipient",
+                "not-a-key",
+            ],
+            "--secrets-recipient",
+        ),
+        // Git-looking places.
+        (
+            vec![
+                "https://example.invalid/profile.git",
+                "--secrets-passphrase-file",
+                "pass.txt",
+                "--new-secrets-passphrase-file",
+                "new-pass.txt",
+            ],
+            "git source",
+        ),
+        (
+            vec![
+                "git@example.invalid:x/y.git",
+                "--secrets-passphrase-file",
+                "pass.txt",
+                "--new-secrets-passphrase-file",
+                "new-pass.txt",
+            ],
+            "git source",
+        ),
+        (
+            vec![
+                "gh:someone/profile",
+                "--secrets-passphrase-file",
+                "pass.txt",
+                "--new-secrets-passphrase-file",
+                "new-pass.txt",
+            ],
+            "git source",
+        ),
+        // No bundle there.
+        (
+            vec![
+                "missing.age",
+                "--secrets-passphrase-file",
+                "pass.txt",
+                "--new-secrets-passphrase-file",
+                "new-pass.txt",
+            ],
+            "missing.age",
+        ),
+    ];
+    for (args, says) in cases {
+        let out = sb
+            .cli()
+            .args(["secrets", "rotate"])
+            .args(&args)
+            .assert()
+            .failure()
+            .stderr(contains(says))
+            .get_output()
+            .clone();
+        let mut hidden = all_fakes();
+        hidden.push("fake-wrong-passphrase-xyz");
+        assert_silent(&out, &hidden);
+        assert_absent_under(&sb.path("prof"), &hidden);
+        assert_eq!(fs::read(&file).unwrap(), raw, "{args:?}");
+        assert_eq!(names_in(&sb.path("prof")), ["kitbag.toml", "secrets.age"]);
+    }
+    assert!(!sb.path("missing.age").exists());
+    assert!(!sb.state().exists() || bytes_under(&sb.state()).is_empty());
+    assert_same_contents(&bundle::open(&raw, &unlock_pass(PASS)).unwrap());
 }
