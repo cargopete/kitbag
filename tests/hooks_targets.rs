@@ -565,6 +565,44 @@ fn tools_with_no_hooks_to_write_warn_and_write_nothing() {
 }
 
 #[test]
+fn every_tool_without_a_hook_file_warns_with_a_docs_reason_and_writes_nothing() {
+    let sb = Sandbox::empty();
+    let prof = profile(&sb.path("p"));
+    let out = sb
+        .cli()
+        .args([
+            "apply",
+            &prof,
+            "--to",
+            "windsurf,zed,amp,cline,roo,continue",
+            "--apply-hooks",
+            "--yes",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            contains("2 hook(s) not written to Windsurf")
+                .and(contains("2 hook(s) not written to Zed"))
+                .and(contains("2 hook(s) not written to Amp"))
+                .and(contains("2 hook(s) not written to Cline"))
+                .and(contains("2 hook(s) not written to Roo"))
+                .and(contains("2 hook(s) not written to Continue")),
+        )
+        .get_output()
+        .stdout
+        .clone();
+    let out = String::from_utf8_lossy(&out);
+    assert!(out.contains("Devin Desktop"), "{out}");
+    assert!(!out.contains("not verified"), "{out}");
+    // Devin's folders are never created, and nothing else appears either.
+    assert!(!sb.home().join(".devin").exists());
+    assert!(!sb.home().join(".config/devin").exists());
+    assert!(!sb.project().join(".devin").exists());
+    assert!(!sb.home().join(".codeium/windsurf/hooks.json").exists());
+    assert!(!sb.home().join(".cline").exists());
+}
+
+#[test]
 fn project_hooks_find_their_scripts() {
     // (tool, hook file in the project, the directory its commands name)
     let cases = [

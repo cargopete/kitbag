@@ -43,7 +43,8 @@
 //!   `skills-<mode>/` folders are listed by capture, not read. Roo needs the
 //!   name to be 1-64 lowercase letters, digits and hyphens (no leading,
 //!   trailing or doubled hyphen) and to match the folder.
-//! * Custom modes, hooks and settings are not carried (hooks: issue #13).
+//! * Custom modes, hooks and settings are not carried (Roo's docs describe no hooks,
+//!   checked 2026-11-27).
 //!
 //! Docs: <https://roocodeinc.github.io/Roo-Code/features/mcp/using-mcp-in-roo>,
 //! <https://roocodeinc.github.io/Roo-Code/features/custom-instructions>,
