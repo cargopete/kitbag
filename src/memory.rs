@@ -65,7 +65,7 @@ use anyhow::Result;
 
 use crate::adapters::{Adapter, Env, Level, Note, Scope, Work};
 use crate::engine::CaptureResult;
-use crate::model::{Profile, SkillFile};
+use crate::model::{Profile, SkillFile, TARGETING_KEYS, Targeting};
 
 pub const CLAUDE: &str = "claude-code";
 pub const CODEX: &str = "codex";
@@ -555,6 +555,193 @@ pub fn hermes_merge(current: &str, want: &str, limit: usize) -> (String, usize, 
     (text, added, left_out)
 }
 
+/// The kitbag frontmatter key that opts a note into being folded into
+/// instructions (off by default; capture never sets it).
+pub const FOLD_KEY: &str = "fold_into_instructions";
+
+/// What kitbag keeps in a note's own frontmatter: where it applies and whether
+/// it is folded into instructions. Both are optional.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Settings {
+    pub targeting: Targeting,
+    pub fold: bool,
+}
+
+/// A note's kitbag settings, its content without exactly those keys (what a
+/// tool's memory file gets), and the (errors, warnings) found reading them.
+pub fn settings(f: &SkillFile) -> (Settings, Vec<u8>, Vec<String>, Vec<String>) {
+    let Ok(text) = std::str::from_utf8(&f.content) else {
+        return (Settings::default(), f.content.clone(), vec![], vec![]);
+    };
+    let mentions = TARGETING_KEYS
+        .iter()
+        .chain(std::iter::once(&FOLD_KEY))
+        .any(|k| text.contains(k));
+    if !mentions {
+        return (Settings::default(), f.content.clone(), vec![], vec![]);
+    }
+    let mut data = crate::frontmatter::parse(text).data;
+    let before: Vec<String> = data.keys().cloned().collect();
+    let (targeting, mut errors, warnings) = Targeting::take_from(
+        &mut data,
+        &crate::adapters::ids(),
+        |id| crate::adapters::canonical_id(id).to_string(),
+        "note",
+    );
+    let fold = match data.remove(FOLD_KEY) {
+        None => false,
+        Some(serde_json::Value::Bool(b)) => b,
+        Some(serde_json::Value::String(s)) if s == "true" || s == "false" => s == "true",
+        Some(_) => {
+            errors.push(format!("'{FOLD_KEY}' must be true or false"));
+            false
+        }
+    };
+    // Remove exactly the keys that were read as kitbag's (a legacy `only` that
+    // is another tool's key, say, stays).
+    let mut taken: Vec<&str> = before
+        .iter()
+        .filter(|k| !data.contains_key(*k))
+        .map(String::as_str)
+        .collect();
+    taken.retain(|k| TARGETING_KEYS.contains(k) || *k == FOLD_KEY);
+    let content = match crate::frontmatter::remove_keys(text, &taken) {
+        Some(stripped) => stripped.into_bytes(),
+        None => f.content.clone(),
+    };
+    (Settings { targeting, fold }, content, errors, warnings)
+}
+
+/// Problems with the kitbag settings of a loaded profile's notes.
+pub fn setting_issues(p: &Profile) -> (Vec<String>, Vec<String>) {
+    let (mut errors, mut warnings) = (Vec::new(), Vec::new());
+    for f in &p.memory {
+        let (_, _, e, w) = settings(f);
+        errors.extend(e.into_iter().map(|e| format!("memory/{}: {e}", f.path)));
+        warnings.extend(w.into_iter().map(|w| format!("memory/{}: {w}", f.path)));
+    }
+    (errors, warnings)
+}
+
+/// A re-capture keeps the kitbag settings of the notes already in the
+/// profile (capture itself never sets them). Returns how many notes had some.
+pub fn keep_settings(new: &mut Profile, old: &Profile) -> usize {
+    let mut n = 0;
+    for f in &mut new.memory {
+        let Some(o) = old.memory.iter().find(|o| o.path == f.path) else {
+            continue;
+        };
+        let (s, _, _, _) = settings(o);
+        let mut entries = s.targeting.entries();
+        if s.fold {
+            entries.push((FOLD_KEY, serde_json::Value::Bool(true)));
+        }
+        if entries.is_empty() {
+            continue;
+        }
+        if let Ok(text) = std::str::from_utf8(&f.content) {
+            f.content = crate::frontmatter::add_entries(text, &entries).into_bytes();
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Tools whose memory notes kitbag writes to a store of their own (or reads
+/// read-only), so their notes are never folded into instructions.
+fn has_store(target: &str) -> bool {
+    matches!(target, CLAUDE | HERMES | CODEX)
+}
+
+/// The profile for `target` with the notes marked `fold_into_instructions`
+/// appended to its instructions, when `target` has no memory store of its own
+/// but kitbag writes instructions for it (`instructions_supported`); `None`
+/// when nothing is folded. The instructions are then written by the tool's own
+/// adapter, to the file and in the managed block it already uses.
+pub fn fold_into(
+    profile: &Profile,
+    target: &str,
+    instructions_supported: bool,
+    env: &Env,
+    work: &mut Work,
+) -> Option<Profile> {
+    if env.scope != Scope::User || has_store(target) || profile.memory.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for f in &profile.memory {
+        let (s, content, _, _) = settings(f);
+        if !s.fold {
+            continue;
+        }
+        let Some((tool, _, _)) = split(&f.path) else {
+            continue;
+        };
+        if tool == CODEX {
+            work.info(
+                target,
+                format!(
+                    "memory/{}: not folded into instructions, Codex's memory files are generated state",
+                    f.path
+                ),
+            );
+            continue;
+        }
+        if let Some(why) = s.targeting.skip_reason(target) {
+            work.info(
+                target,
+                format!(
+                    "memory/{}: not folded into {target}'s instructions: {why}",
+                    f.path
+                ),
+            );
+            continue;
+        }
+        if !instructions_supported {
+            work.info(
+                target,
+                format!(
+                    "memory/{}: not folded, kitbag writes no instructions file for {target} at this scope",
+                    f.path
+                ),
+            );
+            continue;
+        }
+        if marked(f) {
+            work.warn(
+                target,
+                format!(
+                    "memory/{}: not folded into instructions, it holds [REDACTED] markers where capture removed secrets",
+                    f.path
+                ),
+            );
+            continue;
+        }
+        let body = crate::frontmatter::parse(&String::from_utf8_lossy(&content)).body;
+        let body = body.trim();
+        if body.is_empty() {
+            continue;
+        }
+        work.info(
+            target,
+            format!("memory: folds {} into the instructions", describe(f)),
+        );
+        parts.push(format!("### Memory: {}\n\n{body}", f.path));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let mut p = profile.clone();
+    let mut text = p.instructions.take().unwrap_or_default();
+    if !text.trim().is_empty() {
+        text = format!("{}\n\n", text.trim_end());
+    }
+    text.push_str(&parts.join("\n\n"));
+    text.push('\n');
+    p.instructions = Some(text);
+    Some(p)
+}
+
 fn marked(f: &SkillFile) -> bool {
     std::str::from_utf8(&f.content).is_ok_and(crate::secrets::has_redaction_marker)
 }
@@ -575,10 +762,28 @@ pub fn plan(profile: &Profile, applied: &[String], env: &Env, work: &mut Work) -
         );
         return Ok(());
     }
+    // What a tool's memory file gets has no kitbag settings in it, and a note
+    // its settings keep off its own tool is skipped.
+    let stripped: Vec<SkillFile> = profile
+        .memory
+        .iter()
+        .map(|f| SkillFile {
+            content: settings(f).1,
+            ..f.clone()
+        })
+        .collect();
     let mut by_tool: BTreeMap<&str, Vec<&SkillFile>> = BTreeMap::new();
-    for f in &profile.memory {
+    for (f, orig) in stripped.iter().zip(&profile.memory) {
         match split(&f.path) {
-            Some((tool, _, _)) => by_tool.entry(tool).or_default().push(f),
+            Some((tool, _, _)) => {
+                if let Some(why) = settings(orig).0.targeting.skip_reason(tool)
+                    && applied.iter().any(|t| t == tool)
+                {
+                    work.info(tool, format!("memory/{}: skipped on {tool}: {why}", f.path));
+                    continue;
+                }
+                by_tool.entry(tool).or_default().push(f);
+            }
             None => work.warn(
                 "profile",
                 format!("memory/{}: not a valid note path, skipped", f.path),
