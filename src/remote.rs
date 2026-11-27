@@ -1,0 +1,731 @@
+//! `kitbag apply --remote` / `kitbag diff --remote`: run a profile on another
+//! machine over SSH.
+//!
+//! kitbag shells out to the user's own `ssh`, so their `~/.ssh/config`, agent,
+//! jump hosts and known-hosts handling apply exactly as when they type `ssh`
+//! themselves; kitbag adds no options, stores no credentials and asks for no
+//! passwords. The profile directory is copied to a private temporary directory
+//! on the host, a kitbag there plans (and, after confirmation, applies) it, and
+//! the directory is removed again. The remote kitbag records the apply in the
+//! remote host's own state directory, so `kitbag undo` there undoes it.
+//!
+//! Nothing resolved is sent: the profile holds `${VAR}` references, a profile
+//! that holds what looks like a literal secret is refused, and the remote
+//! kitbag resolves references from the remote host's environment.
+
+use std::fs;
+use std::io::Write;
+use std::path::Path;
+use std::process::{Command, Stdio};
+
+use anyhow::{Context, Result, bail};
+
+use crate::profile_io::MAX_PROFILE_BYTES;
+
+/// Where releases (and their `.sha256` files) are published.
+pub const RELEASE_BASE: &str = "https://github.com/cargopete/kitbag/releases/download";
+
+/// Prefix of the temporary directory kitbag creates on the remote host.
+const TMP_PREFIX: &str = "kitbag-remote.";
+
+/// Lines the scripts we run remotely use to report back; everything else the
+/// remote shell prints (banners, motd) is ignored.
+const MARK: &str = "kitbag-remote:";
+
+#[derive(Debug, Clone)]
+pub struct Remote {
+    /// The ssh program: `ssh`, found on PATH like the user would type it.
+    pub ssh: String,
+    /// What is handed to `ssh` as the destination: `host`, `user@host`, or an
+    /// `ssh://` URI.
+    pub host: String,
+    /// Path of kitbag on the remote host, instead of looking it up.
+    pub kitbag: Option<String>,
+    /// If the remote host has no kitbag, download the release matching this
+    /// kitbag there, after verifying its checksum.
+    pub download: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Flow {
+    /// `kitbag diff` there; its exit status is passed on.
+    Diff { exit_code: bool },
+    /// `kitbag apply` there. Without `yes` the plan is shown first and the
+    /// apply only happens after a local confirmation.
+    Apply { yes: bool, dry_run: bool },
+}
+
+/// Quote `s` for a POSIX shell: single quotes, with embedded ones escaped.
+pub fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// `ssh` would read a host starting with `-` as an option (`-oProxyCommand=...`),
+/// and whitespace or control characters can't be part of a destination.
+pub fn validate_host(host: &str) -> Result<()> {
+    if host.is_empty() {
+        bail!("--remote needs a host, e.g. --remote you@example.com");
+    }
+    if host.starts_with('-') {
+        bail!("--remote {host:?} looks like an ssh option, not a host");
+    }
+    if host.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        bail!("--remote {host:?} is not a valid ssh destination");
+    }
+    Ok(())
+}
+
+fn ssh(r: &Remote, remote_command: &str) -> Command {
+    // `ssh` as the user would type it, with none of its options set here, so
+    // the user's own config decides; `--` keeps a host from being an option.
+    let mut c = Command::new(&r.ssh);
+    c.arg("--").arg(&r.host).arg(remote_command);
+    c
+}
+
+/// Fail with a pointer at ssh when it itself failed (exit status 255).
+fn ssh_status(host: &str, what: &str, code: Option<i32>) -> Result<i32> {
+    match code {
+        Some(255) | None => bail!(
+            "ssh to {host} failed while {what}; check that `ssh {host}` works from this shell"
+        ),
+        Some(c) => Ok(c),
+    }
+}
+
+/// Run `script` with `sh -s` on the host and return the lines it reported.
+fn run_script(r: &Remote, script: &str) -> Result<Vec<(String, String)>> {
+    let host = r.host.as_str();
+    let mut child = ssh(r, "sh -s")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("could not run `ssh`; is OpenSSH installed and on your PATH?")?;
+    {
+        let mut stdin = child.stdin.take().context("no stdin for ssh")?;
+        // The remote script may exit before reading all of it.
+        let _ = stdin.write_all(script.as_bytes());
+    }
+    let out = child.wait_with_output()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let found: Vec<(String, String)> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix(MARK))
+        .filter_map(|l| l.split_once('='))
+        .map(|(k, v)| (k.to_string(), v.trim_end().to_string()))
+        .collect();
+    if let Some((_, e)) = found.iter().find(|(k, _)| k == "error") {
+        bail!("on {host}: {e}");
+    }
+    if !out.status.success() {
+        ssh_status(host, "preparing the remote side", out.status.code())?;
+        bail!("the remote setup on {host} failed ({})", out.status);
+    }
+    Ok(found)
+}
+
+fn get<'a>(found: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    found
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
+        .filter(|v| !v.is_empty())
+}
+
+/// Shell word for a path given with `--remote-kitbag`; `~/` means the remote
+/// home, which a quoted `~` would not.
+fn path_word(p: &str) -> String {
+    match p.strip_prefix("~/") {
+        Some(rest) => format!("\"$HOME\"{}", sh_quote(&format!("/{rest}"))),
+        None => sh_quote(p),
+    }
+}
+
+const PROBE: &str = r#"set -eu
+umask 077
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/kitbag-remote.XXXXXX")" || { printf 'kitbag-remote:error=%s\n' 'could not create a temporary directory'; exit 1; }
+printf 'kitbag-remote:tmp=%s\n' "$tmp"
+# An error here stops the whole run, so take the directory with it.
+bail() { printf 'kitbag-remote:error=%s\n' "$*"; rm -rf "$tmp"; exit 1; }
+explicit=@EXPLICIT@
+bin=''
+if [ -n "$explicit" ]; then
+  bin="$(command -v "$explicit" 2>/dev/null || true)"
+  case "$bin" in
+    /*) ;;
+    *) bail "--remote-kitbag $explicit is not an executable file on this host" ;;
+  esac
+else
+  # A non-interactive ssh shell often lacks ~/.local/bin (where install.sh puts
+  # kitbag) on its PATH, so look there and in cargo's bin dir as well.
+  for c in kitbag "$HOME/.local/bin/kitbag" "$HOME/.cargo/bin/kitbag"; do
+    p="$(command -v "$c" 2>/dev/null || true)"
+    case "$p" in
+      /*) bin="$p"; break ;;
+    esac
+  done
+fi
+if [ -n "$bin" ]; then
+  ver="$("$bin" --version 2>/dev/null)" || ver=''
+  case "$ver" in
+    kitbag\ *) printf 'kitbag-remote:kitbag=%s\n' "$bin"; printf 'kitbag-remote:version=%s\n' "$ver" ;;
+    *) if [ -n "$explicit" ]; then bail "$bin did not run as kitbag (--version printed: $ver)"; fi ;;
+  esac
+fi
+"#;
+
+/// Downloads the release for this host's OS and CPU into `$tmp/download`,
+/// checks it against the published `.sha256` and only then unpacks and runs
+/// it. Fails closed: a missing, malformed or mismatching checksum stops it
+/// before anything is unpacked. Mirrors `install.sh`.
+const DOWNLOAD: &str = r#"set -eu
+umask 077
+tmp=@TMP@
+version=@VERSION@
+base=@BASE@
+die() { printf 'kitbag-remote:error=%s\n' "$*"; exit 1; }
+command -v tar >/dev/null 2>&1 || die "tar is required on this host to unpack kitbag"
+if command -v curl >/dev/null 2>&1; then
+  fetch() { curl --proto '@PROTO@' --tlsv1.2 -fsSL "$1" -o "$2"; }
+elif command -v wget >/dev/null 2>&1; then
+  fetch() { wget -q --https-only "$1" -O "$2"; }
+else
+  die "curl or wget is required on this host to download kitbag"
+fi
+os="$(uname -s)"
+arch="$(uname -m)"
+case "$arch" in
+  x86_64 | amd64) arch="x86_64" ;;
+  arm64 | aarch64) arch="aarch64" ;;
+  *) die "unsupported CPU architecture on this host: $arch" ;;
+esac
+case "$os" in
+  Linux) target="$arch-unknown-linux-musl" ;;
+  Darwin) target="$arch-apple-darwin" ;;
+  *) die "unsupported OS on this host: $os" ;;
+esac
+archive="kitbag-$target.tar.gz"
+checksum="kitbag-$target.sha256"
+dl="$tmp/download"
+mkdir -p "$dl" "$tmp/bin"
+fetch "$base/$archive" "$dl/$archive" || die "download failed: $base/$archive (is $version a published release?)"
+fetch "$base/$checksum" "$dl/$checksum" || die "checksum download failed: $base/$checksum"
+is_sha256() {
+  case "$1" in
+    *[!0-9a-f]*) return 1 ;;
+  esac
+  [ "${#1}" -eq 64 ]
+}
+expected="$(cut -d ' ' -f 1 < "$dl/$checksum" | tr 'A-F' 'a-f')"
+is_sha256 "$expected" || die "$checksum does not hold a SHA-256 checksum"
+if command -v sha256sum >/dev/null 2>&1; then
+  actual="$(sha256sum "$dl/$archive" | cut -d ' ' -f 1)"
+elif command -v shasum >/dev/null 2>&1; then
+  actual="$(shasum -a 256 "$dl/$archive" | cut -d ' ' -f 1)"
+else
+  die "sha256sum or shasum is required on this host to verify the download"
+fi
+actual="$(printf '%s' "$actual" | tr 'A-F' 'a-f')"
+is_sha256 "$actual" || die "could not compute the SHA-256 of $archive"
+[ "$expected" = "$actual" ] || die "checksum mismatch for $archive (expected $expected, got $actual); nothing was run"
+mkdir -p "$dl/unpacked"
+tar -xzf "$dl/$archive" -C "$dl/unpacked" || die "could not unpack $archive"
+src="$dl/unpacked/kitbag"
+[ -f "$src" ] || src="$(find "$dl/unpacked" -type f -name kitbag | head -n 1)"
+[ -n "$src" ] && [ -f "$src" ] || die "archive did not contain kitbag"
+cp "$src" "$tmp/bin/kitbag"
+chmod 755 "$tmp/bin/kitbag"
+ver="$("$tmp/bin/kitbag" --version 2>/dev/null)" || die "the downloaded kitbag did not run on this host"
+printf 'kitbag-remote:kitbag=%s\n' "$tmp/bin/kitbag"
+printf 'kitbag-remote:version=%s\n' "$ver"
+"#;
+
+fn probe_script(explicit: Option<&str>) -> String {
+    let word = explicit.map(path_word).unwrap_or_else(|| "''".into());
+    PROBE.replace("@EXPLICIT@", &word)
+}
+
+/// The script that downloads and verifies a release, with `proto` the curl
+/// protocol allow-list (`=https`; the tests use `=file`).
+pub fn download_script(tmp: &str, version: &str, base: &str, proto: &str) -> String {
+    DOWNLOAD
+        .replace("@TMP@", &sh_quote(tmp))
+        .replace("@VERSION@", &sh_quote(version))
+        .replace("@BASE@", &sh_quote(base))
+        .replace("@PROTO@", proto)
+}
+
+/// A directory made by the probe: absolute, ours by name, nothing odd in it.
+fn check_tmp(tmp: &str) -> Result<()> {
+    let name = Path::new(tmp)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    if !tmp.starts_with('/')
+        || tmp.contains("..")
+        || tmp.chars().any(|c| c.is_control())
+        || !name.starts_with(TMP_PREFIX)
+    {
+        bail!("the remote host returned an unexpected temporary directory: {tmp:?}");
+    }
+    Ok(())
+}
+
+/// Copy the profile into `stage` for sending: regular files only, without
+/// `.git` or `.env*` files, which are not part of a profile and may hold
+/// secrets. Returns the number of files.
+fn stage(from: &Path, to: &Path, total: &mut u64) -> Result<usize> {
+    let mut n = 0;
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from).with_context(|| format!("reading {}", from.display()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let lossy = name.to_string_lossy();
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
+            if lossy == ".git" {
+                continue;
+            }
+            n += stage(&entry.path(), &to.join(&name), total)?;
+        } else if kind.is_file() {
+            if lossy == ".env" || lossy.starts_with(".env.") {
+                continue;
+            }
+            *total += entry.metadata()?.len();
+            if *total > MAX_PROFILE_BYTES {
+                bail!(
+                    "the profile is larger than {} MiB; not sending it",
+                    MAX_PROFILE_BYTES / 1024 / 1024
+                );
+            }
+            fs::copy(entry.path(), to.join(&name))?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// Send the profile at `dir` to `remote_dir` on the host (a tar stream over ssh).
+fn upload(r: &Remote, dir: &Path, remote_dir: &str) -> Result<usize> {
+    let host = r.host.as_str();
+    let staged = tempfile::tempdir()?;
+    let mut total = 0;
+    let files = stage(dir, staged.path(), &mut total)?;
+    let mut tar = Command::new("tar")
+        .arg("-cf")
+        .arg("-")
+        .arg("-C")
+        .arg(staged.path())
+        .arg(".")
+        .env("COPYFILE_DISABLE", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("could not run `tar`")?;
+    let tar_out = tar.stdout.take().context("no stdout from tar")?;
+    let q = sh_quote(remote_dir);
+    let status = ssh(r, &format!("mkdir -p {q} && tar -xf - -C {q}"))
+        .stdin(Stdio::from(tar_out))
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("could not run `ssh`; is OpenSSH installed and on your PATH?")?;
+    let tar_status = tar.wait()?;
+    if !tar_status.success() {
+        bail!("tar failed while packing the profile ({tar_status})");
+    }
+    let code = ssh_status(host, "copying the profile", status.code())?;
+    if code != 0 {
+        bail!("copying the profile to {host} failed (remote exit status {code})");
+    }
+    Ok(files)
+}
+
+/// Run kitbag on the host with `args` (already shell-quoted words), output
+/// going straight to this terminal, and return its exit status.
+fn run_kitbag(r: &Remote, bin: &str, args: &[String]) -> Result<i32> {
+    let host = r.host.as_str();
+    let cmd = std::iter::once(sh_quote(bin))
+        .chain(args.iter().map(|a| sh_quote(a)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let status = ssh(r, &cmd)
+        .stdin(Stdio::null())
+        .status()
+        .context("could not run `ssh`; is OpenSSH installed and on your PATH?")?;
+    ssh_status(host, "running kitbag", status.code())
+}
+
+/// Profile directory name on the remote host: the profile's own name when it
+/// is a plain one (a plugin takes its name from its directory), else `profile`.
+fn dir_name(hint: &str) -> String {
+    if !hint.is_empty()
+        && hint.len() <= 64
+        && hint
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && !hint.starts_with('.')
+    {
+        hint.to_string()
+    } else {
+        "profile".to_string()
+    }
+}
+
+/// Copy `profile_dir` to the host and run `flow` there. `args` are the
+/// `kitbag apply`/`diff` options after the source (`--to ...`).
+pub fn run(
+    remote: &Remote,
+    profile_dir: &Path,
+    name_hint: &str,
+    args: &[String],
+    flow: Flow,
+    confirm: &dyn Fn(&str) -> Result<bool>,
+) -> Result<i32> {
+    if cfg!(windows) {
+        bail!("--remote is not supported on Windows yet; run kitbag from WSL or on a Unix machine");
+    }
+    validate_host(&remote.host)?;
+    let host = remote.host.as_str();
+    let found = run_script(remote, &probe_script(remote.kitbag.as_deref()))?;
+    let tmp = get(&found, "tmp")
+        .context("the remote host did not report a temporary directory")?
+        .to_string();
+    check_tmp(&tmp)?;
+    let result = run_in(
+        remote,
+        profile_dir,
+        name_hint,
+        args,
+        flow,
+        confirm,
+        &found,
+        &tmp,
+    );
+    // Always remove what was copied there, success or not.
+    let cleanup = ssh(remote, &format!("rm -rf {}", sh_quote(&tmp)))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status();
+    if !matches!(cleanup, Ok(s) if s.success()) {
+        eprintln!("warning: could not remove {tmp} on {host}; it holds only the copied profile");
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_in(
+    remote: &Remote,
+    profile_dir: &Path,
+    name_hint: &str,
+    args: &[String],
+    flow: Flow,
+    confirm: &dyn Fn(&str) -> Result<bool>,
+    found: &[(String, String)],
+    tmp: &str,
+) -> Result<i32> {
+    let host = remote.host.as_str();
+    let local = format!("kitbag {}", env!("CARGO_PKG_VERSION"));
+    let (bin, version) = match get(found, "kitbag") {
+        Some(bin) => (
+            bin.to_string(),
+            get(found, "version").unwrap_or("").to_string(),
+        ),
+        None if remote.download => {
+            let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+            eprintln!(
+                "kitbag is not installed on {host}; downloading {tag} there and verifying its checksum"
+            );
+            let base = format!("{RELEASE_BASE}/{tag}");
+            let got = run_script(remote, &download_script(tmp, &tag, &base, "=https"))?;
+            let bin = get(&got, "kitbag")
+                .context("the remote host did not report the downloaded kitbag")?
+                .to_string();
+            (bin, get(&got, "version").unwrap_or("").to_string())
+        }
+        None => bail!(
+            "kitbag is not installed on {host} (looked on PATH, ~/.local/bin and ~/.cargo/bin). \
+             Install it there (see the README), give its path with --remote-kitbag, \
+             or add --remote-download to download v{} there with its checksum verified",
+            env!("CARGO_PKG_VERSION")
+        ),
+    };
+    if version != local {
+        eprintln!(
+            "note: {host} has {} at {bin}, this machine has {local}; a profile written for a newer kitbag may not apply fully there",
+            if version.is_empty() {
+                "an unknown kitbag version"
+            } else {
+                &version
+            }
+        );
+    }
+    let sub = match flow {
+        Flow::Diff { .. } => "diff",
+        Flow::Apply { .. } => "apply",
+    };
+    let dir = format!("{tmp}/{}", dir_name(name_hint));
+    let files = upload(remote, profile_dir, &dir)?;
+    println!(
+        "Sent the profile ({files} files, no secrets resolved) to {host}; kitbag there: {bin}\n"
+    );
+    let command = |extra: &[&str]| -> Vec<String> {
+        let mut v = vec![sub.to_string(), dir.clone()];
+        v.extend(args.iter().cloned());
+        v.extend(extra.iter().map(|s| s.to_string()));
+        v
+    };
+    match flow {
+        Flow::Diff { exit_code } => run_kitbag(
+            remote,
+            &bin,
+            &command(if exit_code { &["--exit-code"] } else { &[] }),
+        ),
+        Flow::Apply { dry_run: true, .. } => run_kitbag(remote, &bin, &command(&["--dry-run"])),
+        Flow::Apply { yes: true, .. } => run_kitbag(remote, &bin, &command(&["--yes"])),
+        Flow::Apply { .. } => {
+            let code = run_kitbag(remote, &bin, &command(&["--dry-run"]))?;
+            if code != 0 {
+                return Ok(code);
+            }
+            if !confirm(&format!("\nApply this on {host}?"))? {
+                println!("Cancelled; nothing was changed on {host}.");
+                return Ok(1);
+            }
+            let code = run_kitbag(remote, &bin, &command(&["--yes"]))?;
+            if code == 0 {
+                println!(
+                    "\nUndo on {host} with: ssh {} {} undo",
+                    sh_quote(host),
+                    sh_quote(&bin)
+                );
+            }
+            Ok(code)
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+
+    fn staged_files(dir: &Path) -> Result<Vec<PathBuf>> {
+        let t = tempfile::tempdir()?;
+        let mut total = 0;
+        stage(dir, t.path(), &mut total)?;
+        let mut out = Vec::new();
+        fn walk(base: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+            for e in fs::read_dir(dir)? {
+                let e = e?;
+                if e.file_type()?.is_dir() {
+                    walk(base, &e.path(), out)?;
+                } else {
+                    out.push(e.path().strip_prefix(base)?.to_path_buf());
+                }
+            }
+            Ok(())
+        }
+        walk(t.path(), t.path(), &mut out)?;
+        out.sort();
+        Ok(out)
+    }
+
+    #[test]
+    fn quotes_for_a_posix_shell() {
+        assert_eq!(sh_quote("a b"), "'a b'");
+        assert_eq!(sh_quote("it's"), r"'it'\''s'");
+        assert_eq!(sh_quote("$(rm -rf ~)"), "'$(rm -rf ~)'");
+    }
+
+    #[test]
+    fn hosts_that_ssh_would_read_as_options_are_refused() {
+        assert!(validate_host("you@example.com").is_ok());
+        assert!(validate_host("example.com").is_ok());
+        assert!(validate_host("ssh://you@example.com:2222").is_ok());
+        assert!(validate_host("").is_err());
+        assert!(validate_host("-oProxyCommand=touch /tmp/x").is_err());
+        assert!(validate_host("host name").is_err());
+        assert!(validate_host("host\nname").is_err());
+    }
+
+    #[test]
+    fn tilde_paths_mean_the_remote_home() {
+        assert_eq!(path_word("~/bin/kitbag"), "\"$HOME\"'/bin/kitbag'");
+        assert_eq!(path_word("/opt/kitbag"), "'/opt/kitbag'");
+    }
+
+    #[test]
+    fn only_our_own_temp_dirs_are_accepted() {
+        assert!(check_tmp("/tmp/kitbag-remote.AbC123").is_ok());
+        assert!(check_tmp("/tmp/other").is_err());
+        assert!(check_tmp("relative/kitbag-remote.x").is_err());
+        assert!(check_tmp("/tmp/../kitbag-remote.x").is_err());
+        assert!(check_tmp("/tmp/kitbag-remote.x\n/etc").is_err());
+    }
+
+    #[test]
+    fn staging_leaves_out_git_env_files_and_links() {
+        let src = tempfile::tempdir().unwrap();
+        let p = src.path();
+        fs::create_dir_all(p.join("rules")).unwrap();
+        fs::create_dir_all(p.join(".git")).unwrap();
+        fs::write(p.join("kitbag.toml"), "name = \"x\"\n").unwrap();
+        fs::write(p.join("rules/a.md"), "a").unwrap();
+        fs::write(p.join(".git/config"), "x").unwrap();
+        fs::write(p.join(".env"), "TOKEN=fake").unwrap();
+        fs::write(p.join(".env.local"), "TOKEN=fake").unwrap();
+        std::os::unix::fs::symlink("/etc/hostname", p.join("link")).unwrap();
+        let files = staged_files(p).unwrap();
+        assert_eq!(
+            files,
+            vec![PathBuf::from("kitbag.toml"), PathBuf::from("rules/a.md")]
+        );
+    }
+
+    fn target() -> String {
+        let arch = match std::env::consts::ARCH {
+            "aarch64" => "aarch64",
+            _ => "x86_64",
+        };
+        match std::env::consts::OS {
+            "macos" => format!("{arch}-apple-darwin"),
+            _ => format!("{arch}-unknown-linux-musl"),
+        }
+    }
+
+    /// A fake release in `dir`: a `kitbag` that records that it ran, its
+    /// archive, and a `.sha256` file holding `checksum_line`.
+    fn release(dir: &Path, marker: &Path, checksum: impl Fn(&str) -> String) {
+        let stage = dir.join("stage");
+        fs::create_dir_all(&stage).unwrap();
+        let bin = stage.join("kitbag");
+        fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\ntouch '{}'\necho 'kitbag 9.9.9'\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        let archive = format!("kitbag-{}.tar.gz", target());
+        let ok = Command::new("tar")
+            .arg("-czf")
+            .arg(dir.join(&archive))
+            .arg("-C")
+            .arg(&stage)
+            .arg("kitbag")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let out = Command::new("sha256sum")
+            .arg(dir.join(&archive))
+            .output()
+            .unwrap();
+        let real = String::from_utf8(out.stdout)
+            .unwrap()
+            .split(' ')
+            .next()
+            .unwrap()
+            .to_string();
+        fs::write(
+            dir.join(format!("kitbag-{}.sha256", target())),
+            checksum(&real),
+        )
+        .unwrap();
+    }
+
+    fn run_download(dir: &Path, tmp: &Path) -> (bool, String) {
+        let base = format!("file://{}", dir.display());
+        let script = download_script(tmp.to_str().unwrap(), "v9.9.9", &base, "=file");
+        let mut child = Command::new("sh")
+            .arg("-s")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    }
+
+    fn have_tools() -> bool {
+        ["curl", "tar", "sha256sum"].iter().all(|t| {
+            Command::new(t)
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok()
+        })
+    }
+
+    #[test]
+    fn a_download_with_a_matching_checksum_is_run() {
+        if !have_tools() {
+            return;
+        }
+        let rel = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = rel.path().join("ran");
+        release(rel.path(), &marker, |h| format!("{h}  kitbag.tar.gz\n"));
+        let (ok, out) = run_download(rel.path(), tmp.path());
+        assert!(ok, "{out}");
+        assert!(out.contains("kitbag-remote:kitbag="), "{out}");
+        assert!(out.contains("kitbag-remote:version=kitbag 9.9.9"), "{out}");
+        assert!(marker.exists());
+    }
+
+    #[test]
+    fn a_download_with_a_wrong_checksum_is_never_unpacked_or_run() {
+        if !have_tools() {
+            return;
+        }
+        for bad in [
+            "0000000000000000000000000000000000000000000000000000000000000000  x\n".to_string(),
+            "not-a-checksum\n".to_string(),
+            String::new(),
+        ] {
+            let rel = tempfile::tempdir().unwrap();
+            let tmp = tempfile::tempdir().unwrap();
+            let marker = rel.path().join("ran");
+            release(rel.path(), &marker, |_| bad.clone());
+            let (ok, out) = run_download(rel.path(), tmp.path());
+            assert!(!ok, "{out}");
+            assert!(out.contains("kitbag-remote:error="), "{out}");
+            assert!(!marker.exists(), "an unverified download was run");
+            assert!(!tmp.path().join("download/unpacked").exists());
+            assert!(!tmp.path().join("bin/kitbag").exists());
+        }
+    }
+
+    #[test]
+    fn a_download_without_a_checksum_file_is_refused() {
+        if !have_tools() {
+            return;
+        }
+        let rel = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = rel.path().join("ran");
+        release(rel.path(), &marker, |h| h.to_string());
+        fs::remove_file(rel.path().join(format!("kitbag-{}.sha256", target()))).unwrap();
+        let (ok, out) = run_download(rel.path(), tmp.path());
+        assert!(!ok, "{out}");
+        assert!(!marker.exists());
+    }
+}
