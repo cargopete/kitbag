@@ -29,6 +29,8 @@ pub fn allowed_keys(target: &str) -> &'static [&'static str] {
             "file_opener",
         ],
         "gemini-cli" => &["model", "ui"],
+        // Only `display.personality` is read from it and written to it.
+        "hermes" => &["display"],
         _ => &[],
     }
 }
