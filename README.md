@@ -165,7 +165,7 @@ my-profile/
 ├── agents/
 │   └── reviewer.md        # custom agents (GitHub Copilot)
 └── hooks/
-    └── typecheck.sh       # scripts the [[hooks]] of kitbag.toml run (optional, Claude Code)
+    └── typecheck.sh       # scripts the [[hooks]] of kitbag.toml run (optional)
 ```
 
 Every file is optional except `kitbag.toml`. A directory without one but with `rules/` at its
@@ -422,9 +422,31 @@ such agents in a local profile.
 
 Hooks are commands a tool runs by itself on an event (before a tool call, when a session
 starts ...). That makes them as sensitive as an MCP server's command, so kitbag carries them
-only when you ask, at every step. **Claude Code is the only tool that carries them so far;**
-other targets say so in the plan and write nothing (Cursor and Antigravity have hook files of
-their own; they are not carried yet).
+only when you ask, at every step. **Seven targets carry them**, each in the file its own docs
+name; the others **warn in the plan that the hooks were not written there** (they are never
+dropped silently):
+
+| Target | Hook file (user / project) | Scripts go to | Docs |
+|---|---|---|---|
+| `claude-code` | `settings.json` `hooks` (`~/.claude/`, `.claude/`) | `hooks/kitbag/` next to it | [hooks](https://code.claude.com/docs/en/hooks) |
+| `cursor` | `~/.cursor/hooks.json` / `.cursor/hooks.json` | `~/.cursor/hooks/kitbag/` | [hooks](https://cursor.com/docs/agent/hooks) |
+| `codex` | `$CODEX_HOME/hooks.json` (default `~/.codex/`) / `.codex/hooks.json` | `hooks/kitbag/` next to it | [hooks](https://developers.openai.com/codex/hooks) |
+| `gemini-cli` | `settings.json` `hooks` (`~/.gemini/`, `.gemini/`) | `hooks/kitbag/` next to it | [hooks](https://geminicli.com/docs/hooks/) |
+| `grok-build` | `$GROK_HOME/hooks/kitbag.json` (default `~/.grok/`) / `.grok/hooks/kitbag.json` | `hooks/kitbag/` next to it | [hooks](https://docs.x.ai/build/features/hooks) |
+| `antigravity` | `~/.gemini/config/hooks.json` / `.agents/hooks.json`, as a hook named `kitbag` | `~/.gemini/config/hooks/kitbag/` | [hooks](https://antigravity.google/docs/hooks) |
+| `copilot` | `$COPILOT_HOME/hooks/kitbag.json` (default `~/.copilot/`) / `.github/hooks/kitbag.json` | `hooks/kitbag/` next to it | [hooks reference](https://docs.github.com/copilot/reference/hooks-reference) |
+| `claude-desktop`, `opencode`, `windsurf` | not carried: warn | none | see below |
+
+Claude Desktop has no hook configuration of its own. opencode runs hooks only as
+JavaScript/TypeScript plugins, which kitbag doesn't write. Windsurf's docs now point to Devin
+Desktop's `.devin/hooks.v1.json` and give no user-level path or event list, so its hooks are
+not verified and not written. Capture reads a Grok Build or Copilot directory's every
+`*.json`, and every hook of an Antigravity file that isn't `enabled: false`; apply writes
+Grok Build's and Copilot's own `kitbag.json` and Antigravity's own `kitbag` hook, so undo
+removes only that. The tools keep their own approval steps: Codex skips a new or changed hook
+until you trust it with `/hooks`, Gemini CLI warns before running a project hook it hasn't
+seen, Grok Build runs project hooks only in a trusted folder, and Copilot loads repository
+hooks only for an admitted workspace. kitbag doesn't bypass any of them.
 
 ```toml
 [[hooks]]
@@ -443,31 +465,48 @@ of the machine it came from. `hooks.extra` keeps every other key of the tool's e
 Code's `args`, `shell`, `async`, `if`, `statusMessage` ...). Neutral events are
 `session-start`, `session-end`, `prompt-submit`, `pre-tool`, `post-tool`, `post-tool-failure`,
 `permission-request`, `notification`, `stop`, `subagent-start`, `subagent-stop`, `pre-compact`
-and `post-compact`; an event only Claude Code has is `claude-code:<Name>` (for example
-`claude-code:FileChanged`). A target without an equivalent for an event reports the hook; it
-is not guessed.
+and `post-compact`; an event only one tool has is `<target>:<Name>` (for example
+`claude-code:FileChanged` or `cursor:beforeShellExecution`) and applies to that tool only.
+Each tool maps the neutral names it has an equivalent for (Cursor's `pre-tool` is `preToolUse`,
+Gemini CLI's is `BeforeTool`, Copilot's `stop` is `agentStop`); Gemini CLI's `BeforeAgent` and
+`AfterAgent` and Antigravity's `Stop`, `PreInvocation` and `PostInvocation` have no documented
+counterpart, so they are carried only as `gemini-cli:…` / `antigravity:…`. A target without an
+equivalent for an event reports the hook; it is not guessed. A matcher is written as it is:
+tools name their tools differently, so the plan warns to check it. Of the keys in `hooks.extra`,
+each tool gets only those its docs list (Cursor `failClosed` and `loop_limit`, Codex
+`statusMessage`, `async`, `commandWindows` and `additionalContextLimit`, Gemini CLI `name` and
+`description`, Copilot `cwd` and `env`); a hook with another key is not written to that tool
+(with a note), except labels such as `statusMessage`, which are left off. Gemini CLI takes
+`timeout` in milliseconds and Copilot `timeoutSec`; kitbag converts. In a project, Antigravity's docs say nothing about what a hook command runs relative to, so a
+hook that runs a script there is not written (user scope works).
 
 **Capture** (`kitbag capture --include hooks`). Without the flag, hooks are counted and left
-out, as before. With it, kitbag reads the `hooks` of Claude Code's `settings.json`
-(`~/.claude/settings.json`, or `.claude/settings.json` with `--project`; `settings.local.json`
-is machine-specific and not read). It keeps `command` hooks; `http`, `mcp_tool`, `prompt` and
+out, as before. With it, kitbag reads the hooks of every tool in the table above, from the
+files listed there (for Claude Code, `~/.claude/settings.json`, or `.claude/settings.json` with
+`--project`; `settings.local.json` is machine-specific and not read). It keeps `command` hooks; `http`, `mcp_tool`, `prompt` and
 `agent` hooks, and events kitbag doesn't know, are reported and left out. When a command runs
 a file (the command itself, or the file handed to `bash`, `sh`, `node`, `python3` and other
-interpreters) that sits in the Claude config directory (or the project), the file is copied
+interpreters) that sits in the tool's config directory (or the project), the file is copied
 to `hooks/` and the command rewritten to `{{hooks_dir}}/<path>`. Files it sources or calls in
 turn are not followed. A script outside that directory is not copied, with a warning. Commands
 and scripts are redacted like other text, and scripts that look like secret files are skipped.
 
 **Apply** (`kitbag apply --apply-hooks`). Without `--apply-hooks` nothing is written for
 hooks, with `--yes` or without: the plan lists every hook with its command in full and says
-where its script is in the profile. With it, scripts go to `~/.claude/hooks/kitbag/` (or
-`.claude/hooks/kitbag/` in a project), marked executable where they were, and the hooks are
-added to the `hooks` of `settings.json` (an existing entry with the same event, matcher and
-command is updated, others stay). Apply is additive: a profile without hooks removes none, and
+where its script is in the profile. With it, scripts go to the `hooks/kitbag/` directory in the
+table above (`~/.claude/hooks/kitbag/`, `.claude/hooks/kitbag/` in a project ...), marked
+executable where they were, and the hooks are added to the tool's hook file (an existing entry
+with the same event, matcher and command is updated, others stay). In a project the command
+reaches the scripts through what the tool documents: `${CLAUDE_PROJECT_DIR}`,
+`${GEMINI_PROJECT_DIR}`, `${GROK_WORKSPACE_ROOT}`, `$(git rev-parse --show-toplevel)` for Codex,
+a path relative to the project for Cursor and Copilot (with `cwd` set). Apply is additive: a profile without hooks removes none, and
 `kitbag undo` puts back the settings and removes the script files kitbag wrote. A second apply
 with nothing changed is "Up to date". A hook (or script) that capture removed a secret from
 is not applied: edit it in the profile to read the secret from the environment. `kitbag
-inspect` and `kitbag diff` describe hooks; `--dry-run` never writes.
+inspect`, `diff`, `sync` and `status` list hooks (`status` marks each `in sync`, `changed`,
+`not applied` or `unsupported`, and lists the ones a git source withholds); `--dry-run` never
+writes. If the profile has hooks and a target has no place for them, or no equivalent event, the
+plan warns and says what it did not write.
 
 **From a git source, `--apply-hooks` is not enough: it also needs `--trust-source`.** Without
 both, the plan lists the hooks it withheld, command in full, and nothing is written for them.
