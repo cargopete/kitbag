@@ -640,6 +640,7 @@ mod tests {
             description: None,
             extra: extra.as_object().cloned().unwrap_or_default(),
             body: "Go.".into(),
+            targeting: Default::default(),
         };
         let mut p = crate::model::Profile::new("p");
         p.agents = vec![
