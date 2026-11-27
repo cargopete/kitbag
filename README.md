@@ -415,7 +415,7 @@ with a bounded effect are applied. Anything else is dropped with a warning:
 | `hermes` | `display`, of which only `personality` is written |
 | `cursor` | the Cursor Agent CLI's `~/.cursor/cli-config.json`, user scope only: `approvalMode`, `permissions` (`allow`, `deny`), `editor` (`vimMode`), `notifications`, `hints`, `rewind`, `suggestNextPrompt`, `display`, `attribution` |
 | `copilot` | Copilot CLI's `~/.copilot/settings.json` (`$COPILOT_HOME`), user scope only: `model`, `effortLevel`, `defaultMode`, `defaultPermissionMode`, `allowedUrls`, `deniedUrls`, `permissions` (only `disableBypassPermissionsMode`), `theme`, `banner`, `beep`, `beepOnSchedule`, `editorMode`, `includeCoAuthoredBy`, `renderMarkdown`, `showReasoning`, `showTimestamps`, `showTipsOnStartup`, `transcriptView`, `screenReader`, `scrollbar`, `sidebar`, `streamerMode` |
-| `opencode` | `model`, `default_agent`, `permissions` (opencode 2's list of `{action, resource, effect}` rules) |
+| `opencode` | `opencode.json`: `model`, `default_agent`, `permissions` (opencode 2's list of `{action, resource, effect}` rules). Also opencode 2's global `cli.json` (`~/.config/opencode/cli.json`, `$XDG_CONFIG_HOME/opencode/cli.json`), user scope only, in the same `[settings.opencode]` table (the names don't collide; each key goes to its own file): `theme` (`name`, `mode`), `animations`, `cursor`, `mouse`, `scroll`, `prompt`, `session`, `tabs`, `diffs`, `attention` (not `sounds`), `highlights`, `terminal`, `mini`, each cut down to the documented keys with values checked against the documented values and ranges |
 | `zed` | `agent`, user scope only, of which only `default_model`, `default_profile`, `tool_permissions`, `single_file_review`, `notify_when_agent_waiting`, `play_sound_when_agent_done`, `expand_edit_card`, `expand_terminal_card`, `thinking_display`, `use_modifier_to_send` and `show_turn_stats` are kept |
 | `amp` | user scope only: `amp.showCosts`, `amp.notifications.enabled`, `amp.terminal.copyOnSelect`, `amp.terminal.detailsExpandedByDefault`, `amp.thread.autoArchiveOnQuit`, `amp.git.commit.ampThread.enabled`, `amp.git.commit.coauthor.enabled`, `amp.tools.disable` |
 | every other target | none yet |
@@ -430,7 +430,7 @@ Amp's `amp.updates.mode`) or the key reaches a provider, proxy, hook or command
 carried. Gaps, on purpose: Cursor's docs name no `settings.json` path or agent keys for the
 *editor*, and the editor keeps some settings in a `state.vscdb` database with no documented
 layout, so kitbag never reads or writes either. opencode's theme and terminal settings are in
-opencode 2's `cli.json`, which is not carried yet (#142). Amp's docs name no model setting. Copilot's, Zed's
+opencode 2's `cli.json` is carried at user scope (there is no project file), without `plugins`, `keybinds`, `leader`, `experimental`, `debug` and `attention.sounds` (file paths); other keys already in the file are left alone, and a file kitbag creates gets `$schema` `https://opencode.ai/v2/cli.json`. `session.permissions = autoaccept` accepts every permission request, so it is warned about and withheld from a git source unless `--allow-risky-settings` or `--trust-source` (docs read 2026-11-28). Amp's docs name no model setting. Copilot's, Zed's
 and Amp's project-level files are not written, since their docs don't say these keys apply
 there. Cursor's CLI file is created with `"version": 1` when it doesn't exist (its docs say the
 CLI repairs missing fields) and follows `CURSOR_CONFIG_DIR`, then `XDG_CONFIG_HOME/cursor` on

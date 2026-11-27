@@ -2556,12 +2556,13 @@ pub fn pick_settings(cap: &mut Captured, target: &str, doc: &Map<String, Value>)
             )
         })
         .filter(|(k, v)| {
-            // `agent` of Zed with only keys that are not carried: nothing to keep.
+            // `agent` of Zed with only keys that are not carried (or a key of
+            // opencode's `cli.json` with an unusable value): nothing to keep.
             !(v.as_object().is_some_and(serde_json::Map::is_empty)
-                && doc
+                && !doc
                     .get(k)
                     .and_then(Value::as_object)
-                    .is_some_and(|o| !o.is_empty()))
+                    .is_some_and(serde_json::Map::is_empty))
         })
         .collect();
     if let Some((home, os)) = &cap.home {
@@ -2587,7 +2588,12 @@ pub fn pick_settings(cap: &mut Captured, target: &str, doc: &Map<String, Value>)
         );
     }
     if !picked.is_empty() {
-        cap.profile.settings.insert(target.to_string(), picked);
+        // opencode reads two files (`opencode.json`, `cli.json`) into one table.
+        cap.profile
+            .settings
+            .entry(target.to_string())
+            .or_default()
+            .extend(picked);
     }
 }
 
