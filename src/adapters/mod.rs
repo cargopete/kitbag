@@ -26,6 +26,7 @@ pub mod cursor;
 pub mod gemini;
 pub mod grok_build;
 pub mod opencode;
+pub mod windsurf;
 
 /// Global (per-user) configuration or one project's configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -443,6 +444,7 @@ pub fn all() -> &'static [&'static dyn Adapter] {
         &opencode::OpenCode,
         &copilot::Copilot,
         &grok_build::GrokBuild,
+        &windsurf::Windsurf,
     ]
 }
 
