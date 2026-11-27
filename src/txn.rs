@@ -581,7 +581,6 @@ impl Store {
             .collect())
     }
 
-    /// All transactions, oldest first.
     /// The commit of the latest apply of the git `source` that still stands
     /// (not undone), if one recorded it.
     pub fn applied_commit(&self, source: &str) -> Result<Option<GitCommit>> {
@@ -593,6 +592,7 @@ impl Store {
             .find_map(|t| t.git.filter(|g| g.source == source)))
     }
 
+    /// All transactions, oldest first.
     pub fn list(&self) -> Result<Vec<Transaction>> {
         let rd = match fs::read_dir(self.backups()) {
             Ok(rd) => rd,

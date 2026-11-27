@@ -168,6 +168,49 @@ fn inspect_lists_the_files_apply_would_write_per_tool() {
 }
 
 #[test]
+fn inspect_lists_the_files_apply_would_write_for_grok_build() {
+    let sb = Sandbox::empty();
+    let dir = local_profile(&sb);
+    std::fs::create_dir_all(sb.home().join(".grok")).unwrap();
+    std::fs::write(sb.home().join(".grok/AGENTS.md"), "Mine.\n").unwrap();
+    // `grok` is the alias for `grok-build`; both must plan the same files.
+    let mut seen = Vec::new();
+    for to in ["grok-build", "grok"] {
+        let out = sb
+            .cli()
+            .arg("inspect")
+            .arg(&dir)
+            .args(["--to", to])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stdout(&out));
+        let all = stdout(&out);
+        let part = &all[all.find("\n  grok-build\n").expect(&all)..];
+        for want in [
+            "modify  ~/.grok/AGENTS.md",
+            "create  ~/.grok/config.toml",
+            "create  ~/.grok/rules/style.md",
+            "create  ~/.grok/commands/review.md",
+            "create  ~/.grok/skills/deploy/SKILL.md",
+            "create  ~/.grok/skills/deploy/run.sh",
+        ] {
+            assert!(part.contains(want), "missing {want:?}:\n{all}");
+        }
+        assert_masked(&all);
+        seen.push(part.to_string());
+    }
+    assert_eq!(seen[0], seen[1]);
+    // Nothing written: the one file there is untouched and nothing else appeared.
+    assert_eq!(sb.read("home/.grok/AGENTS.md"), "Mine.\n");
+    let grok: Vec<_> = std::fs::read_dir(sb.home().join(".grok"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(grok, ["AGENTS.md"]);
+    assert!(!sb.state().exists());
+}
+
+#[test]
 fn inspect_reads_a_plugin() {
     let sb = Sandbox::empty();
     let dir = sb.path("my-plugin");
