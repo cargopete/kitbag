@@ -100,18 +100,18 @@ preview with `kitbag diff github:cargopete/dotagents --to all`.
 | Target id        | Tool              | Scopes        | MCP | Instructions | Rules      | Commands                | Skills | Agents | Output styles | Settings |
 |------------------|-------------------|---------------|-----|--------------|------------|-------------------------|--------|--------|---------------|----------|
 | `claude-code`    | Claude Code       | user, project | ✓   | ✓            | ✓          | ✓                       | ✓      | ✓      | ✓             | ✓        |
-| `cursor`         | Cursor            | user, project | ✓   | project      | project    | ✓                       | ✓      | ✓      | -             | -        |
+| `cursor`         | Cursor            | user, project | ✓   | project      | project    | ✓                       | ✓      | ✓      | -             | user     |
 | `codex`          | OpenAI Codex CLI  | user, project | ✓   | ✓            | folded     | user                    | ✓      | ✓      | -             | ✓        |
 | `gemini-cli`     | Gemini CLI        | user, project | ✓   | ✓            | folded     | ✓                       | ✓      | ✓      | -             | ✓        |
 | `claude-desktop` | Claude Desktop    | user          | ✓ (local servers) | -  | -          | -                       | -      | -      | -             | -        |
 | `antigravity`    | Google Antigravity | user, project | ✓  | ✓            | ✓          | as skills               | ✓      | ✓      | -             | -        |
-| `opencode`       | opencode          | user, project | ✓   | ✓            | folded     | ✓                       | ✓      | ✓      | -             | -        |
-| `copilot`        | GitHub Copilot (CLI, VS Code) | user, project | ✓ | ✓    | ✓          | project; user as skills | ✓      | ✓      | -             | -        |
+| `opencode`       | opencode          | user, project | ✓   | ✓            | folded     | ✓                       | ✓      | ✓      | -             | ✓        |
+| `copilot`        | GitHub Copilot (CLI, VS Code) | user, project | ✓ | ✓    | ✓          | project; user as skills | ✓      | ✓      | -             | user     |
 | `grok-build`     | Grok Build        | user, project | ✓   | ✓            | ✓*         | ✓                       | ✓      | -      | -             | -        |
 | `windsurf`       | Windsurf          | user, project | user | ✓           | project    | ✓                       | project | -     | -             | -        |
-| `zed`            | Zed               | user, project | ✓   | ✓            | -          | -                       | ✓      | -      | -             | -        |
+| `zed`            | Zed               | user, project | ✓   | ✓            | -          | -                       | ✓      | -      | -             | user     |
 | `hermes`         | Hermes Agent      | user, project | user | ✓           | -          | -                       | ✓      | -      | user          | user     |
-| `amp`            | Amp               | user, project | ✓   | ✓            | -          | as skills               | ✓      | -      | -             | -        |
+| `amp`            | Amp               | user, project | ✓   | ✓            | -          | as skills               | ✓      | -      | -             | user     |
 | `cline`          | Cline             | user, project | user | ✓           | ✓          | ✓                       | ✓      | -      | -             | -        |
 | `roo`            | Roo Code (alias: `roo-code`) | user, project | ✓ | ✓    | ✓          | ✓                       | ✓      | -      | -             | -        |
 | `continue`       | Continue          | user, project | ✓   | ✓            | project    | user                    | -      | -      | -             | -        |
@@ -408,6 +408,30 @@ with a bounded effect are applied. Anything else is dropped with a warning:
 | `codex` | `model`, `model_reasoning_effort`, `model_reasoning_summary`, `model_verbosity`, `approval_policy`, `sandbox_mode`, `web_search`, `file_opener` |
 | `gemini-cli` | `model`, `ui` |
 | `hermes` | `display`, of which only `personality` is written |
+| `cursor` | the Cursor Agent CLI's `~/.cursor/cli-config.json`, user scope only: `approvalMode`, `permissions` (`allow`, `deny`), `editor` (`vimMode`), `notifications`, `hints`, `rewind`, `suggestNextPrompt`, `display`, `attribution` |
+| `copilot` | Copilot CLI's `~/.copilot/settings.json` (`$COPILOT_HOME`), user scope only: `model`, `effortLevel`, `defaultMode`, `defaultPermissionMode`, `allowedUrls`, `deniedUrls`, `permissions` (only `disableBypassPermissionsMode`), `theme`, `banner`, `beep`, `beepOnSchedule`, `editorMode`, `includeCoAuthoredBy`, `renderMarkdown`, `showReasoning`, `showTimestamps`, `showTipsOnStartup`, `transcriptView`, `screenReader`, `scrollbar`, `sidebar`, `streamerMode` |
+| `opencode` | `model`, `default_agent`, `permissions` (opencode 2's list of `{action, resource, effect}` rules) |
+| `zed` | `agent`, user scope only, of which only `default_model`, `default_profile`, `tool_permissions`, `single_file_review`, `notify_when_agent_waiting`, `play_sound_when_agent_done`, `expand_edit_card`, `expand_terminal_card`, `thinking_display`, `use_modifier_to_send` and `show_turn_stats` are kept |
+| `amp` | user scope only: `amp.showCosts`, `amp.notifications.enabled`, `amp.terminal.copyOnSelect`, `amp.terminal.detailsExpandedByDefault`, `amp.thread.autoArchiveOnQuit`, `amp.git.commit.ampThread.enabled`, `amp.git.commit.coauthor.enabled`, `amp.tools.disable` |
+| every other target | none yet |
+
+The new rows follow each tool's own docs (checked 2026-11-27): Cursor's CLI configuration and
+permissions pages, Copilot CLI's configuration-directory reference, opencode's config and
+permissions pages, Zed's all-settings and tool-permissions pages, and Amp's settings page. Where
+the docs give a key a shape or values kitbag can't check (Cursor's `model` object, `sandbox`;
+Amp's `amp.updates.mode`) or the key reaches a provider, proxy, hook or command
+(`apiKeyHelper`-style keys, `amp.url`, `amp.proxy`, Copilot's `proxyUrl`, `statusLine.command`,
+`hooks`, `sandbox`, Zed's `terminal_init_command`, `language_models` and `profiles`), it is not
+carried. Gaps, on purpose: Cursor's docs name no `settings.json` path or agent keys for the
+*editor*, and the editor keeps some settings in a `state.vscdb` database with no documented
+layout, so kitbag never reads or writes either. opencode's theme and terminal settings are in
+opencode 2's `cli.json`, which is not carried. Amp's docs name no model setting. Copilot's, Zed's
+and Amp's project-level files are not written, since their docs don't say these keys apply
+there. Cursor's CLI file is created with `"version": 1` when it doesn't exist (its docs say the
+CLI repairs missing fields) and follows `CURSOR_CONFIG_DIR`, then `XDG_CONFIG_HOME/cursor` on
+Linux, as those docs describe. For opencode, rules from a profile go in front of the rules the
+file already has, because the last matching rule wins and your own rules should keep the last
+word; a file in opencode 1's layout (a `permission` object) gets no `permissions`.
 
 `env` blocks, `apiKeyHelper`, provider endpoints and similar keys are never carried. Hooks
 are not a setting: they have their own opt-in path (see [Hooks](#hooks-hooks-in-kitbagtoml-and-hooks)).
@@ -415,6 +439,10 @@ Anything that lets agents act without asking gets an explicit warning in the pla
 covers `permissions.defaultMode = bypassPermissions` (and `acceptEdits`, `dontAsk`, `auto`),
 `permissions.additionalDirectories`, allow rules (broad ones such as `Bash(*)` or
 `Bash(rm -rf *)` are named), `approval_policy = never` and `sandbox_mode = danger-full-access`.
+For the newer targets it also covers Cursor's `approvalMode = unrestricted` (or `auto-review`) and
+`permissions.allow` entries, Copilot's `defaultPermissionMode = assisted` or `allow-all`,
+`defaultMode = autopilot` and `allowedUrls`, opencode's `allow` rules, and Zed's
+`tool_permissions` that allow (`default = "allow"`, or any `always_allow` pattern).
 It also covers commands and skills whose frontmatter pre-approves tools (`allowed-tools`) or
 defines `hooks`, and commands and skills that run shell snippets (``!`cmd` `` in Claude Code,
 `!{cmd}` in Gemini CLI commands), and custom agents and subagents that do any of these, start
@@ -424,7 +452,10 @@ asks (`acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`).
 **From a git source, the riskiest settings are dropped** unless you pass
 `--allow-risky-settings` (or its alias `--trust-source`): permissive `defaultMode`s,
 `additionalDirectories`, every `permissions.allow` rule, `approval_policy = never` and
-`sandbox_mode = danger-full-access`. `ask` and `deny` rules still apply, since they restrict.
+`sandbox_mode = danger-full-access`, and the same newer ones: Cursor's `approvalMode` and
+`permissions.allow`, Copilot's `defaultPermissionMode`, `defaultMode = autopilot` and
+`allowedUrls`, opencode's `allow` rules and Zed's allowing `tool_permissions`. `ask` and `deny`
+rules still apply, since they restrict.
 The plan lists everything it left out. Profiles in a local directory apply them as written,
 with the warning above.
 
@@ -561,7 +592,7 @@ none of these gets agents, and the plan says agents were skipped there:
 | `amp` | [Modes & Models](https://ampcode.com/docs/models-and-subagents): "Plugins can define custom agents and custom subagents" | custom agents are plugins, not files (#12) |
 | `continue` | `.continue/agents/*.md` are the local agents `cn check --agent` and CI runs ("Local agents — markdown files in `.continue/agents/*.md`", each one a check that reviews your diff); the docs never call them subagents | check files, not subagents |
 | `roo` | [Custom modes](https://roocodeinc.github.io/Roo-Code/features/custom-modes): `custom_modes.yaml` and `.roomodes`; "agent" and "subagent" do not appear | modes are not documented as agents |
-| `zed` | [Agent profiles](https://zed.dev/docs/ai/agent-profiles): "Profiles are stored under `agent.profiles` in your settings"; subagents only get `agent.subagent_model` | no agent files; per-tool settings are #17 |
+| `zed` | [Agent profiles](https://zed.dev/docs/ai/agent-profiles): "Profiles are stored under `agent.profiles` in your settings"; subagents only get `agent.subagent_model` | no agent files |
 | `windsurf` | The [Cascade docs](https://docs.devin.ai/desktop/cascade/cascade) cover workflows and skills, no agent definitions | no agent files |
 | `hermes` | [Delegation](https://hermes-agent.nousresearch.com/docs/user-guide/features/delegation): subagents are set in the `delegation:` block of `config.yaml` and per `delegate_task` call | no agent files |
 | `claude-desktop` | no official Claude Desktop page documents agent files; subagent files are documented for Claude Code (`~/.claude/agents/`) only | no agent files |
@@ -1866,6 +1897,7 @@ No further candidates are named here; open an issue for the tool you miss. Issue
 
 ## Format notes and known limitations
 
+- **Cursor's editor settings** have no documented file: its docs name no `settings.json` path or agent/model keys, and some are kept in a `state.vscdb` database with no documented layout, so kitbag leaves both alone. Only the Agent CLI's `cli-config.json` is carried (see the settings allow-list).
 - **Cursor user rules** live in Cursor's settings UI, not in files, so kitbag can't write or read
   them at user scope. It says so in the plan. At project scope, rules go to `.cursor/rules/*.mdc`
   and instructions to `AGENTS.md`.
@@ -2021,7 +2053,7 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   that declares its own MCP servers (which kitbag leaves out for Amp) would differ between the
   two. Zed's docs name no folder of its own for skills, nor a rules file or a commands folder
   (the Rules Library is the only place they live), so rules and commands are not carried; agents
-  (profiles live in `settings.json`, see [Agents](#agents-agentsnamemd)) and settings are not carried yet, and Zed's docs describe no hooks (see Hooks). The skills path for Windows is
+  (profiles live in `settings.json`, see [Agents](#agents-agentsnamemd)) and Zed's docs describe no hooks (see Hooks). Settings are carried at user scope, for the `agent` keys in the allow-list above (the rest of `settings.json`, such as `language_models`, is left as it is). The skills path for Windows is
   `%USERPROFILE%\.agents\skills` here, which the docs write as `~/.agents/skills/`. The config directory follows Zed's source (`XDG_CONFIG_HOME` on Linux, `~/.config/zed` on
   macOS); `FLATPAK_XDG_CONFIG_HOME` is not honoured.
 - **Hermes Agent** (Nous Research) keeps MCP servers under `mcp_servers` in
@@ -2072,7 +2104,7 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   written (Amp documents no flag), and an SSE server is written as a plain `url` with a warning,
   since Amp has no transport key. Servers defined on ampcode.com (`amp mcp remote`), servers
   bundled in a skill's `mcp.json`, and `oauth` / `includeTools` on an entry are not captured, and
-  capture says so; permissions and other settings are not carried, and Amp's hooks exist only as plugins (see Hooks, #12). Only the settings
+  capture says so; the display, git trailer and `amp.tools.disable` settings in the allow-list above are carried at user scope, while `amp.mcpPermissions`, `amp.dangerouslyAllowAll`, `amp.url` and the other settings are not, and Amp's hooks exist only as plugins (see Hooks, #12). Only the settings
   file at the project root is used; Amp also searches parent directories. Instructions go to
   `~/.config/amp/AGENTS.md` (Amp also reads `~/.config/AGENTS.md`, which kitbag leaves alone and
   names), and in a project to the file Amp reads: `AGENTS.md`, else `AGENT.md`, else `CLAUDE.md`

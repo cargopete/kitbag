@@ -109,6 +109,7 @@ pub const LOCATION_VARS: &[&str] = &[
     "CLINE_MCP_SETTINGS_PATH",
     "CODEX_HOME",
     "COPILOT_HOME",
+    "CURSOR_CONFIG_DIR",
     "HERMES_HOME",
     "XDG_CONFIG_HOME",
     "APPDATA",

@@ -1012,6 +1012,72 @@ pub fn safe_settings(profile: &Profile, target: &str, work: &mut Work) -> Map<St
     allowed
 }
 
+/// Take out of `settings` every list entry and value that carries a
+/// `[REDACTED]` marker (capture removed a secret from it, so it no longer
+/// means what it did), and say which were left out.
+pub fn drop_redacted_settings(settings: &mut Map<String, Value>, target: &str, work: &mut Work) {
+    fn marked(v: &Value) -> bool {
+        match v {
+            Value::String(s) => crate::secrets::has_redaction_marker(s),
+            Value::Array(a) => a.iter().any(marked),
+            Value::Object(o) => o.values().any(marked),
+            _ => false,
+        }
+    }
+    fn walk(v: &mut Value, path: &str, out: &mut Vec<String>) {
+        match v {
+            Value::Array(a) => a.retain(|e| {
+                let bad = marked(e);
+                if bad {
+                    out.push(format!("{path} {e}"));
+                }
+                !bad
+            }),
+            Value::Object(o) => {
+                let bad: Vec<String> = o
+                    .iter()
+                    .filter(|(_, c)| matches!(c, Value::String(_)) && marked(c))
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for k in bad {
+                    o.remove(&k);
+                    out.push(format!("{path}.{k}"));
+                }
+                for (k, c) in o.iter_mut() {
+                    walk(c, &format!("{path}.{k}"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut dropped = Vec::new();
+    let keys: Vec<String> = settings.keys().cloned().collect();
+    for k in keys {
+        if let Some(Value::String(_)) = settings.get(&k)
+            && settings.get(&k).is_some_and(marked)
+        {
+            settings.remove(&k);
+            dropped.push(k);
+        } else if let Some(v) = settings.get_mut(&k) {
+            walk(v, &k, &mut dropped);
+        }
+    }
+    if !dropped.is_empty() {
+        settings.retain(|_, v| match v {
+            Value::Array(a) => !a.is_empty(),
+            Value::Object(o) => !o.is_empty(),
+            _ => true,
+        });
+        work.warn(
+            target,
+            format!(
+                "settings with [REDACTED] markers not applied (capture removed a secret from them; add them back by hand): {}",
+                dropped.join(", ")
+            ),
+        );
+    }
+}
+
 /// Names of the profile's servers that [`servers_for`] left out for `target`.
 pub fn skipped_servers(work: &Work, target: &str) -> Vec<String> {
     work.skipped_servers
@@ -2366,7 +2432,20 @@ pub fn pick_settings(cap: &mut Captured, target: &str, doc: &Map<String, Value>)
     let mut picked: Map<String, Value> = doc
         .iter()
         .filter(|(k, v)| keys.contains(&k.as_str()) && !v.is_null())
-        .map(|(k, v)| (k.clone(), strip_nulls(v)))
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                policy::restrict_nested(target, k, &strip_nulls(v)).0,
+            )
+        })
+        .filter(|(k, v)| {
+            // `agent` of Zed with only keys that are not carried: nothing to keep.
+            !(v.as_object().is_some_and(serde_json::Map::is_empty)
+                && doc
+                    .get(k)
+                    .and_then(Value::as_object)
+                    .is_some_and(|o| !o.is_empty()))
+        })
         .collect();
     if let Some((home, os)) = &cap.home {
         crate::portable::capture_settings(target, &mut picked, home, *os);

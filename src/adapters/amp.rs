@@ -35,8 +35,13 @@
 //!   bundled in a skill (`mcp.json` or an `mcpServers` frontmatter key: Amp
 //!   starts them when it finds the skill and its docs describe no approval for
 //!   them), `includeTools`, rules (Amp has none; granular guidance is
-//!   `@`-mentions in `AGENTS.md`), permissions, hooks and the other `amp.*`
-//!   settings.
+//!   `@`-mentions in `AGENTS.md`), hooks, `amp.mcpPermissions`,
+//!   `amp.dangerouslyAllowAll` and the other `amp.*` settings.
+//! * Settings, at user scope only: the display, notification, git trailer and
+//!   `amp.tools.disable` keys that `crate::policy::allowed_keys` lists, from
+//!   ampcode.com/docs/cli/settings (checked 2026-11-27). Amp's docs name no
+//!   model setting, so none is carried. Updates (`amp.updates.mode`), `amp.url`,
+//!   `amp.proxy` and the keys Amp ignores in workspace settings are left alone.
 //!
 //! Docs: <https://ampcode.com/docs/customize/mcp>,
 //! <https://ampcode.com/docs/customize/skills>,
@@ -50,9 +55,10 @@ use anyhow::Result;
 use serde_json::{Map, Value, json};
 
 use super::common::{
-    capture_instructions, capture_skills_dir, commands_as_skills, import_server,
-    merge_json_servers, render_server, server_entries, server_from_json, servers_for,
-    skill_with_required_frontmatter, write_instructions, write_skill,
+    capture_instructions, capture_skills_dir, commands_as_skills, drop_redacted_settings,
+    import_server, merge_json_servers, merge_json_settings, pick_settings, render_server,
+    safe_settings, server_entries, server_from_json, servers_for, skill_with_required_frontmatter,
+    write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
@@ -407,12 +413,13 @@ impl Adapter for Amp {
     fn scopes(&self) -> &'static [Scope] {
         &[Scope::User, Scope::Project]
     }
-    fn support(&self, _scope: Scope) -> [(Feature, Support); 8] {
+    fn support(&self, scope: Scope) -> [(Feature, Support); 8] {
         Feature::ALL.map(|f| {
             let s = match f {
                 Feature::Mcp | Feature::Instructions | Feature::Skills => Support::Native,
                 // Amp removed custom commands; they are written as skills.
                 Feature::Commands => Support::Folded,
+                Feature::Settings if scope == Scope::User => Support::Native,
                 _ => Support::None,
             };
             (f, s)
@@ -447,6 +454,11 @@ impl Adapter for Amp {
             cap.sources.push(file.clone());
             let doc = parse_value(Some(&text), &file)?;
             settings = doc.clone();
+            if env.scope == Scope::User
+                && let Value::Object(map) = &doc
+            {
+                pick_settings(&mut cap, ID, map);
+            }
             for (name, def) in
                 server_entries(&mut cap, ID, &file, SERVERS_KEY, doc.get(SERVERS_KEY))
             {
@@ -691,10 +703,14 @@ impl Adapter for Amp {
             );
         }
         apply_skills(profile, env, opts, work)?;
-        if profile.settings.contains_key(ID) {
+        if env.scope == Scope::User {
+            let mut settings = safe_settings(profile, ID, work);
+            drop_redacted_settings(&mut settings, ID, work);
+            merge_json_settings(work, &file, &settings, opts, ID)?;
+        } else if profile.settings.contains_key(ID) {
             work.info(
                 ID,
-                "kitbag doesn't manage Amp settings; settings.amp was not applied",
+                "settings.amp was not applied to the workspace: Amp's docs name these keys for user settings, where they take effect everywhere; apply it at user scope",
             );
         }
         Ok(())

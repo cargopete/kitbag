@@ -548,5 +548,5 @@ fn list_targets_reports_opencode_support() {
     for k in ["mcp", "instructions", "commands", "skills", "agents"] {
         assert_eq!(s[k], "native", "{k}");
     }
-    assert_eq!(s["settings"], "-");
+    assert_eq!(s["settings"], "native");
 }
