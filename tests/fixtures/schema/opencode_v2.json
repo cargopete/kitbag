@@ -1,0 +1,14 @@
+{
+  // opencode 2 layout: "mcp.servers", turned off with "disabled"
+  "mcp": {
+    "servers": {
+      "docs": { "type": "remote", "url": "https://docs.example.com/mcp" },
+      "tracker": {
+        "type": "local",
+        "command": ["tracker-mcp", "--stdio"],
+        "environment": { "TRACKER_TOKEN": "{env:TRACKER_TOKEN}" },
+        "disabled": true
+      }
+    }
+  }
+}

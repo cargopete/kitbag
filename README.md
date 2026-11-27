@@ -234,6 +234,41 @@ Unknown keys are rejected with a precise error rather than silently ignored. The
 versioned (`kitbag = 1`). Future incompatible changes will bump the number, and older kitbag
 releases will refuse newer profiles instead of misreading them.
 
+**Config schemas: `[targets.<id>]`.** A tool's own config format can change under a profile
+(opencode 2 moved its MCP servers from `mcp.<name>` to `mcp.servers.<name>`), so capture records
+which format a tool's files were in, for the tools where the files say so:
+
+```toml
+[targets.opencode]
+schema = "v2"        # opencode: "v1" (mcp.<name>, `enabled`) or "v2" (mcp.servers.<name>, `disabled`)
+
+[targets.continue]
+schema = "v1"        # Continue: the `schema:` of ~/.continue/config.yaml (v1 is the only one its docs give)
+```
+
+Only those two tools declare schemas today; for the rest nothing is recorded, and a profile
+without `[targets]` applies exactly as before. A tool with no servers or other content in the
+profile, or whose files don't show a schema (an opencode config with no MCP servers), records
+none. Nothing is run to find out: kitbag reads the config file it reads anyway. The tool's
+version number is not recorded.
+
+What `apply` does with it, per tool, checked against the tool's config on this machine:
+
+| Profile says | The tool's config uses | `apply` |
+|---|---|---|
+| nothing, or the same | anything kitbag writes | as before |
+| a schema kitbag knows | another one it knows | writes the profile in the tool's schema, and says so (opencode: `v1` ↔ `v2`; a server is the same in a profile either way, and `${VAR}` references are kept as they are, never resolved) |
+| a schema kitbag doesn't know (a newer kitbag's, or a typo) | anything | **refuses the whole apply**, with nothing written, also for a git source and with `--trust-source` |
+| anything | a schema kitbag can't write (`schema: v2` in Continue's `config.yaml`) | skips that tool with a warning and leaves its files alone; the other tools are applied |
+
+`kitbag doctor` shows the schema of each tool it finds, and with a profile lists a mismatch
+(`opencode: captured from schema 'v2', the installed tool uses 'v1'; apply writes 'v1'`) or a
+claim it would refuse; the refusal is a problem (exit 1). The format number stays `kitbag = 1`:
+the section is an addition, but kitbag 0.1.10 and older reject `[targets]` as an unknown key
+("unknown field"), so a profile captured from opencode or Continue with this kitbag does not
+load there. There is no `kitbag migrate`: the profile holds servers in kitbag's own shape, so
+rewriting the label would change nothing a tool reads. Recapture to update the recorded schema.
+
 **Per-tool MCP servers.** One shared profile can keep a heavy server out of the tools that
 don't need it. `targets` lists the only tools a server is applied to; `disabled_on` lists the
 tools it is kept out of. Use one or the other, not both, and give `targets` at least one tool.
@@ -1759,6 +1794,8 @@ pub trait Adapter: Sync {
     fn support(&self, scope: Scope) -> [(Feature, Support); 6];
     fn locations(&self, env: &Env) -> Vec<(&'static str, PathBuf)>;
     fn detect(&self, env: &Env) -> bool;
+    fn schemas(&self) -> &'static [SchemaSpec]; // optional: config schemas it reads and writes
+    fn detect_schema(&self, env: &Env) -> Option<String>; // optional: the one in use, from files
     fn capture(&self, env: &Env) -> Result<Captured>;
     fn apply(&self, profile: &Profile, env: &Env, opts: &ApplyOptions, work: &mut Work) -> Result<()>;
 }

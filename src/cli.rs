@@ -19,6 +19,7 @@ use crate::model::{McpServer, Profile, Transport, slugify};
 use crate::plan_fs::read_text_opt;
 use crate::policy;
 use crate::profile_io::{self, MANIFEST};
+use crate::schema;
 use crate::secrets::{RefStyle, RenderState, render_refs};
 use crate::source;
 use crate::txn::{Status, Store};
@@ -3408,6 +3409,21 @@ fn cmd_doctor(
             }
             seen.push(path);
         }
+        if let Some(schema) = a.detect_schema(env) {
+            let known = a.schemas().iter().find(|s| s.id == schema);
+            let shown = visible_line(&schema);
+            match known {
+                Some(s) => println!(
+                    "      schema {shown}  {}",
+                    paint(DIM, visible_line(s.summary))
+                ),
+                None => println!(
+                    "      {} schema '{shown}' is not one kitbag knows; it won't write to {}",
+                    paint(YELLOW, "warn"),
+                    a.name()
+                ),
+            }
+        }
     }
 
     // The profile's servers, for --mcp-tokens: Some(None) when it didn't
@@ -3468,6 +3484,47 @@ fn cmd_doctor(
                         visible_line(&var),
                         paint(DIM, visible_line(&uses.join(", ")))
                     );
+                }
+                for (target, recorded) in &p.schemas {
+                    if chosen
+                        .as_ref()
+                        .is_some_and(|c| !c.iter().any(|a| a.id() == target))
+                    {
+                        continue;
+                    }
+                    let shown_target = visible_line(target);
+                    let Some(a) = adapters::get(target) else {
+                        continue; // already warned about when the profile loaded
+                    };
+                    let (verdict, _) = schema::verdict(a, Some(recorded), env);
+                    let shown = visible_line(recorded);
+                    match &verdict {
+                        schema::Verdict::Fine => {}
+                        schema::Verdict::Converts { from, to } => println!(
+                            "  {} {shown_target}: captured from schema '{}', the installed tool uses '{}'; apply writes '{}'",
+                            paint(YELLOW, "schema"),
+                            visible_line(from),
+                            visible_line(to),
+                            visible_line(to)
+                        ),
+                        schema::Verdict::UnwritableInstalled { schema } => println!(
+                            "  {} {shown_target}: the installed tool uses schema '{}', which kitbag can't write; apply skips it",
+                            paint(YELLOW, "schema"),
+                            visible_line(schema)
+                        ),
+                        _ => {
+                            problems += 1;
+                            println!(
+                                "  {} {shown_target}: schema '{shown}' is {}; apply refuses it",
+                                paint(RED, "schema"),
+                                if matches!(verdict, schema::Verdict::UnknownRecorded { .. }) {
+                                    "unknown to this kitbag"
+                                } else {
+                                    "not readable by this kitbag"
+                                }
+                            );
+                        }
+                    }
                 }
                 for (target, settings) in &p.settings {
                     let shown_target = visible_line(target);

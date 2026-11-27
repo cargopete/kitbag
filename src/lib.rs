@@ -23,6 +23,7 @@ pub mod plugins;
 pub mod policy;
 pub mod portable;
 pub mod profile_io;
+pub mod schema;
 pub mod secrets;
 pub mod source;
 pub mod sync;

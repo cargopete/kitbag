@@ -1,0 +1,7 @@
+name: Local Config
+version: 1.0.0
+schema: v2
+mcpServers:
+  - name: docs
+    type: streamable-http
+    url: https://docs.example.com/mcp
