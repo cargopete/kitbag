@@ -23,6 +23,7 @@ const ALL: &[&str] = &[
     "amp",
     "cline",
     "roo",
+    "continue",
 ];
 
 /// Capture `from` in a fixture sandbox, save + reload the profile, apply it to `to`

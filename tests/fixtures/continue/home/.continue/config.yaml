@@ -1,0 +1,48 @@
+# My Continue config
+name: Local Config
+version: 1.0.0
+schema: v1
+
+models:
+  - name: Llama   # runs locally
+    provider: ollama
+    model: llama3
+    roles:
+      - chat
+
+rules:
+  - Always answer in British English.
+  - uses: sanity/sanity-opinionated
+
+mcpServers:
+  # browser automation
+  - name: Browser search
+    command: npx
+    args:
+      - "@playwright/mcp@latest"
+    connectionTimeout: 5000
+  - name: GitHub
+    command: npx
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-github"
+    env:
+      GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_PERSONAL_ACCESS_TOKEN }}
+  - name: Remote
+    type: streamable-http
+    url: https://mcp.example.com/mcp
+    requestOptions:
+      timeout: 20000
+      headers:
+        Authorization: Bearer ${{ secrets.REMOTE_TOKEN }}
+  - name: Events
+    type: sse
+    url: https://events.example.com/sse
+  - name: Docs
+    command: uvx
+    args: [mcp-docs]
+    cwd: tools
+
+prompts:
+  - name: hello
+    prompt: Say hello

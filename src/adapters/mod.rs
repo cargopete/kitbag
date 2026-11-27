@@ -22,6 +22,7 @@ pub mod claude_desktop;
 pub mod cline;
 pub mod codex;
 pub mod common;
+pub mod continue_ide;
 pub mod copilot;
 pub mod cursor;
 pub mod gemini;
@@ -491,6 +492,7 @@ pub fn all() -> &'static [&'static dyn Adapter] {
         &amp::Amp,
         &cline::Cline,
         &roo::Roo,
+        &continue_ide::ContinueIde,
     ]
 }
 
