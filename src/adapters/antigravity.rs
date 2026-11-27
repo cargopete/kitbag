@@ -1,5 +1,5 @@
-//! Google Antigravity (app, IDE and CLI): MCP servers, instructions, rules and
-//! skills.
+//! Google Antigravity (app, IDE and CLI): MCP servers, instructions, rules,
+//! skills and subagents.
 //!
 //! * MCP: `~/.gemini/config/mcp_config.json` (user) or
 //!   `.agents/mcp_config.json` (workspace), under `mcpServers`. Local servers
@@ -33,8 +33,17 @@
 //! * Workflows (`.agents/workflows/<name>.md`) are deprecated by Google in
 //!   favour of skills, and its docs give two global directories
 //!   (`~/.gemini/config/global_workflows/` and `.../workflows/`), so kitbag
-//!   doesn't carry them. Hooks are carried by `hook_files`; agents and plugins
-//!   aren't.
+//!   doesn't carry them. Hooks are carried by `hook_files`; plugins aren't.
+//! * Subagents: `~/.gemini/config/agents/<name>.md` (user) and
+//!   `.agents/agents/<name>.md` (workspace); Antigravity also reads
+//!   `<name>/agent.md` in those directories, which capture reads too, and
+//!   kitbag writes `<name>.md`. Markdown with YAML frontmatter: `name` and
+//!   `description` required, then `tools` (a list of exact tool names; the
+//!   docs warn that an unknown name may make the subagent hang), `mainAgent`,
+//!   `subagent`, `model` (`inherit`, `flash` or `pro`),
+//!   `commandExecutionPolicy` (`off`, `auto`, `eager` or `sandbox`),
+//!   `mcpServers`, `skills` and `plugins`; the body is the system prompt.
+//!   Docs: <https://antigravity.google/docs/subagents>.
 //!
 //! Docs: <https://antigravity.google/docs/mcp>, <https://antigravity.google/docs/rules>,
 //! <https://antigravity.google/docs/skills>,
@@ -47,15 +56,16 @@ use anyhow::Result;
 use serde_json::{Map, Value, json};
 
 use super::common::{
-    Resolver, add_rule, capture_instructions, capture_skills_dir, claim_name, import_server,
-    merge_json_servers_off, name_from_rel, read_text_item, server_entries, server_from_json,
-    servers_for, set_disabled_true, skill_with_required_frontmatter, str_of, write_instructions,
+    AgentName, Resolver, add_rule, capture_agent_dir, capture_instructions, capture_skills_dir,
+    claim_name, documented_agent, import_server, merge_json_servers_off, name_from_rel,
+    note_agent_keys, read_text_item, server_entries, server_from_json, servers_for,
+    set_disabled_true, skill_with_required_frontmatter, str_of, write_agent, write_instructions,
     write_rule, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
 use crate::frontmatter::{self, glob_list, opt};
-use crate::model::{Profile, Rule, RuleMode, Transport, is_valid_name};
+use crate::model::{Agent, Profile, Rule, RuleMode, Transport, is_valid_name};
 use crate::plan_fs::{join_rel, walk_files};
 use crate::profile_io::rule_from_markdown;
 
@@ -87,6 +97,68 @@ struct Paths {
     read: Vec<PathBuf>,
     rules: PathBuf,
     skills: PathBuf,
+    agents: PathBuf,
+}
+
+/// Frontmatter keys Antigravity's subagent docs list besides `name` and `description`.
+const AGENT_KEYS: &[&str] = &[
+    "tools",
+    "mainAgent",
+    "subagent",
+    "model",
+    "commandExecutionPolicy",
+    "mcpServers",
+    "skills",
+    "plugins",
+];
+
+fn string_array(v: &Value) -> bool {
+    v.as_array().is_some_and(|a| a.iter().all(Value::is_string))
+}
+
+/// A subagent as an Antigravity file: the documented keys only, each with
+/// the type or the values the docs give it (`model` is a tier, not a model id).
+pub fn antigravity_agent(a: &Agent) -> (String, Vec<String>) {
+    documented_agent(a, AgentName::Required, AGENT_KEYS, |k, v| match k {
+        "tools" | "skills" | "plugins" => string_array(v),
+        "mainAgent" | "subagent" => v.is_boolean(),
+        "model" => matches!(v.as_str(), Some("inherit" | "flash" | "pro")),
+        "commandExecutionPolicy" => {
+            matches!(v.as_str(), Some("off" | "auto" | "eager" | "sandbox"))
+        }
+        _ => v.is_array(),
+    })
+}
+
+fn apply_agent(
+    work: &mut Work,
+    dir: &std::path::Path,
+    a: &Agent,
+    opts: &ApplyOptions,
+) -> Result<()> {
+    if a.description.is_none() {
+        work.warn(
+            ID,
+            format!(
+                "agent '{}' skipped: Antigravity requires a description, and kitbag does not make one up",
+                a.name
+            ),
+        );
+        return Ok(());
+    }
+    let (text, dropped) = antigravity_agent(a);
+    note_agent_keys(work, ID, TOOL, a, &dropped);
+    if a.extra.contains_key("tools") && !dropped.iter().any(|d| d == "tools") {
+        work.warn(
+            ID,
+            format!(
+                "agent '{}': Antigravity warns that a tool name it doesn't know may make the subagent hang; check the tools list against its tool names",
+                a.name
+            ),
+        );
+    }
+    let path = dir.join(format!("{}.md", a.name));
+    write_agent(work, &path, text.as_bytes(), opts, ID, &a.name)
 }
 
 /// A rule as an Antigravity rule file. `globs` is one string of
@@ -149,6 +221,7 @@ fn paths(env: &Env) -> Paths {
                 mcp: c.join("mcp_config.json"),
                 rules: c.join("rules"),
                 skills: c.join("skills"),
+                agents: c.join("agents"),
                 instructions: g.join("GEMINI.md"),
                 read: vec![
                     g.join("GEMINI.md"),
@@ -165,6 +238,7 @@ fn paths(env: &Env) -> Paths {
                 mcp: a.join("mcp_config.json"),
                 rules: a.join("rules"),
                 skills: a.join("skills"),
+                agents: a.join("agents"),
                 instructions: p.join("AGENTS.md"),
                 read: vec![
                     p.join("AGENTS.md"),
@@ -196,7 +270,11 @@ impl Adapter for Antigravity {
                 f,
                 if matches!(
                     f,
-                    Feature::Mcp | Feature::Instructions | Feature::Rules | Feature::Skills
+                    Feature::Mcp
+                        | Feature::Instructions
+                        | Feature::Rules
+                        | Feature::Skills
+                        | Feature::Agents
                 ) {
                     Support::Native
                 } else {
@@ -213,6 +291,7 @@ impl Adapter for Antigravity {
             ("instructions", p.instructions),
             ("rules", p.rules),
             ("skills", p.skills),
+            ("agents", p.agents),
         ]
     }
 
@@ -303,6 +382,7 @@ impl Adapter for Antigravity {
             );
         }
         capture_skills_dir(&mut cap, &p.skills, ID)?;
+        capture_agent_dir(&mut cap, &p.agents, Some("agent.md"), ID, "a subagent")?;
         super::hook_files::capture_for(&mut cap, env, &super::hook_files::ANTIGRAVITY)?;
         Ok(cap)
     }
@@ -442,6 +522,9 @@ impl Adapter for Antigravity {
         for s in &profile.skills {
             let s = skill_with_required_frontmatter(s);
             write_skill(work, &p.skills.join(&s.name), &s, opts, ID)?;
+        }
+        for a in &profile.agents {
+            apply_agent(work, &p.agents, a, opts)?;
         }
         if env.scope == Scope::User
             && !profile.skills.is_empty()

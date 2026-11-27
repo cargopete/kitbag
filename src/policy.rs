@@ -319,19 +319,26 @@ fn agent_server_key(key: &str) -> bool {
     k == "mcpservers"
 }
 
-/// A Claude Code subagent `permissionMode` that lets it act without asking
-/// (`acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`).
-fn agent_permissive_mode(a: &crate::model::Agent) -> Option<&str> {
-    let (k, v) = a
-        .extra
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("permissionMode"))?;
-    let v = v.as_str()?;
-    matches!(
-        v.to_ascii_lowercase().as_str(),
-        "acceptedits" | "auto" | "dontask" | "bypasspermissions"
-    )
-    .then_some(k.as_str())
+/// A subagent setting that lets it act without asking: Claude Code's
+/// `permissionMode` (`acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`) or
+/// Antigravity's `commandExecutionPolicy` (`auto`, `eager`). Returns the key
+/// as the agent spells it and its value.
+fn agent_permissive_mode(a: &crate::model::Agent) -> Option<(&str, &str)> {
+    a.extra.iter().find_map(|(k, v)| {
+        let v = v.as_str()?;
+        let v = v.to_ascii_lowercase();
+        let hit = if k.eq_ignore_ascii_case("permissionMode") {
+            matches!(
+                v.as_str(),
+                "acceptedits" | "auto" | "dontask" | "bypasspermissions"
+            )
+        } else if k.eq_ignore_ascii_case("commandExecutionPolicy") {
+            matches!(v.as_str(), "auto" | "eager")
+        } else {
+            false
+        };
+        hit.then(|| (k.as_str(), a.extra[k].as_str().unwrap_or_default()))
+    })
 }
 
 /// Whether `v` holds an `allow` anywhere: opencode's `permission` maps
@@ -395,7 +402,7 @@ fn agent_risks(a: &crate::model::Agent) -> Vec<String> {
         .filter(|k| executable_key(k) || agent_server_key(k))
         .cloned()
         .collect();
-    out.extend(agent_permissive_mode(a).map(str::to_string));
+    out.extend(agent_permissive_mode(a).map(|(k, _)| k.to_string()));
     for (k, _) in agent_preapproval(a) {
         if !out.contains(&k) {
             out.push(k);
@@ -549,15 +556,8 @@ pub fn risky_content(profile: &crate::model::Profile) -> Vec<String> {
                 "{what} starts MCP servers of its own (mcp-servers)"
             ));
         }
-        if let Some(mode) = a
-            .extra
-            .get("permissionMode")
-            .filter(|_| agent_permissive_mode(a).is_some())
-        {
-            out.push(format!(
-                "{what} sets permissionMode {} (acts without asking)",
-                mode.as_str().unwrap_or_default()
-            ));
+        if let Some((key, mode)) = agent_permissive_mode(a) {
+            out.push(format!("{what} sets {key} {mode} (acts without asking)"));
         }
         for (k, what_it_does) in agent_preapproval(a) {
             out.push(format!(

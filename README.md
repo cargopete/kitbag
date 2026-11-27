@@ -91,11 +91,11 @@ preview with `kitbag diff github:cargopete/dotagents --to all`.
 | Target id        | Tool              | Scopes        | MCP | Instructions | Rules      | Commands     | Skills | Agents | Settings |
 |------------------|-------------------|---------------|-----|--------------|------------|--------------|--------|--------|----------|
 | `claude-code`    | Claude Code       | user, project | ✓   | ✓            | ✓          | ✓            | ✓      | ✓      | ✓        |
-| `cursor`         | Cursor            | user, project | ✓   | project      | project    | ✓            | ✓      | -      | -        |
-| `codex`          | OpenAI Codex CLI  | user, project | ✓   | ✓            | folded     | user         | ✓      | -      | ✓        |
-| `gemini-cli`     | Gemini CLI        | user, project | ✓   | ✓            | folded     | ✓            | ✓      | -      | ✓        |
+| `cursor`         | Cursor            | user, project | ✓   | project      | project    | ✓            | ✓      | ✓      | -        |
+| `codex`          | OpenAI Codex CLI  | user, project | ✓   | ✓            | folded     | user         | ✓      | ✓      | ✓        |
+| `gemini-cli`     | Gemini CLI        | user, project | ✓   | ✓            | folded     | ✓            | ✓      | ✓      | ✓        |
 | `claude-desktop` | Claude Desktop    | user          | ✓ (local servers) | -  | -          | -            | -      | -      | -        |
-| `antigravity`    | Google Antigravity | user, project | ✓  | ✓            | ✓          | -            | ✓      | -      | -        |
+| `antigravity`    | Google Antigravity | user, project | ✓  | ✓            | ✓          | -            | ✓      | ✓      | -        |
 | `opencode`       | opencode          | user, project | ✓   | ✓            | folded     | ✓            | ✓      | ✓      | -        |
 | `copilot`        | GitHub Copilot (CLI, VS Code) | user, project | ✓ | ✓    | ✓          | project      | ✓      | ✓      | -        |
 | `grok-build`     | Grok Build        | user, project | ✓   | ✓            | ✓*         | ✓            | ✓      | -      | -        |
@@ -126,11 +126,11 @@ Where things go:
 | Target | User scope | Project scope |
 |---|---|---|
 | Claude Code | `~/.claude.json` (`mcpServers`), `~/.claude/{CLAUDE.md, rules/, commands/, skills/, agents/, settings.json}`; honours `CLAUDE_CONFIG_DIR` | `.mcp.json`, `CLAUDE.md` (or `.claude/CLAUDE.md`), `.claude/{rules,commands,skills,agents}/`, `.claude/settings.json`; capture also reads local-scope servers from `~/.claude.json` |
-| Cursor | `~/.cursor/mcp.json`, `~/.cursor/commands/`, `~/.cursor/skills/` | `.cursor/mcp.json`, `.cursor/rules/*.mdc`, `AGENTS.md`, `.cursor/commands/`, `.cursor/skills/`; capture also reads legacy `.cursorrules` |
-| Codex CLI | `$CODEX_HOME/config.toml` (default `~/.codex`), `$CODEX_HOME/AGENTS.md`, `$CODEX_HOME/prompts/`, `~/.agents/skills/` | `.codex/config.toml` (trusted projects only), `AGENTS.md`, `.agents/skills/` |
-| Gemini CLI | `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`, `~/.gemini/commands/*.toml`, `~/.gemini/skills/` | `.gemini/settings.json`, `GEMINI.md`, `.gemini/commands/`, `.gemini/skills/` |
+| Cursor | `~/.cursor/mcp.json`, `~/.cursor/commands/`, `~/.cursor/skills/`, `~/.cursor/agents/*.md` | `.cursor/mcp.json`, `.cursor/rules/*.mdc`, `AGENTS.md`, `.cursor/commands/`, `.cursor/skills/`, `.cursor/agents/*.md`; capture also reads legacy `.cursorrules` |
+| Codex CLI | `$CODEX_HOME/config.toml` (default `~/.codex`), `$CODEX_HOME/AGENTS.md`, `$CODEX_HOME/prompts/`, `~/.agents/skills/`, `$CODEX_HOME/agents/*.toml` | `.codex/config.toml` (trusted projects only), `AGENTS.md`, `.agents/skills/`, `.codex/agents/*.toml` |
+| Gemini CLI | `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`, `~/.gemini/commands/*.toml`, `~/.gemini/skills/`, `~/.gemini/agents/*.md` | `.gemini/settings.json`, `GEMINI.md`, `.gemini/commands/`, `.gemini/skills/`, `.gemini/agents/*.md` |
 | Claude Desktop | `claude_desktop_config.json` in `~/Library/Application Support/Claude` (macOS), `%APPDATA%\Claude` (Windows), `~/.config/Claude` (Linux) | n/a |
-| Antigravity | `~/.gemini/config/mcp_config.json`, `~/.gemini/GEMINI.md` (the same file and managed block as Gemini CLI); capture also reads `~/.gemini/AGENTS.md` and `~/.gemini/config/{AGENTS,GEMINI}.md`; `~/.gemini/config/rules/*.md`, `~/.gemini/config/skills/` | `.agents/mcp_config.json`, `AGENTS.md` (shared with Codex and Cursor); capture also reads `GEMINI.md` and `.agents/{AGENTS,GEMINI}.md`; `.agents/rules/*.md`, `.agents/skills/` (the same directory as Codex's project skills) |
+| Antigravity | `~/.gemini/config/mcp_config.json`, `~/.gemini/GEMINI.md` (the same file and managed block as Gemini CLI); capture also reads `~/.gemini/AGENTS.md` and `~/.gemini/config/{AGENTS,GEMINI}.md`; `~/.gemini/config/rules/*.md`, `~/.gemini/config/skills/`, `~/.gemini/config/agents/<name>.md` | `.agents/mcp_config.json`, `AGENTS.md` (shared with Codex and Cursor); capture also reads `GEMINI.md` and `.agents/{AGENTS,GEMINI}.md`; `.agents/rules/*.md`, `.agents/skills/` (the same directory as Codex's project skills), `.agents/agents/<name>.md` |
 | opencode | `~/.config/opencode/opencode.json` or `opencode.jsonc` (`mcp.servers`), `~/.config/opencode/{AGENTS.md, commands/*.md, skills/<name>/, agents/*.md}`; honours `XDG_CONFIG_HOME` | `opencode.json(c)` or `.opencode/opencode.json(c)` (the first that exists, else `opencode.json`), `AGENTS.md` (shared with Codex, Cursor and Antigravity), `.opencode/{commands,skills,agents}/`; capture reads every config file there is |
 | Grok Build | `$GROK_HOME/config.toml` (`[mcp_servers.<name>]`, default `~/.grok`), `$GROK_HOME/{AGENTS.md, rules/*.md, commands/*.md, skills/}` | `.grok/config.toml`, `AGENTS.md` (shared with Codex, Cursor, Antigravity and opencode), `.grok/{rules,commands,skills}/`; Grok reads project files only in folders you have trusted |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` (`mcpServers`), `~/.codeium/windsurf/memories/global_rules.md`, `~/.codeium/windsurf/global_workflows/<name>.md` | `AGENTS.md` (shared with Codex, Cursor, Antigravity, opencode and Grok Build); capture also reads the legacy `.windsurfrules`; `.windsurf/rules/<name>.md`, `.windsurf/workflows/<name>.md`, `.windsurf/skills/<name>/`; Windsurf's docs describe no project MCP file, so MCP servers are not written at project scope |
@@ -438,8 +438,8 @@ Standard [Agent Skills](https://agentskills.io): a directory with `SKILL.md` (fr
 
 ### Agents: `agents/<name>.md`
 
-Custom agents, carried by the `copilot` and `claude-code` targets: one agent per file, named
-after the file. `description` is a field of its own and every other frontmatter key is kept
+Custom agents, carried by the `claude-code`, `copilot`, `opencode`, `cursor`, `gemini-cli`,
+`codex` and `antigravity` targets: one agent per file, named after the file. `description` is a field of its own and every other frontmatter key is kept
 as it is, whichever tool the agent came from.
 
 ```markdown
@@ -476,10 +476,31 @@ checked by hand. Apply notes the keys Claude Code's docs don't list (Copilot's `
 (`disallowedTools`, `permissionMode`, `mcpServers` ...), and writes them as they are. Other
 targets skip agents with a note. A plugin's `agents/` is not read.
 
+**Cursor**, **Gemini CLI**, **Antigravity** and **Codex** each get the file their own docs
+describe, and only the keys those docs list; a key a tool doesn't list is left out and the plan
+names it. Values are never translated, so `model` and `tools` are written as they are (with a
+note) when the tool lists the key and the value has the type its docs give.
+
+| Target | Where | Keys written (besides the body) |
+|---|---|---|
+| `cursor` | `~/.cursor/agents/<name>.md`, `.cursor/agents/<name>.md` ([docs](https://cursor.com/docs/subagents)) | `name` (only when the agent has one), `description`, `model`, `readonly`, `is_background` |
+| `gemini-cli` | `~/.gemini/agents/<name>.md`, `.gemini/agents/<name>.md` ([docs](https://geminicli.com/docs/core/subagents/)) | `name` (a slug: lowercase letters, numbers, `-`, `_`; else the profile name is used), `description` (required), `kind: local`, `tools` (a list), `mcpServers` (a map), `model`, `temperature`, `max_turns`, `timeout_mins` |
+| `antigravity` | `~/.gemini/config/agents/<name>.md`, `.agents/agents/<name>.md` ([docs](https://antigravity.google/docs/subagents)); capture also reads `<name>/agent.md` | `name`, `description` (required), `tools` (a list), `mainAgent`, `subagent`, `model` (only `inherit`, `flash` or `pro`), `commandExecutionPolicy` (`off`, `auto`, `eager` or `sandbox`), `mcpServers`, `skills`, `plugins` |
+| `codex` | `$CODEX_HOME/agents/<name>.toml`, `.codex/agents/<name>.toml` ([docs](https://developers.openai.com/codex/subagents)) | `name`, `description` (required), `developer_instructions` (the body, required), `model`, `model_reasoning_effort`, `model_reasoning_summary`, `model_verbosity`, `[features]`, `[skills]` |
+
+Codex's agents are TOML, not markdown: capture turns `developer_instructions` into the body, and
+a `name` that differs from the file name is kept as a `name` key, since Codex identifies an agent
+by that key. An agent that lacks what a tool requires (a description, or for Codex instructions)
+is skipped with a warning, not given invented text. Antigravity warns that a `tools` entry it
+doesn't know may make the subagent hang, so the plan repeats that whenever `tools` is written.
+Cursor also reads `~/.claude/agents/` and `.claude/agents/`; with both tools targeted an agent
+lands in both places, and Cursor's own folder is the one kitbag captures for Cursor.
+
 Apply is additive and undo removes only the files kitbag wrote. From a git source, an agent with
 `hooks`, `allowed-tools`, `mcp-servers` or `mcpServers` (servers it starts itself), a
 `permissionMode` that acts without asking (`acceptEdits`, `auto`, `dontAsk`,
-`bypassPermissions`) or a shell snippet is skipped unless you pass `--trust-source`. A plain
+`bypassPermissions`), an Antigravity `commandExecutionPolicy` of `auto` or `eager`, or a shell
+snippet is skipped unless you pass `--trust-source`. A plain
 `tools` list only narrows what an agent may use, so it doesn't count. The plan warns about
 such agents in a local profile.
 
@@ -1178,7 +1199,7 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   `~/.gemini/config/skills/`. Workflows (`.agents/workflows/`, Antigravity's older commands) are
   not carried: Google has deprecated them in favour of skills, and its docs list two different
   global directories for them (the migration guide scans `global_workflows/` and `workflows/`). Hooks are
-  carried (see Hooks); agents and plugins aren't. kitbag leaves
+  carried (see Hooks) and so are agents (see Agents); plugins aren't. kitbag leaves
   Antigravity's MCP tool approvals (Ask by default) alone.
 - **opencode** 2 keeps MCP servers under `mcp.servers` and turns one off with `disabled: true`;
   opencode 1 kept them directly under `mcp` with `enabled: false`, and opencode 2 still reads

@@ -6,6 +6,11 @@
 //! * Instructions: `~/.gemini/GEMINI.md` / `./GEMINI.md`; rules are folded in.
 //! * Commands: `.gemini/commands/<name>.toml` with `prompt` and `{{args}}`.
 //! * Skills: `.gemini/skills/<name>/SKILL.md`.
+//! * Subagents: `~/.gemini/agents/<name>.md` and `.gemini/agents/<name>.md`,
+//!   markdown with YAML frontmatter (`name` and `description` required, then
+//!   `kind`, `tools`, `mcpServers`, `model`, `temperature`, `max_turns`,
+//!   `timeout_mins`) and the system prompt as the body.
+//!   Docs: <https://geminicli.com/docs/core/subagents/>.
 
 use std::path::PathBuf;
 
@@ -14,14 +19,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::common::{
-    add_command, capture_instructions, capture_skills_dir, claim_name, import_server,
-    merge_json_servers, merge_json_settings, name_from_rel, pick_settings, read_text_item,
-    render_server, safe_settings, server_entries, server_from_json, servers_for,
-    skill_with_required_frontmatter, str_of, string_list, write_instructions, write_skill,
+    AgentName, add_command, capture_agent_dir, capture_instructions, capture_skills_dir,
+    claim_name, documented_agent, import_server, merge_json_servers, merge_json_settings,
+    name_from_rel, note_agent_keys, pick_settings, read_text_item, render_server, safe_settings,
+    server_entries, server_from_json, servers_for, skill_with_required_frontmatter, str_of,
+    string_list, write_agent, write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::json::parse_value;
-use crate::model::{Command, Profile, Transport, is_valid_name};
+use crate::model::{Agent, Command, Profile, Transport, is_valid_name};
 use crate::plan_fs::{join_rel, walk_files};
 use crate::secrets::RefStyle;
 
@@ -35,6 +41,7 @@ struct Paths {
     instructions: PathBuf,
     commands: PathBuf,
     skills: PathBuf,
+    agents: PathBuf,
 }
 
 fn paths(env: &Env) -> Paths {
@@ -51,7 +58,93 @@ fn paths(env: &Env) -> Paths {
         instructions,
         commands: base.join("commands"),
         skills: base.join("skills"),
+        agents: base.join("agents"),
     }
+}
+
+/// Frontmatter keys Gemini CLI's subagent docs list besides `name` and `description`.
+const AGENT_KEYS: &[&str] = &[
+    "kind",
+    "tools",
+    "mcpServers",
+    "model",
+    "temperature",
+    "max_turns",
+    "timeout_mins",
+];
+
+/// A `name` Gemini CLI accepts: "only lowercase letters, numbers, hyphens,
+/// and underscores".
+fn slug(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+/// A subagent as a Gemini CLI file: the documented keys only, each with the
+/// type the docs give it (`tools` a list, `mcpServers` a map, `kind` `local`,
+/// the numbers numbers). A `name` that isn't a slug is replaced by the
+/// profile's name.
+pub fn gemini_agent(a: &Agent) -> (String, Vec<String>) {
+    let mut a = a.clone();
+    if a.extra
+        .get("name")
+        .is_some_and(|n| !n.as_str().is_some_and(slug))
+    {
+        a.extra.remove("name");
+    }
+    documented_agent(&a, AgentName::Required, AGENT_KEYS, |k, v| match k {
+        "kind" => v.as_str() == Some("local"),
+        "tools" => v.is_array(),
+        "mcpServers" => v.is_object(),
+        "model" => v.is_string(),
+        _ => v.is_number(),
+    })
+}
+
+fn apply_agent(
+    work: &mut Work,
+    dir: &std::path::Path,
+    a: &Agent,
+    opts: &ApplyOptions,
+) -> Result<()> {
+    if a.description.is_none() {
+        work.warn(
+            ID,
+            format!(
+                "agent '{}' skipped: Gemini CLI requires a description, and kitbag does not make one up",
+                a.name
+            ),
+        );
+        return Ok(());
+    }
+    if !slug(&a.name) {
+        work.warn(
+            ID,
+            format!(
+                "agent '{}' skipped: Gemini CLI names an agent with lowercase letters, numbers, hyphens and underscores only",
+                a.name
+            ),
+        );
+        return Ok(());
+    }
+    let (text, dropped) = gemini_agent(a);
+    if a.extra
+        .get("name")
+        .is_some_and(|n| !n.as_str().is_some_and(slug))
+    {
+        work.info(
+            ID,
+            format!(
+                "agent '{}': its name is not a Gemini CLI slug, so the profile name is used",
+                a.name
+            ),
+        );
+    }
+    note_agent_keys(work, ID, "Gemini CLI", a, &dropped);
+    let path = dir.join(format!("{}.md", a.name));
+    write_agent(work, &path, text.as_bytes(), opts, ID, &a.name)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -104,7 +197,7 @@ impl Adapter for GeminiCli {
             (Feature::Rules, Support::Folded),
             (Feature::Commands, Support::Native),
             (Feature::Skills, Support::Native),
-            (Feature::Agents, Support::None),
+            (Feature::Agents, Support::Native),
             (Feature::Settings, Support::Native),
         ]
     }
@@ -117,6 +210,7 @@ impl Adapter for GeminiCli {
             ("rules", p.instructions),
             ("commands", p.commands),
             ("skills", p.skills),
+            ("agents", p.agents),
             ("settings", p.settings),
         ]
     }
@@ -192,6 +286,7 @@ impl Adapter for GeminiCli {
             }
         }
         capture_skills_dir(&mut cap, &p.skills, ID)?;
+        capture_agent_dir(&mut cap, &p.agents, None, ID, "a subagent")?;
         super::hook_files::capture_for(&mut cap, env, &super::hook_files::GEMINI)?;
         Ok(cap)
     }
@@ -294,6 +389,9 @@ impl Adapter for GeminiCli {
         for s in &profile.skills {
             let s = skill_with_required_frontmatter(s);
             write_skill(work, &p.skills.join(&s.name), &s, opts, ID)?;
+        }
+        for a in &profile.agents {
+            apply_agent(work, &p.agents, a, opts)?;
         }
         super::hook_files::apply_for(profile, env, opts, work, &super::hook_files::GEMINI)?;
         Ok(())

@@ -7,6 +7,12 @@
 //!   settings UI, not in files, so they cannot be written at user scope.
 //! * Instructions: `AGENTS.md` at the project root.
 //! * Commands: `.cursor/commands/*.md` (plain markdown). Skills: `.cursor/skills/`.
+//! * Subagents: `~/.cursor/agents/<name>.md` and `.cursor/agents/<name>.md`,
+//!   markdown with YAML frontmatter (`name`, `description`, `model`,
+//!   `readonly`, `is_background`) and the prompt as the body. Cursor also reads
+//!   `.claude/agents/` and `~/.claude/agents/`, which are Claude Code's, so
+//!   they are not captured or written here.
+//!   Docs: <https://cursor.com/docs/subagents>.
 
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -16,15 +22,16 @@ use regex::Regex;
 use serde_json::{Map, Value, json};
 
 use super::common::{
-    add_command, add_instructions, add_rule, capture_instructions, capture_skills_dir, claim_name,
-    import_server, merge_json_servers, name_from_rel, read_text_item, render_server,
-    server_entries, server_from_json, servers_for, write_instructions, write_skill,
+    AgentName, add_command, add_instructions, add_rule, capture_agent_dir, capture_instructions,
+    capture_skills_dir, claim_name, documented_agent, import_server, merge_json_servers,
+    name_from_rel, note_agent_keys, read_text_item, render_server, server_entries,
+    server_from_json, servers_for, write_agent, write_instructions, write_skill,
 };
 use super::{Adapter, ApplyOptions, Captured, Env, Feature, Scope, Support, Work};
 use crate::edit::block;
 use crate::edit::json::parse_value;
 use crate::frontmatter;
-use crate::model::{Command, Profile, Rule, RuleMode, Transport, is_valid_name};
+use crate::model::{Agent, Command, Profile, Rule, RuleMode, Transport, is_valid_name};
 use crate::plan_fs::{join_rel, walk_files};
 use crate::profile_io::rule_from_markdown;
 use crate::secrets::RefStyle;
@@ -41,6 +48,7 @@ struct Paths {
     rules: Option<PathBuf>,
     commands: PathBuf,
     skills: PathBuf,
+    agents: PathBuf,
 }
 
 fn paths(env: &Env) -> Paths {
@@ -53,6 +61,7 @@ fn paths(env: &Env) -> Paths {
                 rules: None,
                 commands: d.join("commands"),
                 skills: d.join("skills"),
+                agents: d.join("agents"),
             }
         }
         Scope::Project => {
@@ -63,6 +72,7 @@ fn paths(env: &Env) -> Paths {
                 rules: Some(d.join("rules")),
                 commands: d.join("commands"),
                 skills: d.join("skills"),
+                agents: d.join("agents"),
             }
         }
     }
@@ -137,6 +147,30 @@ pub fn rule_from_mdc(name: &str, text: &str) -> Rule {
     r
 }
 
+/// Frontmatter keys Cursor's subagent docs list besides `name` and `description`.
+const AGENT_KEYS: &[&str] = &["model", "readonly", "is_background"];
+
+/// A subagent as a Cursor file: the documented keys only, with `model` a
+/// string and the two switches booleans, as documented.
+pub fn cursor_agent(a: &Agent) -> (String, Vec<String>) {
+    documented_agent(a, AgentName::Optional, AGENT_KEYS, |k, v| match k {
+        "model" => v.is_string(),
+        _ => v.is_boolean(),
+    })
+}
+
+fn apply_agent(
+    work: &mut Work,
+    dir: &std::path::Path,
+    a: &Agent,
+    opts: &ApplyOptions,
+) -> Result<()> {
+    let (text, dropped) = cursor_agent(a);
+    note_agent_keys(work, ID, "Cursor", a, &dropped);
+    let path = dir.join(format!("{}.md", a.name));
+    write_agent(work, &path, text.as_bytes(), opts, ID, &a.name)
+}
+
 impl Adapter for Cursor {
     fn id(&self) -> &'static str {
         ID
@@ -162,7 +196,7 @@ impl Adapter for Cursor {
             (Feature::Rules, file_rules),
             (Feature::Commands, Support::Native),
             (Feature::Skills, Support::Native),
-            (Feature::Agents, Support::None),
+            (Feature::Agents, Support::Native),
             (Feature::Settings, Support::None),
         ]
     }
@@ -178,6 +212,7 @@ impl Adapter for Cursor {
         }
         out.push(("commands", p.commands));
         out.push(("skills", p.skills));
+        out.push(("agents", p.agents));
         out
     }
 
@@ -283,6 +318,7 @@ impl Adapter for Cursor {
         }
 
         capture_skills_dir(&mut cap, &p.skills, ID)?;
+        capture_agent_dir(&mut cap, &p.agents, None, ID, "a subagent")?;
         super::hook_files::capture_for(&mut cap, env, &super::hook_files::CURSOR)?;
         Ok(cap)
     }
@@ -367,6 +403,9 @@ impl Adapter for Cursor {
         for s in &profile.skills {
             let s = super::common::skill_with_required_frontmatter(s);
             write_skill(work, &p.skills.join(&s.name), &s, opts, ID)?;
+        }
+        for a in &profile.agents {
+            apply_agent(work, &p.agents, a, opts)?;
         }
         if profile.settings.contains_key(ID) {
             work.info(

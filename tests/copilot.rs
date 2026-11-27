@@ -234,7 +234,7 @@ fn custom_agents_apply_to_copilot_home_and_undo() {
     // Other targets say they have no place for agents.
     let codex = sb
         .cli()
-        .args(["diff", "p", "--to", "codex"])
+        .args(["diff", "p", "--to", "zed"])
         .output()
         .unwrap();
     let codex = String::from_utf8_lossy(&codex.stdout).into_owned();
