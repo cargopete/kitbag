@@ -440,6 +440,13 @@ impl Adapter for Codex {
             {
                 import(&mut cap, name, def);
             }
+            let plugin_tables = Value::Object(
+                ["marketplaces", "plugins"]
+                    .iter()
+                    .filter_map(|k| doc.get(k).map(|i| ((*k).to_string(), item_to_json(i))))
+                    .collect(),
+            );
+            crate::plugins::capture_codex(&mut cap, &plugin_tables, "config.toml");
             let mut settings = Map::new();
             for k in policy::allowed_keys(ID) {
                 if let Some(item) = doc.get(k) {
@@ -585,6 +592,7 @@ impl Adapter for Codex {
                 changed = true;
             }
         }
+        changed |= crate::plugins::apply_codex(profile, env, opts, work, &mut doc, &p.config)?;
         if changed {
             work.fs.write(
                 &p.config,

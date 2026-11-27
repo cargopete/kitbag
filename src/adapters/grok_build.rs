@@ -366,6 +366,13 @@ impl Adapter for GrokBuild {
                 let listed_off = off.iter().any(|n| n == name);
                 import(&mut cap, name, def, listed_off);
             }
+            let plugin_tables = Value::Object(
+                doc.get("plugins")
+                    .map(|i| ("plugins".to_string(), item_to_json(i)))
+                    .into_iter()
+                    .collect(),
+            );
+            crate::plugins::capture_grok(&mut cap, env, &plugin_tables, "config.toml");
         }
         capture_instructions(&mut cap, &p.instructions, ID)?;
         // Rules another tool folded into a shared AGENTS.md (Codex) come back
@@ -500,6 +507,7 @@ impl Adapter for GrokBuild {
                 changed = true;
             }
         }
+        changed |= crate::plugins::apply_grok(profile, env, work, &mut doc, &p.config)?;
         if changed {
             work.fs.write(
                 &p.config,
