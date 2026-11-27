@@ -83,11 +83,148 @@ pub fn allowed_keys(target: &str) -> &'static [&'static str] {
             "streamerMode",
         ],
         // opencode.ai/docs/config and /docs/permissions (the V2 `permissions` array).
-        "opencode" => &["model", "default_agent", "permissions"],
+        // Plus the keys of `cli.json` (`OPENCODE_CLI_KEYS`), a separate file.
+        "opencode" => &[
+            "model",
+            "default_agent",
+            "permissions",
+            "theme",
+            "animations",
+            "cursor",
+            "mouse",
+            "scroll",
+            "prompt",
+            "session",
+            "tabs",
+            "diffs",
+            "attention",
+            "highlights",
+            "terminal",
+            "mini",
+        ],
         // Only some keys of the `agent` object; see `nested_keys`.
         "zed" => &["agent"],
         _ => &[],
     }
+}
+
+/// The allow-listed keys of opencode that live in `cli.json` (opencode.ai/docs/cli/config)
+/// and not in `opencode.json`.
+pub const OPENCODE_CLI_KEYS: &[&str] = &[
+    "theme",
+    "animations",
+    "cursor",
+    "mouse",
+    "scroll",
+    "prompt",
+    "session",
+    "tabs",
+    "diffs",
+    "attention",
+    "highlights",
+    "terminal",
+    "mini",
+];
+
+/// Spinner ids the `cli.json` page lists for `mini.work_spinner`.
+const OPENCODE_SPINNERS: &[&str] = &[
+    "block-soft-slide",
+    "block-soft-sweep",
+    "block-low-comet",
+    "block-low-duet",
+    "block-shuttle",
+    "block-bridge",
+    "block-squeeze",
+    "small-toggle",
+    "square-toggle",
+    "grow-shrink",
+    "quadrant-orbit",
+    "crosshatch",
+    "density-wave",
+    "seed",
+];
+
+/// A short name (theme, sound pack): no paths, nothing but plain characters.
+fn short_name(v: &Value, spaces: bool) -> bool {
+    v.as_str().is_some_and(|s| {
+        !s.is_empty()
+            && s.chars().count() <= 64
+            && s.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') || (spaces && c == ' ')
+            })
+            && !s.contains("..")
+    })
+}
+
+/// Is `v` a documented, bounded value of `cli.json`'s `group.key`?
+fn opencode_cli_value(group: &str, key: &str, v: &Value) -> bool {
+    let one_of = |opts: &[&str]| v.as_str().is_some_and(|s| opts.contains(&s));
+    let show = || one_of(&["show", "hide"]);
+    match (group, key) {
+        ("theme", "name") => short_name(v, true),
+        ("theme", "mode") => one_of(&["system", "dark", "light"]),
+        ("cursor", "style") => one_of(&["block", "underline", "line", "default"]),
+        ("scroll", "speed") => v.as_f64().is_some_and(|n| n.is_finite() && n >= 0.001),
+        ("prompt", "paste") => one_of(&["compact", "full"]),
+        ("session", "sidebar") => one_of(&["auto", "hide"]),
+        ("session", "submit_scroll") => one_of(&["bottom", "keep"]),
+        ("session", "thinking") => show(),
+        ("session", "grouping") => one_of(&["auto", "none"]),
+        ("session", "markdown") => one_of(&["source", "rendered"]),
+        ("session", "new_location") => one_of(&["launch", "inherit"]),
+        ("session", "permissions") => one_of(&["prompt", "autoaccept"]),
+        ("tabs", "mode") => one_of(&["auto", "on", "off"]),
+        ("tabs", "scope") => one_of(&["cwd", "global"]),
+        ("tabs", "layout") => one_of(&["horizontal", "vertical"]),
+        ("tabs", "indicators") => one_of(&["status", "numbers"]),
+        ("diffs", "source") => one_of(&["branch", "committed", "working", "turn"]),
+        ("diffs", "wrap") => one_of(&["word", "none"]),
+        ("diffs", "view") => one_of(&["auto", "split", "unified"]),
+        ("attention", "volume") => v.as_f64().is_some_and(|n| (0.0..=1.0).contains(&n)),
+        ("attention", "sound_pack") => short_name(v, false),
+        ("terminal", "copy") => one_of(&["manual", "select"]),
+        ("mini", "thinking" | "tools" | "shell_output" | "turn_summary" | "footer" | "splash") => {
+            show()
+        }
+        ("mini", "work_spinner") => one_of(OPENCODE_SPINNERS),
+        ("mini", "replay_limit") => v.as_u64().is_some_and(|n| n >= 1),
+        ("cursor", "blinking")
+        | ("scroll", "acceleration")
+        | ("prompt", "editor" | "image_preview")
+        | ("session", "scrollbar" | "image_preview" | "tps")
+        | ("tabs", "enabled")
+        | ("diffs", "tree" | "single")
+        | ("attention", "notifications" | "sound")
+        | ("terminal", "title")
+        | ("mini", "mono" | "replay") => v.is_boolean(),
+        _ => false,
+    }
+}
+
+/// `value` of the `cli.json` key `key` cut down to documented, bounded
+/// values. A scalar key that does not hold a boolean, or an object key that is
+/// not an object, comes back as an empty object with the key named as cut.
+fn restrict_opencode_cli(key: &str, value: &Value) -> (Value, Vec<String>) {
+    if matches!(key, "animations" | "mouse" | "highlights") {
+        return if value.is_boolean() {
+            (value.clone(), Vec::new())
+        } else {
+            (Value::Object(Map::new()), vec![key.to_string()])
+        };
+    }
+    let Value::Object(map) = value else {
+        return (Value::Object(Map::new()), vec![key.to_string()]);
+    };
+    let mut kept = Map::new();
+    let mut dropped = Vec::new();
+    for (k, v) in map {
+        if opencode_cli_value(key, k, v) {
+            kept.insert(k.clone(), v.clone());
+        } else {
+            dropped.push(format!("{key}.{k}"));
+        }
+    }
+    (Value::Object(kept), dropped)
 }
 
 /// Keys of an allow-listed settings object that may be carried, when the
@@ -129,6 +266,9 @@ pub fn nested_keys(target: &str, key: &str) -> Option<&'static [&'static str]> {
 /// of the keys cut. A value that is not an object has nothing to cut (and no
 /// meaning to the tool): it is returned as it is.
 pub fn restrict_nested(target: &str, key: &str, value: &Value) -> (Value, Vec<String>) {
+    if target == "opencode" && OPENCODE_CLI_KEYS.contains(&key) {
+        return restrict_opencode_cli(key, value);
+    }
     let (Some(keys), Value::Object(map)) = (nested_keys(target, key), value) else {
         return (value.clone(), Vec::new());
     };
@@ -323,6 +463,15 @@ fn risky_copilot_mode(mode: &str) -> bool {
     matches!(mode, "assisted" | "allow-all")
 }
 
+/// `cli.json`'s `session.permissions = autoaccept` accepts every permission request.
+fn opencode_autoaccept(settings: &Map<String, Value>) -> bool {
+    settings
+        .get("session")
+        .and_then(|s| s.get("permissions"))
+        .and_then(Value::as_str)
+        == Some("autoaccept")
+}
+
 /// opencode permission rules (`{action, resource, effect}`, V2) with
 /// `effect: allow`. Rules of any other effect restrict.
 fn opencode_allow_rules(settings: &Map<String, Value>) -> Vec<&Map<String, Value>> {
@@ -478,6 +627,9 @@ pub fn risky(target: &str, settings: &Map<String, Value>) -> Vec<String> {
             }
         }
         "opencode" => {
+            if opencode_autoaccept(settings) {
+                out.push("opencode: session.permissions = autoaccept (cli.json)".into());
+            }
             let allow = opencode_allow_rules(settings);
             if !allow.is_empty() {
                 let broad: Vec<String> = allow
@@ -621,6 +773,15 @@ pub fn drop_risky(target: &str, settings: &mut Map<String, Value>) -> Vec<String
             }
         }
         "opencode" => {
+            if opencode_autoaccept(settings) {
+                if let Some(Value::Object(session)) = settings.get_mut("session") {
+                    session.remove("permissions");
+                    if session.is_empty() {
+                        settings.remove("session");
+                    }
+                }
+                out.push("session.permissions = autoaccept".into());
+            }
             // Rules are ordered and the last match wins; taking out `allow`
             // rules can only leave the tool asking or denying more.
             if let Some(Value::Array(rules)) = settings.get_mut("permissions") {

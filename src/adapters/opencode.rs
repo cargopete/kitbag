@@ -51,7 +51,8 @@
 //!   file's own rules keep the last word. opencode 1's `permission` object is a
 //!   different shape and is neither read nor written, and `permissions` is
 //!   left out of a file that still uses the opencode 1 layout. Theme and
-//!   terminal settings live in opencode 2's `cli.json`, which is not touched.
+//!   terminal settings live in opencode 2's `cli.json`, which is
+//!   carried separately at user scope (see `apply_cli_settings`).
 //!
 //! Docs: <https://opencode.ai/docs/config/>, <https://opencode.ai/docs/mcp-servers/>,
 //! <https://opencode.ai/docs/rules/>, <https://opencode.ai/docs/commands/>,
@@ -75,6 +76,7 @@ use crate::edit::json::{JsonDoc, parse_value};
 use crate::frontmatter;
 use crate::model::{Agent, Command, McpServer, Profile, Transport, is_valid_name};
 use crate::plan_fs::{join_rel, walk_files};
+use crate::policy;
 use crate::profile_io::agent_from_markdown;
 use crate::schema::SchemaSpec;
 use crate::secrets::{RefStyle, normalize_brace_refs};
@@ -357,13 +359,17 @@ impl Adapter for OpenCode {
             .find(|c| c.exists())
             .unwrap_or(&p.configs[0])
             .clone();
-        vec![
+        let mut out = vec![
             ("mcp", config),
             ("instructions", p.instructions.clone()),
             ("commands", p.commands().target().to_path_buf()),
             ("skills", p.skills().target().to_path_buf()),
             ("agents", p.agents().target().to_path_buf()),
-        ]
+        ];
+        if env.scope == Scope::User {
+            out.push(("settings", cli_config(env)));
+        }
+        out
     }
 
     fn schemas(&self) -> &'static [SchemaSpec] {
@@ -407,6 +413,17 @@ impl Adapter for OpenCode {
         let mut cap = Captured::for_env(env);
         let p = paths(env);
         let mut settings_read = false;
+        if env.scope == Scope::User {
+            let file = cli_config(env);
+            if let Some(text) = cap.read_config(&file, ID)? {
+                cap.sources.push(file.clone());
+                if let Value::Object(doc) = parse_value(Some(&text), &file)? {
+                    let mut cli = doc;
+                    cli.retain(|k, _| policy::OPENCODE_CLI_KEYS.contains(&k.as_str()));
+                    pick_settings(&mut cap, ID, &cli);
+                }
+            }
+        }
         for file in &p.configs {
             let Some(text) = cap.read_config(file, ID)? else {
                 continue;
@@ -416,7 +433,9 @@ impl Adapter for OpenCode {
             // The settings come from the first config file, the one apply writes to.
             if !settings_read && let Value::Object(map) = &doc {
                 settings_read = true;
-                pick_settings(&mut cap, ID, map);
+                let mut own = map.clone();
+                own.retain(|k, _| !policy::OPENCODE_CLI_KEYS.contains(&k.as_str()));
+                pick_settings(&mut cap, ID, &own);
             }
             crate::plugins::capture_opencode(&mut cap, &doc, &tildify(file, &env.home));
             match doc.get("mcp") {
@@ -669,13 +688,61 @@ impl Adapter for OpenCode {
         }
         let mut settings = safe_settings(profile, ID, work);
         drop_redacted_settings(&mut settings, ID, work);
+        // `cli.json` keys go to that file, never to `opencode.json`.
+        let mut cli = settings.clone();
+        cli.retain(|k, _| policy::OPENCODE_CLI_KEYS.contains(&k.as_str()));
+        settings.retain(|k, _| !policy::OPENCODE_CLI_KEYS.contains(&k.as_str()));
         let rules = settings.remove("permissions");
         merge_json_settings(work, &file, &settings, opts, ID)?;
+        apply_cli_settings(work, env, cli, opts)?;
         if let Some(rules) = rules {
             apply_permissions(work, &file, layout, &rules)?;
         }
         Ok(())
     }
+}
+
+/// Where opencode 2 keeps its terminal UI settings: one global file, with no
+/// project-level counterpart.
+fn cli_config(env: &Env) -> PathBuf {
+    config_dir(env).join("cli.json")
+}
+
+const CLI_SCHEMA: &str = "https://opencode.ai/v2/cli.json";
+
+/// Write the allow-listed `cli.json` settings, at user scope only.
+fn apply_cli_settings(
+    work: &mut Work,
+    env: &Env,
+    mut cli: Map<String, Value>,
+    opts: &ApplyOptions,
+) -> Result<()> {
+    if cli.is_empty() {
+        return Ok(());
+    }
+    if env.scope != Scope::User {
+        work.info(
+            ID,
+            "opencode's cli.json settings were not applied to the project: opencode has one global cli.json and no project file; apply them at user scope",
+        );
+        return Ok(());
+    }
+    let file = cli_config(env);
+    if work.fs.read(&file)?.is_none() {
+        let mut with_schema = Map::new();
+        with_schema.insert("$schema".into(), Value::String(CLI_SCHEMA.into()));
+        with_schema.append(&mut cli);
+        cli = with_schema;
+    }
+    merge_json_settings(work, &file, &cli, opts, ID)?;
+    work.info(
+        ID,
+        format!(
+            "terminal UI settings went to {}, opencode's cli.json; opencode.json was not used for them",
+            crate::ui::tildify(&file, &work.home)
+        ),
+    );
+    Ok(())
 }
 
 /// Add the profile's permission rules to the `permissions` array of `file`,
