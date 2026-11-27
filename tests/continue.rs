@@ -345,7 +345,11 @@ fn a_layout_that_cannot_be_edited_is_reported_and_left_alone() {
         std::path::MAIN_SEPARATOR,
         std::path::MAIN_SEPARATOR
     );
-    assert!(said(&plan.notes, &shown), "{:?} (looked for {shown})", plan.notes);
+    assert!(
+        said(&plan.notes, &shown),
+        "{:?} (looked for {shown})",
+        plan.notes
+    );
     assert_eq!(sb.read(CONFIG), flow);
 }
 
