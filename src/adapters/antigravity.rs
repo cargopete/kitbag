@@ -33,7 +33,8 @@
 //! * Workflows (`.agents/workflows/<name>.md`) are deprecated by Google in
 //!   favour of skills, and its docs give two global directories
 //!   (`~/.gemini/config/global_workflows/` and `.../workflows/`), so kitbag
-//!   doesn't carry them. Agents, hooks and plugins aren't carried either.
+//!   doesn't carry them. Hooks are carried by `hook_files`; agents and plugins
+//!   aren't.
 //!
 //! Docs: <https://antigravity.google/docs/mcp>, <https://antigravity.google/docs/rules>,
 //! <https://antigravity.google/docs/skills>,

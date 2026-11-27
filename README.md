@@ -1177,7 +1177,8 @@ No further candidates are named here; open an issue for the tool you miss. Issue
   (`~/.gemini/skills/` for Gemini CLI), which the Antigravity CLI reads both of and the app only
   `~/.gemini/config/skills/`. Workflows (`.agents/workflows/`, Antigravity's older commands) are
   not carried: Google has deprecated them in favour of skills, and its docs list two different
-  global directories for them. Agents, hooks and plugins aren't carried either. kitbag leaves
+  global directories for them (the migration guide scans `global_workflows/` and `workflows/`). Hooks are
+  carried (see Hooks); agents and plugins aren't. kitbag leaves
   Antigravity's MCP tool approvals (Ask by default) alone.
 - **opencode** 2 keeps MCP servers under `mcp.servers` and turns one off with `disabled: true`;
   opencode 1 kept them directly under `mcp` with `enabled: false`, and opencode 2 still reads
