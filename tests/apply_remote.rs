@@ -102,6 +102,10 @@ mod windows_powershell {
                 .env("TEMP", self.sb.path("temp"))
                 .env("TMP", self.sb.path("temp"))
                 .env(
+                    "PSModulePath",
+                    format!(r"{root}\System32\WindowsPowerShell\v1.0\Modules"),
+                )
+                .env(
                     "PATH",
                     format!(r"{root}\System32;{root}\System32\WindowsPowerShell\v1.0"),
                 )
@@ -123,6 +127,13 @@ mod windows_powershell {
         }
     }
 
+    /// Compare Windows paths loosely: no `\\?\` prefix, `/` as `\`, any case.
+    fn norm(p: &str) -> String {
+        let p = p.trim().replace('/', "\\");
+        let p = p.strip_prefix(r"\\?\").unwrap_or(&p);
+        p.to_lowercase()
+    }
+
     fn mark(out: &str, key: &str) -> Option<String> {
         out.lines()
             .filter_map(|l| l.strip_prefix(&format!("kitbag-remote:{key}=")))
@@ -139,7 +150,10 @@ mod windows_powershell {
         assert!(ok, "{out}");
         assert_eq!(mark(&out, "os").as_deref(), Some("Windows_NT"), "{out}");
         let tmp = mark(&out, "tmp").expect("a temp dir");
-        assert!(Path::new(&tmp).starts_with(w.sb.path("temp")), "{tmp}");
+        assert!(
+            norm(&tmp).starts_with(&norm(&w.sb.path("temp").to_string_lossy())),
+            "{tmp}"
+        );
         assert!(
             Path::new(&tmp)
                 .file_name()
@@ -309,7 +323,18 @@ mod windows_powershell {
             }
             let (ok, out, tmp) = download(&w, &rel);
             assert!(!ok, "{bad:?}: {out}");
-            assert!(mark(&out, "error").is_some(), "{bad:?}: {out}");
+            let err = mark(&out, "error").unwrap_or_default();
+            assert!(!err.contains("Get-FileHash is required"), "{bad:?}: {out}");
+            let want = match bad {
+                None => "checksum download failed",
+                Some(_) => "does not hold a SHA-256 checksum",
+            };
+            let want = if bad.is_some_and(|b| b.starts_with("0000")) {
+                "checksum mismatch"
+            } else {
+                want
+            };
+            assert!(err.contains(want), "{bad:?}: {out}");
             assert!(!tmp.join(r"download\unpacked").exists(), "{bad:?}");
             assert!(!tmp.join(r"bin\kitbag.exe").exists(), "{bad:?}");
             assert!(!w.sb.path("lad").join("kitbag").exists(), "{bad:?}: kept");

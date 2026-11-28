@@ -617,7 +617,7 @@ $arch = switch ($a) { 'X64' { 'x86_64' } 'AMD64' { 'x86_64' } 'Arm64' { 'aarch64
 if (-not $arch) { Die "unsupported CPU architecture on this host: $a" }
 if ($arch -eq 'aarch64') { $archive = @ZIP_ARM@; $checksum = @SUM_ARM@ } else { $archive = @ZIP_X64@; $checksum = @SUM_X64@ }
 if (-not $local -and -not $base.StartsWith('https://')) { Die "not downloading from a non-HTTPS address: $base" }
-if (-not (Get-Command Get-FileHash -ErrorAction SilentlyContinue)) { Die 'Get-FileHash is required on this host to verify the download (PowerShell 4 or later)' }
+try { Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue } catch { }
 $dl = Join-Path $tmp 'download'
 $binDir = Join-Path $tmp 'bin'
 New-Item -ItemType Directory -Force -Path $dl | Out-Null
@@ -635,7 +635,8 @@ try { Fetch $archive $zip } catch { Die "download failed: $base/$archive (is $ve
 try { Fetch $checksum $sum } catch { Die "checksum download failed: $base/$checksum" }
 $expected = "$(Get-Content -LiteralPath $sum -Raw)".Trim().Split(' ')[0].ToLowerInvariant()
 if ($expected -cnotmatch '^[0-9a-f]{64}$') { Die "$checksum does not hold a SHA-256 checksum" }
-$actual = "$((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash)".ToLowerInvariant()
+$actual = ''
+try { $actual = "$((Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $zip -Algorithm SHA256 -ErrorAction Stop).Hash)".ToLowerInvariant() } catch { Die 'Get-FileHash is required on this host to verify the download (PowerShell 4 or later)' }
 if ($actual -cnotmatch '^[0-9a-f]{64}$') { Die "could not compute the SHA-256 of $archive" }
 if ($expected -cne $actual) { Die "checksum mismatch for $archive (expected $expected, got $actual); nothing was run" }
 $unpacked = Join-Path $dl 'unpacked'
