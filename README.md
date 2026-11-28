@@ -173,6 +173,11 @@ How each tool receives `${VAR}` references:
 | Continue | `${{ secrets.VAR }}` in `args` and `env`, Continue's own syntax, which it fills from its locally stored secrets (kitbag never reads or writes them); `command`, `cwd`, `url` and headers have no documented syntax, so a reference there is resolved at apply time (file written 0600; `--secrets never` keeps the placeholder); SSE servers get `type: sse`, other remote ones `type: streamable-http` | no, in `args` and `env`; yes elsewhere, unless `--secrets never` |
 | Grok Build | `${VAR}` / `${VAR:-default}` (expanded by Grok Build); an `Authorization: Bearer ${VAR}` header is written as `bearer_token_env_var = "VAR"` and read back the same way; SSE servers get `type = "sse"`, and capture reads a server named in `disabled_mcp_servers` as disabled | no |
 
+A resolved value comes from your environment, or, with `apply --secrets-from`, from the
+encrypted bundle for the variables it holds (see item 6 of
+[Secrets: the security model](#secrets-the-security-model)); the rows that read references
+never get a value from the bundle.
+
 ## The profile format
 
 A profile is a directory you can read, diff and review in a pull request:
@@ -1650,7 +1655,8 @@ after the plugin directory is gone.
    `env_http_headers`, which read from the environment at runtime.
 4. **Resolution is a last resort, and visible.** Some values have nowhere to go but the file,
    such as anything for Claude Desktop, or a Codex env var whose name differs from its source.
-   kitbag resolves those from your environment at apply time and warns per field. The value is
+   kitbag resolves those from your environment at apply time (or from the bundle of
+   `--secrets-from`, item 6) and warns per field. The value is
    masked as `••••••••` in every diff. Diffs also mask what already looks like a credential
    in your existing files: known token formats, private keys that span several lines,
    passwords in URLs, `Bearer …`, JSON and TOML values (double- or single-quoted) under a
@@ -1709,10 +1715,28 @@ after the plugin directory is gone.
      `--include secrets` replaces it; a bare re-capture leaves it as it is.
    - **Memory only.** Values are in memory only while a bundle is sealed or opened (zeroed on
      drop, and printed as `<redacted>` by every `Debug`). `apply --secrets-from PATH` decrypts
-     the bundle to check it and to say which of the profile's variables it holds; **no value is
-     written into any tool's config file, the plan, the diff, a log, or the undo record.** Tools
-     keep getting `${VAR}` references, as before, and you set the variables in your environment.
-     `--secrets-from` is a local file only: it is refused for a git source (a profile you didn't
+     the bundle and says which of the profile's variables it holds. Tools that read env
+     references keep getting `${VAR}` references (in their own syntax), never a value from the
+     bundle, and you set those variables in your environment. **Only where a value already has
+     to be written because the tool can't read env references** (the "resolved value" rows of
+     the table under [Targets](#targets): Claude Desktop, Antigravity, Zed, Cline,
+     the Codex fields it can't read from the environment, and Continue's `command`, `cwd`,
+     `url` and headers) does a variable the bundle holds take its value from the bundle; one it
+     doesn't hold comes from your environment as before. Each such field is named in a warning
+     and masked in the diff, the file is written `0600` on Unix, and `--secrets never` still
+     keeps the placeholder. No value goes into the plan, the diff, the output, a log, or the
+     state directory.
+   - **The undo rule for those files.** A backup is only ever of what a file held *before* the
+     apply. If it held no bundle value then, it is backed up as usual, and `kitbag undo` puts
+     that content back (without the value). If it already holds one (a re-apply), it is written
+     **outside the undo record**: no backup and no entry, like the MCP OAuth token store, the
+     plan says so, and `kitbag undo` leaves that file as it is (re-apply, or edit it by hand).
+     kitbag remembers such files by path only (`bundle-files.json` in the state directory), so
+     a later apply without `--secrets-from` or with `--secrets never` doesn't back one up either;
+     a path is forgotten when undo puts back its content from before the value, or when kitbag
+     removes the file. The undo record keeps only a SHA-256 of each file as written, never its
+     content.
+   - `--secrets-from` is a local file only: it is refused for a git source (a profile you didn't
      write could name any variable) and with `--remote` (nothing is sent to the host).
    - **`kitbag secrets list [FILE|DIR]`** prints variable names and capture locations, and any
      MCP OAuth token store by tool and path, never values.
@@ -1737,10 +1761,8 @@ after the plugin directory is gone.
      (`secrets.json`, `secrets.toml`, `secrets.decrypted`, `.env` ...), when `secrets.age` isn't an
      age file, or when `kitbag.toml` itself holds a literal secret, and warns when a git
      repository doesn't ignore `secrets.age`.
-   - **Left as follow-ups, so #9 can close:** resolving bundle
-     values into tools that can't read env vars without the value reaching the undo record
-     (#137), committing the encrypted file (#138), and opening a bundle on a `--remote` host
-     (#139). An OS keychain or helper is a dated skip (2026-11-27): official docs name none
+   - **Left as follow-ups, so #9 can close:** committing the encrypted file (#138), and
+     opening a bundle on a `--remote` host (#139). An OS keychain or helper is a dated skip (2026-11-27): official docs name none
      kitbag should write. Gemini CLI's MCP OAuth token file is carried (#18, see
      [MCP OAuth tokens in the secrets bundle](#mcp-oauth-tokens-in-the-secrets-bundle)); other
      tools' tokens are not.
