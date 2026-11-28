@@ -94,6 +94,11 @@ pub struct Env {
     /// Keep the values capture redacts, for the encrypted bundle
     /// (`capture --include secrets`). They stay in memory, on the redactions.
     pub include_secrets: bool,
+    /// Values from the encrypted bundle of `apply --secrets-from`, by
+    /// variable name, in memory only. Used before [`Env::vars`] only where a
+    /// value has to be written because the tool can't read env references
+    /// (see [`common::Resolver`]); tools that read references never get them.
+    pub bundle: std::collections::BTreeMap<String, crate::bundle::Secret>,
 }
 
 impl Env {

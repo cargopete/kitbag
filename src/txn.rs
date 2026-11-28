@@ -118,6 +118,14 @@ pub struct WriteOptions {
     /// write elsewhere. Paths outside it (the profile files `sync --from`
     /// updates) are not project writes and aren't checked.
     pub confine_to: Option<(PathBuf, PathBuf)>,
+    /// Files written but kept out of the undo record: no backup and no entry,
+    /// because what they hold now has a value from the secrets bundle in it
+    /// (see [`Store::bundle_files`]). `kitbag undo` leaves them as they are.
+    /// Files kitbag already wrote a bundle value into are added to these.
+    pub unrecorded: std::collections::BTreeSet<PathBuf>,
+    /// Files this write leaves holding a value from the secrets bundle,
+    /// remembered by path (never by content) in [`Store::bundle_files`].
+    pub holds_bundle: std::collections::BTreeSet<PathBuf>,
 }
 
 /// Why writing `path`, if it is in the project `(base, root)`, would land
@@ -322,6 +330,16 @@ fn moved(e: &Entry, roots: &[PathBuf]) -> Option<String> {
 }
 
 /// `mkdir -p` that records which directories it created.
+/// Remove `path`; one that is already gone is fine.
+fn remove_if_present(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+            Err(e).with_context(|| format!("removing {}", path.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn mkdirp(dir: &Path, created: &mut Vec<PathBuf>) -> Result<()> {
     let mut missing = Vec::new();
     let mut d = dir;
@@ -388,6 +406,40 @@ impl Store {
         self.save(&tx)
     }
 
+    fn bundle_files_path(&self) -> PathBuf {
+        self.dir.join("bundle-files.json")
+    }
+
+    /// Files kitbag wrote a value from the secrets bundle into (`apply
+    /// --secrets-from`), by path only. A later write to one is kept out of
+    /// the undo record, since a backup of what it holds then would put the
+    /// value in the state directory. A path is forgotten when undo puts back
+    /// what it held before the value was written, or when kitbag removes it.
+    pub fn bundle_files(&self) -> Result<std::collections::BTreeSet<PathBuf>> {
+        match fs::read_to_string(self.bundle_files_path()) {
+            Ok(text) => Ok(serde_json::from_str(&text).unwrap_or_default()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Default::default()),
+            Err(e) => {
+                Err(e).with_context(|| format!("reading {}", self.bundle_files_path().display()))
+            }
+        }
+    }
+
+    fn save_bundle_files(&self, files: &std::collections::BTreeSet<PathBuf>) -> Result<()> {
+        let path = self.bundle_files_path();
+        if files.is_empty() {
+            return match fs::remove_file(&path) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                    Err(e).with_context(|| format!("removing {}", path.display()))
+                }
+                _ => Ok(()),
+            };
+        }
+        Self::create_private_dir(&self.dir)?;
+        let json = serde_json::to_string_pretty(files)? + "\n";
+        write_atomic(&path, json.as_bytes(), Some(0o600))
+    }
+
     fn create_private_dir(path: &Path) -> Result<()> {
         fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
         #[cfg(unix)]
@@ -412,7 +464,7 @@ impl Store {
     /// [`Store::commit`], recording the git source and commit applied.
     pub fn commit_from(
         &self,
-        changes: &[FileChange],
+        all_changes: &[FileChange],
         description: &str,
         targets: &[String],
         opts: &WriteOptions,
@@ -448,13 +500,27 @@ impl Store {
 
         // 0. Every write still lands where the plan said (project confinement).
         if let Some(root) = &opts.confine_to
-            && let Some(why) = changes.iter().find_map(|c| escapes(&c.path, root))
+            && let Some(why) = all_changes.iter().find_map(|c| escapes(&c.path, root))
         {
             let _ = fs::remove_dir_all(self.tx_dir(&tx.id));
             bail!("{why}; nothing was written");
         }
+        // Files that hold a bundle value now get no backup and no entry.
+        let mut marked = self.bundle_files()?;
+        let (unrecorded, changes): (Vec<&FileChange>, Vec<&FileChange>) = all_changes
+            .iter()
+            .partition(|c| opts.unrecorded.contains(&c.path) || marked.contains(&c.path));
         // 1. Snapshot everything first, and make sure nothing changed since planning.
-        if let Err(e) = self.snapshot(&mut tx, changes) {
+        let checked = unrecorded.iter().try_for_each(|c| {
+            if read_opt(&c.path)? != c.before {
+                bail!(
+                    "{} changed on disk since the plan was made; re-run to get a fresh plan",
+                    c.path.display()
+                );
+            }
+            Ok(())
+        });
+        if let Err(e) = checked.and_then(|()| self.snapshot(&mut tx, &changes)) {
             let _ = fs::remove_dir_all(self.tx_dir(&tx.id));
             return Err(e);
         }
@@ -462,6 +528,7 @@ impl Store {
 
         // 2. Write.
         let mut done = 0;
+        let mut done_unrecorded = 0;
         let result: Result<()> = (|| {
             for (i, c) in changes.iter().enumerate() {
                 if let Some(root) = &opts.confine_to
@@ -501,9 +568,42 @@ impl Store {
                 tx.entries[i].real_parent = c.path.parent().and_then(|p| real_location(p).ok());
                 done = i + 1;
             }
+            // Then the files kept out of the record, put back from memory
+            // (never from the state directory) if something fails.
+            for c in &unrecorded {
+                if let Some(root) = &opts.confine_to
+                    && let Some(why) = escapes(&c.path, root)
+                {
+                    bail!("{why}");
+                }
+                match &c.after {
+                    None => remove_if_present(&c.path)?,
+                    Some(content) => {
+                        let parent = c.path.parent().context("path has no parent")?;
+                        let known = tx.created_dirs.len();
+                        mkdirp(parent, &mut tx.created_dirs)?;
+                        if tx.created_dirs.len() > known {
+                            self.save(&tx)?;
+                        }
+                        let mode = if opts.private.contains(&c.path) {
+                            Some(0o600)
+                        } else {
+                            file_mode(&c.path)
+                        };
+                        write_atomic(&c.path, content, mode)?;
+                    }
+                }
+                done_unrecorded += 1;
+            }
             Ok(())
         })();
         if let Err(e) = result {
+            for c in unrecorded[..done_unrecorded].iter().rev() {
+                let _ = match &c.before {
+                    Some(old) => write_atomic(&c.path, old, file_mode(&c.path)),
+                    None => remove_if_present(&c.path),
+                };
+            }
             let entries: Vec<Entry> = tx.entries[..done].to_vec();
             let _ = self
                 .read_backups(&tx, &entries)
@@ -514,10 +614,20 @@ impl Store {
         }
         tx.status = Status::Applied;
         self.save(&tx)?;
+        let before = marked.clone();
+        for c in all_changes {
+            if c.after.is_none() {
+                marked.remove(&c.path);
+            }
+        }
+        marked.extend(opts.holds_bundle.iter().cloned());
+        if marked != before {
+            self.save_bundle_files(&marked)?;
+        }
         Ok(tx)
     }
 
-    fn snapshot(&self, tx: &mut Transaction, changes: &[FileChange]) -> Result<()> {
+    fn snapshot(&self, tx: &mut Transaction, changes: &[&FileChange]) -> Result<()> {
         for (n, c) in changes.iter().enumerate() {
             let cur = read_opt(&c.path)?;
             if cur != c.before {
@@ -826,6 +936,16 @@ impl Store {
         self.restore(&tx, &entries, &backups, &kept)?;
         tx.status = Status::Undone;
         self.save(&tx)?;
+        // A file this transaction backed up held no bundle value then, so
+        // with that content back it holds none now.
+        let mut marked = self.bundle_files()?;
+        let before = marked.len();
+        for e in &entries {
+            marked.remove(&e.path);
+        }
+        if marked.len() != before {
+            self.save_bundle_files(&marked)?;
+        }
         Ok(Undone {
             tx,
             interrupted,
@@ -1365,6 +1485,58 @@ mod tests {
         assert_eq!(p("apply ./x -> codex (project ~)"), Some(home.into()));
         assert_eq!(p("apply ./x -> codex (user scope)"), None);
         assert_eq!(p("apply ./x -> codex (project rel/dir)"), None);
+    }
+
+    #[test]
+    fn unrecorded_files_get_no_backup_and_are_remembered_by_path() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path().join("state"));
+        let held = root.path().join("held.json");
+        let plain = root.path().join("plain.json");
+        fs::write(&held, "{\"v\":\"fake-old-bundle-value\"}").unwrap();
+        fs::write(&plain, "{}").unwrap();
+        let opts = WriteOptions {
+            unrecorded: [held.clone()].into_iter().collect(),
+            holds_bundle: [held.clone()].into_iter().collect(),
+            ..WriteOptions::default()
+        };
+        let tx = store
+            .commit(
+                &[
+                    change(&held, Some("{\"v\":\"fake-new-bundle-value\"}")),
+                    change(&plain, Some("{\"x\":1}")),
+                ],
+                "test",
+                &["t".into()],
+                &opts,
+            )
+            .unwrap();
+        assert_eq!(tx.entries.len(), 1);
+        assert_eq!(tx.entries[0].path, plain);
+        let state = fs::read_dir(store.tx_dir(&tx.id))
+            .unwrap()
+            .map(|e| fs::read_to_string(e.unwrap().path()).unwrap())
+            .collect::<String>();
+        assert!(!state.contains("fake-old-bundle-value"));
+        assert!(!state.contains("fake-new-bundle-value"));
+        assert!(store.bundle_files().unwrap().contains(&held));
+
+        // A later write without the option is kept out too, by path.
+        let tx2 = store
+            .commit(
+                &[change(&held, Some("{}"))],
+                "again",
+                &["t".into()],
+                &WriteOptions::default(),
+            )
+            .unwrap();
+        assert!(tx2.entries.is_empty());
+        assert_eq!(fs::read_to_string(&held).unwrap(), "{}");
+        // Undo leaves it as it is.
+        store.undo(None, false).unwrap();
+        store.undo(None, false).unwrap();
+        assert_eq!(fs::read_to_string(&held).unwrap(), "{}");
+        assert_eq!(fs::read_to_string(&plain).unwrap(), "{}");
     }
 
     #[cfg(unix)]

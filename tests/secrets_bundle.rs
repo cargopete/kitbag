@@ -1,7 +1,9 @@
 //! The opt-in encrypted secrets bundle (#9, first slice): `capture --include
 //! secrets` writes the redacted values only to `secrets.age`; `apply
 //! --secrets-from` and `secrets list` open it in memory and show names only;
-//! `secrets set` and `secrets rotate` (#136) rewrite it, still encrypted.
+//! `secrets set` and `secrets rotate` (#136) rewrite it, still encrypted;
+//! apply fills only the tools that can't read env vars from it, never
+//! reaching the undo record (#137).
 //! Every secret and passphrase here is a made-up one; the tests look for each
 //! in every place a leak could land: the profile directory, the state
 //! (undo) directory, the tools' config files, and stdout and stderr.
@@ -271,7 +273,7 @@ fn secrets_list_shows_names_and_never_values() {
 }
 
 #[test]
-fn apply_with_secrets_from_checks_the_bundle_and_writes_no_value_anywhere() {
+fn apply_with_secrets_from_gives_tools_that_read_env_vars_references_only() {
     let sb = Sandbox::empty();
     let pass = source_setup(&sb);
     capture_with_bundle(&sb, &pass);
@@ -296,7 +298,7 @@ fn apply_with_secrets_from_checks_the_bundle_and_writes_no_value_anywhere() {
             .assert()
             .success()
             .stdout(contains("holds 3 variable(s)"))
-            .stdout(contains("no value was written"))
+            .stdout(contains("decrypted in memory only"))
             .get_output()
             .clone();
         outputs.push(out);
@@ -1311,4 +1313,271 @@ fn a_refused_or_failed_rotate_leaves_the_bundle_as_it_was() {
     assert!(!sb.path("missing.age").exists());
     assert!(!sb.state().exists() || bytes_under(&sb.state()).is_empty());
     assert_same_contents(&bundle::open(&raw, &unlock_pass(PASS)).unwrap());
+}
+
+// ---------------------------------------------------------------------------
+// #137: bundle values resolved into the tools that can't read env vars.
+
+const RESOLVE_VALUE: &str = "fake-bundle-resolved-value-3333";
+const RESOLVE_VALUE_2: &str = "fake-bundle-rotated-value-4444";
+const ENV_SHADOW: &str = "fake-env-shadowed-value-5555";
+const ENV_ONLY: &str = "fake-env-only-value-6666";
+
+/// Every fake that must never reach the plan, the output, the state
+/// directory or the profile directory as plaintext.
+fn resolve_fakes() -> Vec<&'static str> {
+    vec![RESOLVE_VALUE, RESOLVE_VALUE_2, PASS]
+}
+
+/// A hand-written profile whose local server needs `GITHUB_TOKEN` (in the
+/// bundle, and also set in the environment to another value),
+/// `ONLY_IN_ENV` (environment only) and `NOT_ANYWHERE` (neither), with a
+/// bundle made by `secrets set`. Returns the passphrase file.
+fn resolve_setup(sb: &Sandbox, args: &str) -> PathBuf {
+    write_resolve_profile(sb, args);
+    write(sb, "pass.txt", &format!("{PASS}\n"));
+    write(sb, "value.txt", &format!("{RESOLVE_VALUE}\n"));
+    sb.cli()
+        .args(["secrets", "set", "GITHUB_TOKEN"])
+        .arg(sb.path("prof"))
+        .arg("--value-file")
+        .arg(sb.path("value.txt"))
+        .arg("--secrets-passphrase-file")
+        .arg(sb.path("pass.txt"))
+        .assert()
+        .success();
+    fs::remove_file(sb.path("value.txt")).unwrap();
+    sb.path("pass.txt")
+}
+
+fn write_resolve_profile(sb: &Sandbox, args: &str) {
+    write(
+        sb,
+        "prof/kitbag.toml",
+        &format!(
+            "kitbag = 1\nname = \"res\"\n\n[mcp_servers.github]\ncommand = \"npx\"\nargs = [{args}]\nenv = {{ GITHUB_TOKEN = \"${{GITHUB_TOKEN}}\", OTHER = \"${{ONLY_IN_ENV}}\", MISSING = \"${{NOT_ANYWHERE}}\" }}\n"
+        ),
+    );
+}
+
+/// `kitbag apply` of the sandbox's `prof` with the environment variables of
+/// [`resolve_setup`] set.
+fn apply_res(sb: &Sandbox, to: &str, pass: Option<&Path>, extra: &[&str]) -> std::process::Output {
+    let mut c = sb.cli();
+    c.env("GITHUB_TOKEN", ENV_SHADOW)
+        .env("ONLY_IN_ENV", ENV_ONLY)
+        .arg("apply")
+        .arg(sb.path("prof"))
+        .args(["--to", to]);
+    if let Some(p) = pass {
+        c.arg("--secrets-from")
+            .arg(sb.path("prof/secrets.age"))
+            .arg("--secrets-passphrase-file")
+            .arg(p);
+    }
+    c.args(extra).assert().success().get_output().clone()
+}
+
+/// The files under the home that hold `needle`, by file name.
+fn files_holding(sb: &Sandbox, needle: &str) -> Vec<String> {
+    let mut v: Vec<String> = bytes_under(&sb.home())
+        .into_iter()
+        .filter(|(_, b)| has(b, needle))
+        .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+/// The Claude Desktop config under the sandbox's home, wherever this OS keeps it.
+fn desktop_config(sb: &Sandbox) -> PathBuf {
+    bytes_under(&sb.home())
+        .into_iter()
+        .map(|(p, _)| p)
+        .find(|p| p.ends_with("claude_desktop_config.json"))
+        .expect("Claude Desktop config written")
+}
+
+#[track_caller]
+fn assert_nothing_leaked(sb: &Sandbox, outs: &[&std::process::Output]) {
+    for out in outs {
+        assert_silent(out, &resolve_fakes());
+    }
+    assert_absent_under(&sb.state(), &resolve_fakes());
+    // The profile directory, `secrets.age` included: only its ciphertext.
+    assert_absent_under(&sb.path("prof"), &resolve_fakes());
+    assert!(bundle::looks_like_age(
+        &fs::read(sb.path("prof/secrets.age")).unwrap()
+    ));
+}
+
+#[test]
+fn bundle_values_go_only_into_the_tools_that_cant_read_env_vars() {
+    let sb = Sandbox::empty();
+    let pass = resolve_setup(&sb, "\"-y\", \"server-github\"");
+    let targets = "claude-desktop,zed,claude-code,cursor,gemini-cli,codex";
+
+    // The plan and its diff name the variables and mask the value.
+    let dry = apply_res(&sb, targets, Some(&pass), &["--dry-run"]);
+    let stdout = String::from_utf8_lossy(&dry.stdout).into_owned();
+    assert!(
+        stdout.contains("resolved from the secrets bundle"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("••••"),
+        "the diff masks the value: {stdout}"
+    );
+    assert!(stdout.contains("NOT_ANYWHERE"), "{stdout}");
+    assert!(
+        !sb.home().join(".claude.json").exists(),
+        "dry run wrote nothing"
+    );
+
+    let out = apply_res(&sb, targets, Some(&pass), &["--yes"]);
+    assert_nothing_leaked(&sb, &[&dry, &out]);
+    assert!(!has(&out.stdout, ENV_SHADOW) && !has(&out.stdout, ENV_ONLY));
+
+    // Only the two tools without interpolation hold the bundle's value: it
+    // wins over the environment's, which goes nowhere.
+    assert_eq!(
+        files_holding(&sb, RESOLVE_VALUE),
+        vec!["claude_desktop_config.json", "settings.json"]
+    );
+    assert!(files_holding(&sb, ENV_SHADOW).is_empty());
+    // A variable the bundle lacks still comes from the environment there
+    // (and in Codex, whose `env` can't forward a differently named one),
+    // and one set nowhere stays a placeholder.
+    assert_eq!(
+        files_holding(&sb, ENV_ONLY),
+        vec!["claude_desktop_config.json", "config.toml", "settings.json"]
+    );
+    let desktop = fs::read_to_string(desktop_config(&sb)).unwrap();
+    assert!(desktop.contains("${NOT_ANYWHERE}"), "{desktop}");
+    assert_private(&desktop_config(&sb));
+    let zed = bytes_under(&sb.home())
+        .into_iter()
+        .find(|(p, b)| p.ends_with("settings.json") && has(b, RESOLVE_VALUE))
+        .unwrap()
+        .0;
+    assert_private(&zed);
+
+    // Tools that read env references keep getting them.
+    let claude = sb.read("home/.claude.json");
+    assert!(claude.contains("${GITHUB_TOKEN}"), "{claude}");
+    let cursor = sb.read("home/.cursor/mcp.json");
+    assert!(cursor.contains("${env:GITHUB_TOKEN}"), "{cursor}");
+    let gemini = sb.read("home/.gemini/settings.json");
+    assert!(gemini.contains("${GITHUB_TOKEN}"), "{gemini}");
+    let codex = sb.read("home/.codex/config.toml");
+    assert!(codex.contains("GITHUB_TOKEN"), "{codex}");
+
+    // `kitbag diff` never opens the bundle: nothing to show, and no value.
+    let diff = sb
+        .cli()
+        .args(["diff"])
+        .arg(sb.path("prof"))
+        .args(["--to", targets])
+        .assert()
+        .get_output()
+        .clone();
+    assert_nothing_leaked(&sb, &[&diff]);
+}
+
+#[test]
+fn secrets_never_with_a_bundle_writes_no_value() {
+    let sb = Sandbox::empty();
+    let pass = resolve_setup(&sb, "\"-y\", \"server-github\"");
+    let out = apply_res(
+        &sb,
+        "claude-desktop,zed",
+        Some(&pass),
+        &["--yes", "--secrets", "never"],
+    );
+    assert_nothing_leaked(&sb, &[&out]);
+    assert!(files_holding(&sb, RESOLVE_VALUE).is_empty());
+    assert!(files_holding(&sb, ENV_ONLY).is_empty());
+    let desktop = fs::read_to_string(desktop_config(&sb)).unwrap();
+    assert!(desktop.contains("${GITHUB_TOKEN}"), "{desktop}");
+}
+
+#[test]
+fn a_file_holding_a_bundle_value_is_never_backed_up() {
+    let sb = Sandbox::empty();
+    let pass = resolve_setup(&sb, "\"-y\", \"server-github\"");
+    let to = "claude-desktop";
+
+    // 0. Without the bundle, with placeholders: nothing secret yet.
+    apply_res(&sb, to, None, &["--yes", "--secrets", "never"]);
+    let clean = fs::read(desktop_config(&sb)).unwrap();
+    assert!(!has(&clean, RESOLVE_VALUE));
+
+    // 1. With the bundle: the file held no value, so its backup (those old
+    // bytes) is kept and undo puts it back.
+    let first = apply_res(&sb, to, Some(&pass), &["--yes"]);
+    assert!(has(
+        &first.stdout,
+        "its backup keeps only what it holds now"
+    ));
+    assert!(has(&fs::read(desktop_config(&sb)).unwrap(), RESOLVE_VALUE));
+    assert_nothing_leaked(&sb, &[&first]);
+    let undo = sb
+        .cli()
+        .args(["undo"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    assert_nothing_leaked(&sb, &[&undo]);
+    assert_eq!(fs::read(desktop_config(&sb)).unwrap(), clean);
+    assert!(
+        !sb.state().join("bundle-files.json").exists(),
+        "undo forgot the file"
+    );
+
+    // 2. Apply again, then change the profile: the file now holds the value,
+    // so the next write keeps it out of the undo record.
+    apply_res(&sb, to, Some(&pass), &["--yes"]);
+    write_resolve_profile(&sb, "\"-y\", \"server-github\", \"--changed\"");
+    let second = apply_res(&sb, to, Some(&pass), &["--yes"]);
+    let stdout = String::from_utf8_lossy(&second.stdout).into_owned();
+    assert!(stdout.contains("left out of the undo record"), "{stdout}");
+    assert!(stdout.contains("not in the undo record"), "{stdout}");
+    assert_nothing_leaked(&sb, &[&second]);
+    let held = fs::read(desktop_config(&sb)).unwrap();
+    assert!(has(&held, "--changed") && has(&held, RESOLVE_VALUE));
+
+    // 3. Without the bundle too (kitbag remembers the path, not the value),
+    // and with another value in the bundle after `secrets set`.
+    write_resolve_profile(&sb, "\"-y\", \"server-github\", \"--third\"");
+    let third = apply_res(&sb, to, None, &["--yes", "--secrets", "never"]);
+    assert!(has(&third.stdout, "left out of the undo record"));
+    assert_nothing_leaked(&sb, &[&third]);
+    write(&sb, "value.txt", &format!("{RESOLVE_VALUE_2}\n"));
+    sb.cli()
+        .args(["secrets", "set", "GITHUB_TOKEN"])
+        .arg(sb.path("prof"))
+        .arg("--value-file")
+        .arg(sb.path("value.txt"))
+        .arg("--secrets-passphrase-file")
+        .arg(&pass)
+        .assert()
+        .success();
+    fs::remove_file(sb.path("value.txt")).unwrap();
+    let fourth = apply_res(&sb, to, Some(&pass), &["--yes"]);
+    assert_nothing_leaked(&sb, &[&fourth]);
+    let now = fs::read(desktop_config(&sb)).unwrap();
+    assert!(has(&now, RESOLVE_VALUE_2));
+
+    // Undo leaves a file it holds no backup of as it is.
+    let undo = sb
+        .cli()
+        .args(["undo"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    assert_nothing_leaked(&sb, &[&undo]);
+    assert_eq!(fs::read(desktop_config(&sb)).unwrap(), now);
+    assert!(sb.state().join("bundle-files.json").exists());
 }

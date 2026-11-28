@@ -1,6 +1,6 @@
 //! Building blocks shared by adapters.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
@@ -608,6 +608,8 @@ pub struct Resolver<'a> {
     env: &'a Env,
     mode: SecretsMode,
     resolved: Vec<String>,
+    /// Locations written with a value from the secrets bundle.
+    bundled: Vec<String>,
     /// Locations written with a `${VAR:-fallback}` because VAR was unset.
     defaulted: Vec<String>,
     missing: Vec<String>,
@@ -620,6 +622,7 @@ impl<'a> Resolver<'a> {
             env,
             mode: opts.secrets,
             resolved: Vec::new(),
+            bundled: Vec::new(),
             defaulted: Vec::new(),
             missing: Vec::new(),
             kept: Vec::new(),
@@ -636,16 +639,46 @@ impl<'a> Resolver<'a> {
             return v.to_string();
         }
         let mut probe = crate::secrets::RenderState::default();
-        let out = render_refs(v, RefStyle::Resolve, &self.env.vars, &mut probe);
+        let names = crate::secrets::refs_in(v);
+        // A value the secrets bundle holds comes before the environment's.
+        let bundled: Vec<&String> = names
+            .iter()
+            .filter(|r| self.env.bundle.contains_key(*r))
+            .collect();
+        let out = if bundled.is_empty() {
+            render_refs(v, RefStyle::Resolve, &self.env.vars, &mut probe)
+        } else {
+            // Only the names `v` uses, zeroed again once it is rendered.
+            let mut vars: HashMap<String, String> = names
+                .iter()
+                .filter_map(|n| {
+                    let value = match self.env.bundle.get(n) {
+                        Some(s) => s.expose().to_string(),
+                        None => self.env.vars.get(n)?.clone(),
+                    };
+                    Some((n.clone(), value))
+                })
+                .collect();
+            let out = render_refs(v, RefStyle::Resolve, &vars, &mut probe);
+            for value in vars.values_mut() {
+                zeroize::Zeroize::zeroize(value);
+            }
+            out
+        };
         work.render.resolved.extend(probe.resolved);
         work.render.missing.extend(probe.missing.iter().cloned());
-        let from_env = crate::secrets::refs_in(v)
+        let from_env = names
             .iter()
-            .any(|r| self.env.vars.contains_key(r));
+            .any(|r| !self.env.bundle.contains_key(r) && self.env.vars.contains_key(r));
         if !probe.missing.is_empty() {
             self.missing.push(location.to_string());
-        } else if from_env {
-            self.resolved.push(location.to_string());
+        } else {
+            if !bundled.is_empty() {
+                self.bundled.push(location.to_string());
+            }
+            if from_env {
+                self.resolved.push(location.to_string());
+            }
         }
         if !probe.fallbacks.is_empty() {
             self.defaulted.push(location.to_string());
@@ -661,6 +694,15 @@ impl<'a> Resolver<'a> {
                 format!(
                     "MCP server '{server}': {} resolved from your environment and written to {file} ({tool} can't expand env references there)",
                     self.resolved.join(", ")
+                ),
+            );
+        }
+        if !self.bundled.is_empty() {
+            work.warn(
+                target,
+                format!(
+                    "MCP server '{server}': {} resolved from the secrets bundle and written to {file} ({tool} can't expand env references there)",
+                    self.bundled.join(", ")
                 ),
             );
         }

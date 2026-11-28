@@ -87,6 +87,7 @@ impl Sandbox {
             include_hooks: false,
             include_memory: false,
             include_secrets: false,
+            bundle: Default::default(),
         }
     }
 
