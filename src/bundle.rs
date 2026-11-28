@@ -611,6 +611,34 @@ pub fn ensure_gitignored(dir: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// Does a `.gitignore` line name exactly the bundle (not a wider pattern)?
+fn is_bundle_rule(line: &str) -> bool {
+    matches!(
+        line.trim(),
+        "secrets.age" | "/secrets.age" | "**/secrets.age"
+    )
+}
+
+/// `.gitignore` text without the lines that list exactly `secrets.age`, and
+/// the comment kitbag puts above its own line. Every other line stays.
+pub fn without_bundle_rule(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = String::new();
+    for (i, l) in lines.iter().enumerate() {
+        if is_bundle_rule(l) {
+            continue;
+        }
+        let kitbag_note = l.trim() == "# kitbag: the encrypted secrets bundle stays out of git"
+            && lines.get(i + 1).is_some_and(|n| is_bundle_rule(n));
+        if kitbag_note {
+            continue;
+        }
+        out.push_str(l);
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -881,5 +909,17 @@ mod tests {
         let path = write(dir.path(), &sealed).unwrap();
         let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn the_bundle_rule_is_removed_and_other_lines_stay() {
+        let text =
+            "target\n# kitbag: the encrypted secrets bundle stays out of git\nsecrets.age\n*.log\n";
+        let out = without_bundle_rule(text);
+        assert_eq!(out, "target\n*.log\n");
+        assert!(!gitignore_covers(&out));
+        assert!(gitignore_covers(&without_bundle_rule(
+            "*.age\nsecrets.age\n"
+        )));
     }
 }

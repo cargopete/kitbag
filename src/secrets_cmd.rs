@@ -142,6 +142,16 @@ pub enum SecretsCmd {
         #[arg(long, value_name = "KEY")]
         new_secrets_recipient: Vec<String>,
     },
+    /// Keep the already encrypted secrets.age in git: stop ignoring it and stage
+    /// it (never commits). Best with a bundle encrypted to age or SSH keys
+    Commit {
+        /// The bundle, or the profile directory holding secrets.age [default: .]
+        file: Option<PathBuf>,
+        /// Also allow a passphrase-encrypted bundle, which anyone who gets the
+        /// repository can attack offline. Not implied by --yes
+        #[arg(long)]
+        allow_passphrase_commit: bool,
+    },
 }
 
 /// Where a capture location is for a variable `secrets set` added.
@@ -584,4 +594,133 @@ pub struct ApplyBundle {
     /// Every variable it holds, in memory only, for the tools that can't
     /// read env references (see [`crate::adapters::Env::bundle`]).
     pub values: BTreeMap<String, bundle::Secret>,
+}
+
+/// Run git in `dir`; `None` when git can't be started.
+fn git_in(dir: &Path, args: &[&str]) -> Option<std::process::Output> {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+}
+
+/// Is `dir` inside a git work tree?
+pub fn in_git_repo(dir: &Path) -> bool {
+    git_in(dir, &["rev-parse", "--is-inside-work-tree"])
+        .is_some_and(|o| o.status.success() && o.stdout.starts_with(b"true"))
+}
+
+/// Does git track `secrets.age` in `dir`?
+pub fn bundle_is_tracked(dir: &Path) -> bool {
+    git_in(dir, &["ls-files", "--error-unmatch", "--", bundle::FILE])
+        .is_some_and(|o| o.status.success())
+}
+
+/// `kitbag secrets commit`: the opt-in way to keep the encrypted bundle in
+/// git. Un-ignores and stages `secrets.age` and `.gitignore`; never commits.
+pub fn commit(file: Option<&Path>, allow_passphrase: bool) -> Result<i32> {
+    let path = local_bundle_path(file)?;
+    if path.file_name().is_none_or(|n| n != bundle::FILE) {
+        bail!("only a profile's {} can be kept in git", bundle::FILE);
+    }
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    if !path.is_file() {
+        bail!("{} does not exist", path.display());
+    }
+    let bytes = bundle::read_bundle(&path)?;
+    if !bundle::looks_like_age(&bytes) {
+        bail!(
+            "{} is not an age-encrypted file; not touching it",
+            path.display()
+        );
+    }
+    let sidecars = bundle::plaintext_secret_files(&dir);
+    if !sidecars.is_empty() {
+        bail!(
+            "{} holds what looks like a plaintext secrets file ({}); delete it first. Nothing was changed",
+            dir.display(),
+            sidecars
+                .iter()
+                .map(|s| visible_line(s))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if bundle::needs_passphrase(&bytes) {
+        eprintln!(
+            "WARNING: {} is encrypted to a PASSPHRASE. Anyone who gets a copy of the repository (a clone, a fork, a leaked backup, its history, for good) can attack that passphrase offline, with no rate limit. Encrypt it to age or SSH keys instead: kitbag secrets rotate --new-secrets-recipient KEY (recommended)",
+            visible_line(&path.display().to_string())
+        );
+        if !allow_passphrase {
+            bail!(
+                "a passphrase-encrypted bundle is not put in git without --allow-passphrase-commit; nothing was changed"
+            );
+        }
+    }
+    drop(bytes);
+
+    let ignore_path = dir.join(".gitignore");
+    let text = match std::fs::read_to_string(&ignore_path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", ignore_path.display())),
+    };
+    let repo = in_git_repo(&dir);
+    let was_ignored = bundle::gitignore_covers(&text);
+    if was_ignored {
+        let kept = bundle::without_bundle_rule(&text);
+        if bundle::gitignore_covers(&kept) {
+            bail!(
+                "{} still ignores {} through a wider pattern (such as *.age); edit it yourself, kitbag leaves other lines alone",
+                ignore_path.display(),
+                bundle::FILE
+            );
+        }
+        crate::txn::write_atomic(&ignore_path, kept.as_bytes(), None)?;
+        println!("removed {} from {}", bundle::FILE, ignore_path.display());
+    }
+    if !repo {
+        println!(
+            "{} is not in a git repository: skipped `git add`. Run `git init` there, then this again",
+            visible_line(&dir.display().to_string())
+        );
+        return Ok(0);
+    }
+    if !was_ignored && bundle_is_tracked(&dir) {
+        println!(
+            "{} is already tracked by git and .gitignore doesn't cover it: nothing to do",
+            bundle::FILE
+        );
+        return Ok(0);
+    }
+    let mut add = vec!["add", "--", bundle::FILE];
+    if ignore_path.is_file() {
+        add.push(".gitignore");
+    }
+    let Some(out) = git_in(&dir, &add) else {
+        bail!("could not run git; {} was not staged", bundle::FILE);
+    };
+    if !out.status.success() {
+        bail!(
+            "git add failed: {}",
+            visible_line(String::from_utf8_lossy(&out.stderr).trim())
+        );
+    }
+    println!("staged {} (not committed). To keep it:", bundle::FILE);
+    println!("  git commit -m \"Add encrypted secrets bundle\"");
+    if !bundle::needs_passphrase(&bundle::read_bundle(&path)?) {
+        println!(
+            "{}",
+            paint(
+                DIM,
+                "it is encrypted to keys: only a holder of a matching identity can open it"
+            )
+        );
+    }
+    Ok(0)
 }

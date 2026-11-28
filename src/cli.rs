@@ -870,6 +870,10 @@ pub fn run(cli: Cli) -> Result<i32> {
                 new_secrets_passphrase_file.as_deref(),
                 &new_secrets_recipient,
             ),
+            SecretsCmd::Commit {
+                file,
+                allow_passphrase_commit,
+            } => secrets_cmd::commit(file.as_deref(), allow_passphrase_commit),
         },
         Cmd::ListTargets { place, json } => cmd_list_targets(&context(home, Some(&place))?, json),
     }
@@ -4008,7 +4012,23 @@ fn doctor_bundle(dir: &Path, from_git: bool) -> usize {
         }
         if dir.join(".git").exists() {
             let ignore = std::fs::read_to_string(dir.join(".gitignore")).unwrap_or_default();
-            if !crate::bundle::gitignore_covers(&ignore) {
+            let tracked = crate::secrets_cmd::bundle_is_tracked(dir);
+            if tracked && crate::bundle::looks_like_age(&head[..n]) {
+                println!(
+                    "  {} {} is tracked in git (opted in with `kitbag secrets commit`)",
+                    paint(GREEN, "ok  "),
+                    crate::bundle::FILE
+                );
+                let passphrase = crate::bundle::read_bundle(&bundle_path)
+                    .is_ok_and(|b| crate::bundle::needs_passphrase(&b));
+                if passphrase {
+                    println!(
+                        "  {} the tracked {} is encrypted to a passphrase, which anyone with the repository can attack offline; encrypt it to keys instead (kitbag secrets rotate --new-secrets-recipient)",
+                        paint(YELLOW, "warn"),
+                        crate::bundle::FILE
+                    );
+                }
+            } else if !tracked && !crate::bundle::gitignore_covers(&ignore) {
                 println!(
                     "  {} {} is not in .gitignore; keep the bundle out of git",
                     paint(YELLOW, "warn"),
