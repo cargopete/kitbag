@@ -51,6 +51,18 @@ pub struct Remote {
     pub download: bool,
     /// Open a secrets bundle on the host (`--remote-secrets-*`).
     pub secrets: Option<HostSecrets>,
+    /// A project path on the host (`--remote-project`): the host's kitbag is
+    /// run with `--project` for it, so project-scope files land there.
+    pub project: Option<String>,
+}
+
+/// A path on the host given on the command line: not empty, not an option,
+/// no control characters (it is shell-quoted when sent).
+pub fn validate_host_path(flag: &str, p: &str) -> Result<()> {
+    if p.is_empty() || p.starts_with('-') || p.chars().any(|c| c.is_control()) {
+        bail!("{flag} {p:?} is not a usable path on the host");
+    }
+    Ok(())
 }
 
 /// Which bundle the host's kitbag opens.
@@ -89,9 +101,7 @@ impl HostSecrets {
             paths.push(("--remote-secrets-identity", p));
         }
         for (flag, p) in paths {
-            if p.is_empty() || p.starts_with('-') || p.chars().any(|c| c.is_control()) {
-                bail!("{flag} {p:?} is not a usable path on the host");
-            }
+            validate_host_path(flag, p)?;
         }
         Ok(())
     }
@@ -204,7 +214,7 @@ fn get<'a>(found: &'a [(String, String)], key: &str) -> Option<&'a str> {
 }
 
 /// Shell word for a path on the host (`--remote-kitbag`,
-/// `--remote-secrets-*`); `~/` means the remote home, which a quoted `~` would
+/// `--remote-project`, `--remote-secrets-*`); `~/` means the remote home, which a quoted `~` would
 /// not.
 fn path_word(p: &str) -> String {
     match p.strip_prefix("~/") {
@@ -683,6 +693,9 @@ fn run_in(
     println!(
         "Sent the profile ({files} files, no secrets resolved) to {host}; kitbag there: {bin}\n"
     );
+    if let Some(p) = &remote.project {
+        println!("Project scope: files go under {p} on {host}\n");
+    }
     if let Some(s) = &remote.secrets {
         match &s.from {
             BundleOnHost::Path(p) => println!(
@@ -701,6 +714,10 @@ fn run_in(
     let command = |extra: &[&str]| -> Vec<String> {
         let mut v = vec![sh_quote(sub), sh_quote(&dir)];
         v.extend(args.iter().map(|a| sh_quote(a)));
+        if let Some(p) = &remote.project {
+            v.push(sh_quote("--project"));
+            v.push(path_word(p));
+        }
         v.extend(secrets_words.iter().cloned());
         v.extend(extra.iter().map(|s| sh_quote(s)));
         v

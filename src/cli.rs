@@ -402,7 +402,7 @@ struct RemoteArgs {
     /// profile is copied to a temporary directory there, the kitbag there
     /// plans and applies it, and 'kitbag undo' on that host reverts it.
     /// Uses your ssh config and agent; only `${VAR}` references are sent, never
-    /// their values. Local directory profiles only; user scope; not Windows
+    /// their values. Local directory profiles only; user scope unless --remote-project; not Windows
     #[arg(long, value_name = "HOST")]
     remote: Option<String>,
     /// With --remote: path of kitbag on the host (default: kitbag on its PATH,
@@ -451,6 +451,12 @@ struct RemoteArgs {
     /// encrypted to. Never read here. Repeatable
     #[arg(long, value_name = "HOST_PATH", requires = "remote_bundle")]
     remote_secrets_identity: Vec<String>,
+    /// With --remote: apply at project scope under this path ON THE HOST (for
+    /// example the folder Remote-SSH opened, or /workspaces/<name> inside a
+    /// default devcontainer), as 'kitbag apply --project' does there. Not this
+    /// machine's --project; `~/` means the host's home
+    #[arg(long, value_name = "HOST_PATH", requires = "remote")]
+    remote_project: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -881,6 +887,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                     host,
                     kitbag: remote_kitbag,
                     download: remote_download,
+                    project: None,
                     secrets: None,
                 },
                 id.as_deref(),
@@ -1679,8 +1686,14 @@ fn cmd_remote(
     remote::validate_host(host)?;
     if t.place.scope == Some(Scope::Project) || t.place.project.is_some() {
         bail!(
-            "--remote applies at user scope only for now; --project and --scope project are not supported with it"
+            "--project and --scope project name a path on this machine and are not sent with --remote; to apply at project scope on the host, give the project's path there with --remote-project HOST_PATH"
         );
+    }
+    if let Some(p) = &r.remote_project {
+        remote::validate_host_path("--remote-project", p)?;
+        if t.place.scope == Some(Scope::User) {
+            bail!("--remote-project can't be combined with --scope user");
+        }
     }
     let (resolved, profile) = load_source(src, t.path.as_deref(), t.fetch())?;
     if resolved.remote {
@@ -1739,6 +1752,7 @@ fn cmd_remote(
         kitbag: r.remote_kitbag.clone(),
         download: r.remote_download,
         secrets,
+        project: r.remote_project.clone(),
     };
     remote::run(
         &remote,
