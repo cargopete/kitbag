@@ -134,6 +134,15 @@ mod windows_powershell {
         p.to_lowercase()
     }
 
+    /// Resolve 8.3 names and `\\?\` prefixes via the filesystem when the path
+    /// exists, then compare loosely; falls back to plain `norm`.
+    fn canon(p: &str) -> String {
+        match fs::canonicalize(p.trim()) {
+            Ok(c) => norm(&c.to_string_lossy()),
+            Err(_) => norm(p),
+        }
+    }
+
     fn mark(out: &str, key: &str) -> Option<String> {
         out.lines()
             .filter_map(|l| l.strip_prefix(&format!("kitbag-remote:{key}=")))
@@ -150,9 +159,12 @@ mod windows_powershell {
         assert!(ok, "{out}");
         assert_eq!(mark(&out, "os").as_deref(), Some("Windows_NT"), "{out}");
         let tmp = mark(&out, "tmp").expect("a temp dir");
+        let sandbox_temp = w.sb.path("temp").to_string_lossy().to_string();
         assert!(
-            norm(&tmp).starts_with(&norm(&w.sb.path("temp").to_string_lossy())),
-            "{tmp}"
+            canon(&tmp).starts_with(&canon(&sandbox_temp)),
+            "tmp {tmp} is not under sandbox temp {sandbox_temp} (canonical: {} vs {})",
+            canon(&tmp),
+            canon(&sandbox_temp)
         );
         assert!(
             Path::new(&tmp)
