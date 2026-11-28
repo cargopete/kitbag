@@ -231,6 +231,28 @@ pub struct Resolved {
     _tmp: Option<TempDir>,
 }
 
+impl Resolved {
+    /// The profile directory is a copy of a git source made elsewhere (by
+    /// `--remote`): it is untrusted like a clone, and its source and commit are
+    /// the git ones. `source` must be a git source as [`Resolved::source`]
+    /// has it, and `commit` a full hex SHA.
+    pub fn treat_as_git_copy(&mut self, source: &str, commit: &str) -> Result<()> {
+        if !matches!(commit.len(), 40 | 64) || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
+            bail!("--copy-of-commit must be a full commit SHA");
+        }
+        let plain = parse_git_source(source)?.is_some_and(|g| g.reference.is_none())
+            && strip_url_credentials(source) == source;
+        if !plain {
+            bail!("--copy-of-git must be a git URL without a ref or credentials");
+        }
+        self.remote = true;
+        self.source = source.to_string();
+        self.commit = Some(commit.to_string());
+        self.origin = format!("{source} @ {}", short_commit(commit));
+        Ok(())
+    }
+}
+
 /// How [`resolve`] may fetch a git source.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FetchOptions {

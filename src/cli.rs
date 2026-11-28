@@ -402,7 +402,7 @@ struct RemoteArgs {
     /// profile is copied to a temporary directory there, the kitbag there
     /// plans and applies it, and 'kitbag undo' on that host reverts it.
     /// Uses your ssh config and agent; only `${VAR}` references are sent, never
-    /// their values. Local directory profiles only; user scope unless --remote-project; not Windows
+    /// their values. A profile directory or git URL; user scope unless --remote-project; not Windows
     #[arg(long, value_name = "HOST")]
     remote: Option<String>,
     /// With --remote: path of kitbag on the host (default: kitbag on its PATH,
@@ -548,6 +548,14 @@ struct ApplyArgs {
         action = clap::ArgAction::Append
     )]
     allow_git_mcp: Vec<String>,
+    /// Internal, set by `--remote`: the profile directory is a copy of this git
+    /// source (URL without credentials, `//subdir` if any), so it is treated
+    /// as untrusted and the history records the URL, not the directory
+    #[arg(long, hide = true, value_name = "SOURCE", requires = "copy_of_commit")]
+    copy_of_git: Option<String>,
+    /// Internal, set by `--remote`: the commit `--copy-of-git` was cloned at
+    #[arg(long, hide = true, value_name = "SHA", requires = "copy_of_git")]
+    copy_of_commit: Option<String>,
 }
 
 impl ApplyArgs {
@@ -1696,10 +1704,9 @@ fn cmd_remote(
         }
     }
     let (resolved, profile) = load_source(src, t.path.as_deref(), t.fetch())?;
-    if resolved.remote {
+    if resolved.remote && remote_secrets(r)?.is_some() {
         bail!(
-            "--remote takes a profile directory on this machine, not a git URL: the host would \
-             treat a copy as a trusted local profile. Clone it first and pass the directory"
+            "--remote-secrets-from and --remote-include-secrets-age aren't used with a git source: a profile you didn't write could name any variable. Clone it, review it, and apply the directory"
         );
     }
     // Only references leave this machine: a literal secret in the profile
@@ -1732,6 +1739,24 @@ fn cmd_remote(
     }
     if a.apply_hooks {
         args.push("--apply-hooks".into());
+    }
+    if let (true, Some(commit)) = (resolved.remote, &resolved.commit) {
+        // The host treats its copy as the git source it is: untrusted unless
+        // the same trust flags are given, and recorded as URL and commit.
+        args.extend([
+            "--copy-of-git".to_string(),
+            resolved.source.clone(),
+            "--copy-of-commit".to_string(),
+            commit.clone(),
+        ]);
+        if a.allow_risky_settings {
+            args.push("--allow-risky-settings".into());
+        }
+        args.extend(
+            a.allow_git_mcp
+                .iter()
+                .map(|n| format!("--allow-git-mcp={n}")),
+        );
     }
     if matches!(
         flow,
@@ -1794,7 +1819,10 @@ fn cmd_apply(
     mode: Mode,
     secrets_from: Option<&FromArgs>,
 ) -> Result<i32> {
-    let (resolved, profile) = load_source(src, t.path.as_deref(), t.fetch())?;
+    let (mut resolved, profile) = load_source(src, t.path.as_deref(), t.fetch())?;
+    if let (Some(source), Some(commit)) = (&a.copy_of_git, &a.copy_of_commit) {
+        resolved.treat_as_git_copy(source, commit)?;
+    }
     let targets = select_targets(&t.to, &ctx.env, "to")?;
     // The bundle is opened in memory before planning. Its values go only
     // where a tool can't read env references, as values from the
