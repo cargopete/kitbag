@@ -17,6 +17,19 @@
 //! a `secrets.age` there (or the profile's own, copied only when it is
 //! age-encrypted) and the host's passphrase file or identity, as paths on the
 //! host. kitbag never reads those files, and only their paths go over ssh.
+//!
+//! The host may be Linux, macOS or Windows (OpenSSH Server). A first, small
+//! command ([`DETECT`]) tells them apart whatever the host's login shell is
+//! (`cmd.exe`, PowerShell or a POSIX shell). A POSIX host gets `sh -s` scripts
+//! as before. A Windows host never gets a POSIX script: every command is
+//! `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass
+//! -EncodedCommand <Base64 UTF-16LE>`, which runs the same way under any
+//! `DefaultShell` (the Base64 alphabet has nothing a shell interprets). Values
+//! go into those scripts only as PowerShell single-quoted literals
+//! ([`ps_quote`]), and the host's kitbag and `tar.exe` are started through
+//! `System.Diagnostics.Process` with a command line built here by the MSVC
+//! rules ([`win_arg`]), so neither PowerShell's own native-argument passing nor
+//! `cmd.exe` ever re-parses an argument.
 
 use std::fs;
 use std::io::Write;
@@ -106,23 +119,81 @@ impl HostSecrets {
         Ok(())
     }
 
-    /// The host kitbag's `--secrets-*` options, as shell words; `bundle` is
-    /// the copied file's path there for [`BundleOnHost::Copied`].
-    fn words(&self, copied: &str) -> Vec<String> {
+    /// The host kitbag's `--secrets-*` options; `copied` is the copied
+    /// file's path there for [`BundleOnHost::Copied`].
+    fn args(&self, copied: &str) -> Vec<Word> {
         let from = match &self.from {
-            BundleOnHost::Path(p) => path_word(p),
-            BundleOnHost::Copied => sh_quote(copied),
+            BundleOnHost::Path(p) => Word::HostPath(p.clone()),
+            BundleOnHost::Copied => Word::lit(copied),
         };
-        let mut v = vec![sh_quote("--secrets-from"), from];
+        let mut v = vec![Word::lit("--secrets-from"), from];
         if let Some(p) = &self.passphrase_file {
-            v.push(sh_quote("--secrets-passphrase-file"));
-            v.push(path_word(p));
+            v.push(Word::lit("--secrets-passphrase-file"));
+            v.push(Word::HostPath(p.clone()));
         }
         for p in &self.identities {
-            v.push(sh_quote("--secrets-identity"));
-            v.push(path_word(p));
+            v.push(Word::lit("--secrets-identity"));
+            v.push(Word::HostPath(p.clone()));
         }
         v
+    }
+
+    /// [`HostSecrets::args`] as POSIX shell words.
+    #[cfg(all(test, unix))]
+    fn words(&self, copied: &str) -> Vec<String> {
+        self.args(copied).iter().map(Word::posix).collect()
+    }
+}
+
+/// One argument for the host's kitbag, quoted for the host's shell only when
+/// the command is put together.
+#[derive(Debug, Clone)]
+enum Word {
+    /// Sent as it is.
+    Lit(String),
+    /// A path on the host given on the command line: `~/` there means the
+    /// host user's home (`$HOME`, or `%USERPROFILE%` on Windows).
+    HostPath(String),
+}
+
+impl Word {
+    fn lit(s: &str) -> Self {
+        Word::Lit(s.to_string())
+    }
+
+    /// The word for a POSIX shell.
+    fn posix(&self) -> String {
+        match self {
+            Word::Lit(s) => sh_quote(s),
+            Word::HostPath(p) => path_word(p),
+        }
+    }
+
+    /// The argument itself on a Windows host whose user profile is `home`.
+    fn windows(&self, home: &str) -> String {
+        match self {
+            Word::Lit(s) => s.clone(),
+            Word::HostPath(p) => win_host_path(p, home),
+        }
+    }
+}
+
+/// What kind of host the probe found.
+#[derive(Debug, Clone)]
+enum Side {
+    /// Linux or macOS: POSIX `sh` scripts.
+    Posix,
+    /// Windows: PowerShell, run explicitly. `home` is `%USERPROFILE%` there.
+    Windows { home: String },
+}
+
+impl Side {
+    /// `dir` and `name` joined with the host's separator.
+    fn join(&self, dir: &str, name: &str) -> String {
+        match self {
+            Side::Posix => format!("{dir}/{name}"),
+            Side::Windows { .. } => format!("{dir}\\{name}"),
+        }
     }
 }
 
@@ -175,8 +246,43 @@ fn ssh_status(host: &str, what: &str, code: Option<i32>) -> Result<i32> {
 
 /// Run `script` with `sh -s` on the host and return the lines it reported.
 fn run_script(r: &Remote, script: &str) -> Result<Vec<(String, String)>> {
+    run_remote(r, "sh -s", script.as_bytes(), "the remote setup")
+}
+
+/// Run a PowerShell `script` on a Windows host and return the lines it
+/// reported. The script goes over stdin (Base64 of its UTF-8, read by
+/// [`PS_STDIN`]), as the probe and download are too long for `cmd.exe`'s
+/// command line.
+fn run_ps_script(r: &Remote, script: &str) -> Result<Vec<(String, String)>> {
+    let (command, payload) = ps_script_invocation(script)?;
+    run_remote(
+        r,
+        &command,
+        payload.as_bytes(),
+        "the remote setup (PowerShell)",
+    )
+}
+
+/// The ssh command and the stdin that run a long PowerShell `script` on a
+/// Windows host, as the probe and download are run.
+#[doc(hidden)]
+pub fn ps_script_invocation(script: &str) -> Result<(String, String)> {
+    let mut payload = base64(script.as_bytes());
+    payload.push('\n');
+    Ok((ps_command(PS_STDIN)?, payload))
+}
+
+/// Run `command` on the host with `input` on its stdin and return the
+/// [`MARK`] lines it printed.
+fn run_remote(
+    r: &Remote,
+    command: &str,
+    input: &[u8],
+    what: &str,
+) -> Result<Vec<(String, String)>> {
     let host = r.host.as_str();
-    let mut child = ssh(r, "sh -s")
+    let script = input;
+    let mut child = ssh(r, command)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -185,24 +291,59 @@ fn run_script(r: &Remote, script: &str) -> Result<Vec<(String, String)>> {
     {
         let mut stdin = child.stdin.take().context("no stdin for ssh")?;
         // The remote script may exit before reading all of it.
-        let _ = stdin.write_all(script.as_bytes());
+        let _ = stdin.write_all(script);
     }
     let out = child.wait_with_output()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let found: Vec<(String, String)> = text
-        .lines()
-        .filter_map(|l| l.strip_prefix(MARK))
-        .filter_map(|l| l.split_once('='))
-        .map(|(k, v)| (k.to_string(), v.trim_end().to_string()))
-        .collect();
+    let found = marks(&String::from_utf8_lossy(&out.stdout));
     if let Some((_, e)) = found.iter().find(|(k, _)| k == "error") {
         bail!("on {host}: {e}");
     }
     if !out.status.success() {
         ssh_status(host, "preparing the remote side", out.status.code())?;
-        bail!("the remote setup on {host} failed ({})", out.status);
+        bail!("{what} on {host} failed ({})", out.status);
     }
     Ok(found)
+}
+
+/// The `kitbag-remote:key=value` lines in `text` (a trailing `\r` from a
+/// Windows host dropped).
+fn marks(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|l| l.trim_start().strip_prefix(MARK))
+        .filter_map(|l| l.split_once('='))
+        .map(|(k, v)| (k.to_string(), v.trim_end().to_string()))
+        .collect()
+}
+
+/// The first command sent: prints `Windows_NT` in the reported value on a
+/// Windows host whatever its `DefaultShell`, and never on a POSIX one.
+/// `cmd.exe` expands `%OS%`; PowerShell expands `$env:OS` after the literal
+/// backslash; a POSIX shell (sh, bash, zsh, fish, csh) expands neither, as
+/// `\$` is a literal `$` there. A Windows host whose shell is Git Bash or
+/// another POSIX shell is caught by the POSIX probe's `uname` instead.
+pub const DETECT: &str = r"echo kitbag-remote:os=%OS%\$env:OS";
+
+/// Is the host Windows? Asked with [`DETECT`]; anything but an ssh failure
+/// that doesn't print `Windows_NT` means a POSIX host, as before.
+fn detect_windows(r: &Remote) -> Result<bool> {
+    let out = ssh(r, DETECT)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .output()
+        .context("could not run `ssh`; is OpenSSH installed and on your PATH?")?;
+    if !out.status.success() {
+        ssh_status(&r.host, "checking the host's OS", out.status.code())?;
+    }
+    Ok(reports_windows(&marks(&String::from_utf8_lossy(
+        &out.stdout,
+    ))))
+}
+
+fn reports_windows(found: &[(String, String)]) -> bool {
+    found
+        .iter()
+        .any(|(k, v)| k == "os" && v.contains("Windows_NT"))
 }
 
 fn get<'a>(found: &'a [(String, String)], key: &str) -> Option<&'a str> {
@@ -223,8 +364,394 @@ fn path_word(p: &str) -> String {
     }
 }
 
+// ---- Windows hosts.
+
+/// How every command on a Windows host starts: Windows PowerShell, named
+/// explicitly so the host's `DefaultShell` (`cmd.exe` unless an admin changed
+/// it) only has to start it, with no profile, no prompts and no execution
+/// policy in the way of a script given on the command line.
+pub const PS_EXE: &str = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass";
+
+/// `cmd.exe` takes at most 8191 characters on a command line.
+const MAX_WIN_COMMAND: usize = 8000;
+
+/// Where `install.ps1` and `--remote-download` keep kitbag on a Windows host,
+/// under `%LOCALAPPDATA%`.
+pub const WIN_KEEP: &str = r"kitbag\bin\kitbag.exe";
+
+/// The ssh command that runs `script` on a Windows host:
+/// `powershell.exe ... -EncodedCommand` with the script as Base64 of its
+/// UTF-16LE text.
+pub fn ps_command(script: &str) -> Result<String> {
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let c = format!("{PS_EXE} -EncodedCommand {}", base64(&utf16));
+    if c.len() > MAX_WIN_COMMAND {
+        bail!(
+            "the command for the Windows host is too long for its command line; use shorter paths or fewer options"
+        );
+    }
+    Ok(c)
+}
+
+/// Standard Base64 (with padding).
+pub fn base64(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if c.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// A PowerShell single-quoted literal: nothing in it is expanded (`$`,
+/// backticks and `$(...)` stay text). PowerShell also ends such a string at
+/// the typographic single quotes, so those are doubled like `'`.
+pub fn ps_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            out.push(c);
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
+}
+
+/// One argument on a Windows command line, quoted by the rules the MSVC
+/// runtime (and Rust's `std::env::args`) use to split it again: always in
+/// double quotes, a `"` as `\"`, and backslashes doubled only where they come
+/// before a quote.
+pub fn win_arg(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    let mut backslashes = 0;
+    for c in s.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                out.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                out.extend(std::iter::repeat_n('\\', backslashes));
+                out.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    out.extend(std::iter::repeat_n('\\', backslashes * 2));
+    out.push('"');
+    out
+}
+
+/// A Windows command line from `args`.
+fn win_command_line(args: &[String]) -> String {
+    args.iter()
+        .map(|a| win_arg(a))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A host path on a Windows host: `~/` (or `~\`) means the user's profile
+/// directory there, `home`, never a POSIX `$HOME`.
+fn win_host_path(p: &str, home: &str) -> String {
+    match p.strip_prefix("~/").or_else(|| p.strip_prefix("~\\")) {
+        Some(rest) => format!(
+            "{}\\{}",
+            home.trim_end_matches(['\\', '/']),
+            rest.replace('/', "\\")
+        ),
+        None => p.to_string(),
+    }
+}
+
+/// [`win_host_path`] as a PowerShell expression, for the probe, which runs
+/// before `home` is known.
+fn ps_path_expr(p: &str) -> String {
+    match p.strip_prefix("~/").or_else(|| p.strip_prefix("~\\")) {
+        Some(rest) => format!(
+            "(Join-Path $env:USERPROFILE {})",
+            ps_quote(&rest.replace('/', "\\"))
+        ),
+        None => ps_quote(p),
+    }
+}
+
+/// An absolute Windows path: `C:\...` or `C:/...`, no `..`, no control
+/// characters.
+fn is_win_abs(p: &str) -> bool {
+    let b = p.as_bytes();
+    b.len() >= 3
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b[2] == b'\\' || b[2] == b'/')
+        && !p.split(['\\', '/']).any(|c| c == "..")
+        && !p.chars().any(|c| c.is_control())
+}
+
+/// The release archive and checksum names for a Windows host's CPU
+/// (`x86_64` or `aarch64`), as `release.yml` publishes them and `install.ps1`
+/// fetches them.
+pub fn windows_artifacts(arch: &str) -> (String, String) {
+    (
+        format!("kitbag-{arch}-pc-windows-msvc.zip"),
+        format!("kitbag-{arch}-pc-windows-msvc.sha256"),
+    )
+}
+
+/// Runs the PowerShell script that follows it on stdin (Base64 of its UTF-8,
+/// so no console code page can garble it). A script reports a failure as a
+/// `kitbag-remote:error=` line and throws `kitbag-remote-failed`; anything
+/// else it throws is reported here.
+const PS_STDIN: &str = "# kitbag-remote:stdin
+$ErrorActionPreference = 'Stop'
+$b = [Console]::In.ReadToEnd()
+$s = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($b -replace '\\s', '')))
+try { & ([scriptblock]::Create($s)) } catch { if (\"$_\" -ne 'kitbag-remote-failed') { [Console]::Out.WriteLine('kitbag-remote:error=' + \"$_\") }; exit 1 }
+exit 0
+";
+
+/// Shared by the Windows scripts: report lines in UTF-8.
+const PS_SAY: &str = r#"try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
+function Say([string]$k, [string]$v) { [Console]::Out.WriteLine("kitbag-remote:$k=$v") }
+"#;
+
+/// Starts `$file` with the command line `$argline` (built by [`win_arg`]),
+/// not through PowerShell's own argument passing or `cmd.exe`, copies its
+/// output to ours byte for byte, gives it an empty stdin, and returns its
+/// exit code.
+const PS_NATIVE: &str = r#"function Invoke-Native([string]$file, [string]$argline) {
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $file
+  $psi.Arguments = $argline
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardInput = $true
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $p = [System.Diagnostics.Process]::Start($psi)
+  $p.StandardInput.Close()
+  $o = $p.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput())
+  $e = $p.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError())
+  $p.WaitForExit()
+  $o.Wait()
+  $e.Wait()
+  $p.ExitCode
+}
+"#;
+
+/// The Windows probe: makes `%TEMP%\kitbag-remote.XXXXXXXX` and looks for
+/// kitbag: `--remote-kitbag`, else `kitbag.exe` on PATH, else
+/// `%LOCALAPPDATA%\kitbag\bin\kitbag.exe` (install.ps1, `--remote-download`),
+/// else `%USERPROFILE%\.cargo\bin\kitbag.exe`.
+const WIN_PROBE: &str = r#"# kitbag-remote:probe
+$ErrorActionPreference = 'Stop'
+@SAY@if (-not $env:USERPROFILE -or -not $env:LOCALAPPDATA) { Say 'error' 'USERPROFILE or LOCALAPPDATA is not set on this host'; throw 'kitbag-remote-failed' }
+$explicit = @EXPLICIT@
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ('kitbag-remote.' + [IO.Path]::GetRandomFileName().Replace('.', ''))
+New-Item -ItemType Directory -Path $tmp | Out-Null
+Say 'os' 'Windows_NT'
+Say 'tmp' $tmp
+Say 'home' $env:USERPROFILE
+function Bail([string]$m) { Say 'error' $m; Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue; throw 'kitbag-remote-failed' }
+function Find([string]$c) {
+  if ($c.IndexOfAny([char[]]'\/:') -ge 0) {
+    if (Test-Path -LiteralPath $c -PathType Leaf) { return (Get-Item -LiteralPath $c).FullName }
+    return ''
+  }
+  $a = Get-Command -Name $c -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($a) { return $a.Path }
+  return ''
+}
+$bin = ''
+if ($explicit) {
+  $bin = Find $explicit
+  if (-not $bin) { Bail "--remote-kitbag $explicit is not an executable file on this host" }
+} else {
+  foreach ($c in @('kitbag.exe', (Join-Path $env:LOCALAPPDATA '@KEEP@'), (Join-Path $env:USERPROFILE '.cargo\bin\kitbag.exe'))) {
+    $bin = Find $c
+    if ($bin) { break }
+  }
+}
+if ($bin) {
+  $ver = ''
+  try { $ver = "$(& $bin --version 2>$null)".Trim() } catch { $ver = '' }
+  if ($ver -like 'kitbag *') { Say 'kitbag' $bin; Say 'version' $ver }
+  elseif ($explicit) { Bail "$bin did not run as kitbag (--version printed: $ver)" }
+}
+"#;
+
+/// The Windows download: the same fail-closed checks as `install.ps1` and
+/// [`download_script`]. The `.zip` is unpacked only after its SHA-256 matched
+/// the published one (both 64 hex digits), and the keep path is written only
+/// after the unpacked `kitbag.exe` ran, atomically as `install.ps1` does.
+const WIN_DOWNLOAD: &str = r#"# kitbag-remote:download
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+@SAY@function Die([string]$m) { Say 'error' $m; throw 'kitbag-remote-failed' }
+$tmp = @TMP@
+$version = @VERSION@
+$base = @BASE@
+$local = @LOCAL@
+if (-not $env:LOCALAPPDATA) { Die 'LOCALAPPDATA is not set on this host' }
+$a = ''
+try { $a = "$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)" } catch { $a = '' }
+if (-not $a) { $a = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { "$env:PROCESSOR_ARCHITECTURE" } }
+$arch = switch ($a) { 'X64' { 'x86_64' } 'AMD64' { 'x86_64' } 'Arm64' { 'aarch64' } default { '' } }
+if (-not $arch) { Die "unsupported CPU architecture on this host: $a" }
+if ($arch -eq 'aarch64') { $archive = @ZIP_ARM@; $checksum = @SUM_ARM@ } else { $archive = @ZIP_X64@; $checksum = @SUM_X64@ }
+if (-not $local -and -not $base.StartsWith('https://')) { Die "not downloading from a non-HTTPS address: $base" }
+if (-not (Get-Command Get-FileHash -ErrorAction SilentlyContinue)) { Die 'Get-FileHash is required on this host to verify the download (PowerShell 4 or later)' }
+$dl = Join-Path $tmp 'download'
+$binDir = Join-Path $tmp 'bin'
+New-Item -ItemType Directory -Force -Path $dl | Out-Null
+New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+function Fetch([string]$name, [string]$out) {
+  if ($local) { Copy-Item -LiteralPath (Join-Path $base $name) -Destination $out }
+  else {
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+    Invoke-WebRequest -UseBasicParsing -Uri "$base/$name" -OutFile $out
+  }
+}
+$zip = Join-Path $dl $archive
+$sum = Join-Path $dl $checksum
+try { Fetch $archive $zip } catch { Die "download failed: $base/$archive (is $version a published release?)" }
+try { Fetch $checksum $sum } catch { Die "checksum download failed: $base/$checksum" }
+$expected = "$(Get-Content -LiteralPath $sum -Raw)".Trim().Split(' ')[0].ToLowerInvariant()
+if ($expected -cnotmatch '^[0-9a-f]{64}$') { Die "$checksum does not hold a SHA-256 checksum" }
+$actual = "$((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash)".ToLowerInvariant()
+if ($actual -cnotmatch '^[0-9a-f]{64}$') { Die "could not compute the SHA-256 of $archive" }
+if ($expected -cne $actual) { Die "checksum mismatch for $archive (expected $expected, got $actual); nothing was run" }
+$unpacked = Join-Path $dl 'unpacked'
+try { Expand-Archive -LiteralPath $zip -DestinationPath $unpacked -Force } catch { Die "could not unpack $archive" }
+$exe = Get-ChildItem -LiteralPath $unpacked -Recurse -Filter 'kitbag.exe' | Where-Object { -not $_.PSIsContainer } | Select-Object -First 1
+if (-not $exe) { Die "archive did not contain kitbag.exe" }
+$run = Join-Path $binDir 'kitbag.exe'
+Copy-Item -LiteralPath $exe.FullName -Destination $run
+$ver = ''
+# $global: as a plain assignment here would only make a local copy.
+$global:LASTEXITCODE = 1
+try { $ver = "$(& $run --version 2>$null)".Trim() } catch { $ver = '' }
+if ($global:LASTEXITCODE -ne 0 -or -not $ver) { Die 'the downloaded kitbag did not run on this host' }
+# Verified and runs: keep it where install.ps1 puts kitbag, so a later
+# `undo --remote` (or the probe) finds it. Copied to a new name next to it and
+# swapped in with one rename, so a failure never leaves a half-written exe.
+$keep = Join-Path $env:LOCALAPPDATA '@KEEP@'
+$keepDir = Split-Path -Parent $keep
+$new = Join-Path $keepDir ".kitbag.exe.$([Guid]::NewGuid()).tmp"
+try {
+  New-Item -ItemType Directory -Force -Path $keepDir | Out-Null
+  Copy-Item -LiteralPath $run -Destination $new
+  if (Test-Path -LiteralPath $keep) { [IO.File]::Replace($new, $keep, [NullString]::Value) } else { [IO.File]::Move($new, $keep) }
+} catch {
+  Die "could not keep kitbag in ${keepDir}: $_"
+} finally {
+  if (Test-Path -LiteralPath $new) { Remove-Item -LiteralPath $new -Force }
+}
+Say 'kitbag' $keep
+Say 'version' $ver
+"#;
+
+#[doc(hidden)]
+pub fn win_probe_script(explicit: Option<&str>) -> String {
+    let word = explicit.map(ps_path_expr).unwrap_or_else(|| "''".into());
+    WIN_PROBE
+        .replace("@SAY@", PS_SAY)
+        .replace("@KEEP@", WIN_KEEP)
+        .replace("@EXPLICIT@", &word)
+}
+
+/// The PowerShell script that downloads and verifies a Windows release into
+/// `tmp` and keeps it. `local` takes `base` as a directory to copy from
+/// instead of an `https://` URL (the tests use it); otherwise only
+/// `https://` is fetched.
+pub fn download_script_windows(tmp: &str, version: &str, base: &str, local: bool) -> String {
+    let (zip_x64, sum_x64) = windows_artifacts("x86_64");
+    let (zip_arm, sum_arm) = windows_artifacts("aarch64");
+    WIN_DOWNLOAD
+        .replace("@SAY@", PS_SAY)
+        .replace("@KEEP@", WIN_KEEP)
+        .replace("@TMP@", &ps_quote(tmp))
+        .replace("@VERSION@", &ps_quote(version))
+        .replace("@BASE@", &ps_quote(base))
+        .replace("@LOCAL@", if local { "$true" } else { "$false" })
+        .replace("@ZIP_X64@", &ps_quote(&zip_x64))
+        .replace("@SUM_X64@", &ps_quote(&sum_x64))
+        .replace("@ZIP_ARM@", &ps_quote(&zip_arm))
+        .replace("@SUM_ARM@", &ps_quote(&sum_arm))
+}
+
+/// Runs `bin` on a Windows host with `args`, its output going to ours, and
+/// exits with its exit code.
+#[doc(hidden)]
+pub fn win_run_script(bin: &str, args: &[String]) -> String {
+    format!(
+        "# kitbag-remote:run\n$ErrorActionPreference = 'Stop'\n$file = {}\n$argline = {}\n{PS_NATIVE}exit (Invoke-Native $file $argline)\n",
+        ps_quote(bin),
+        ps_quote(&win_command_line(args)),
+    )
+}
+
+/// Saves the tar stream on stdin to `tar` (inside the temporary directory)
+/// and unpacks it into `dir` with Windows' own `tar.exe` (bsdtar; a GNU tar
+/// from Git would read `C:` as a host name).
+#[doc(hidden)]
+pub fn win_upload_script(dir: &str, tar: &str) -> String {
+    let tar_args = win_command_line(&["-xf".into(), tar.into(), "-C".into(), dir.into()]);
+    format!(
+        "# kitbag-remote:upload
+$ErrorActionPreference = 'Stop'
+$dir = {}
+$tar = {}
+$tarArgs = {}
+{PS_NATIVE}New-Item -ItemType Directory -Force -Path $dir | Out-Null
+$in = [Console]::OpenStandardInput()
+$f = [IO.File]::Create($tar)
+try {{ $in.CopyTo($f) }} finally {{ $f.Close() }}
+$exe = Join-Path $env:SystemRoot 'System32\\tar.exe'
+if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {{ [Console]::Error.WriteLine('tar.exe (Windows 10 or later) is required on this host to unpack the profile'); exit 1 }}
+$code = Invoke-Native $exe $tarArgs
+Remove-Item -LiteralPath $tar -Force
+exit $code
+",
+        ps_quote(dir),
+        ps_quote(tar),
+        ps_quote(&tar_args),
+    )
+}
+
+/// Removes the temporary directory on a Windows host.
+#[doc(hidden)]
+pub fn win_cleanup_script(tmp: &str) -> String {
+    format!(
+        "# kitbag-remote:cleanup\n$ErrorActionPreference = 'Stop'\n$tmp = {}\nRemove-Item -LiteralPath $tmp -Recurse -Force\n",
+        ps_quote(tmp)
+    )
+}
+
 const PROBE: &str = r#"set -eu
 umask 077
+# A Windows host whose ssh shell is Git Bash, MSYS2 or Cygwin is still a Windows
+# host: it gets the Windows release and Windows paths, so hand over to that.
+case "$(uname -s 2>/dev/null || true)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT*) printf 'kitbag-remote:os=Windows_NT\n'; exit 0 ;;
+esac
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/kitbag-remote.XXXXXX")" || { printf 'kitbag-remote:error=%s\n' 'could not create a temporary directory'; exit 1; }
 printf 'kitbag-remote:tmp=%s\n' "$tmp"
 # An error here stops the whole run, so take the directory with it.
@@ -346,16 +873,28 @@ pub fn download_script(tmp: &str, version: &str, base: &str, proto: &str) -> Str
         .replace("@PROTO@", proto)
 }
 
-/// A directory made by the probe: absolute, ours by name, nothing odd in it.
-fn check_tmp(tmp: &str) -> Result<()> {
-    let name = Path::new(tmp)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default();
-    if !tmp.starts_with('/')
+/// A directory made by the probe: absolute (`/...`, or `C:\...` / `C:/...`
+/// on a Windows host), ours by name, nothing odd in it.
+fn check_tmp(tmp: &str, windows: bool) -> Result<()> {
+    let name = if windows {
+        tmp.rsplit(['\\', '/']).next().unwrap_or_default()
+    } else {
+        Path::new(tmp)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+    };
+    let absolute = if windows {
+        is_win_abs(tmp)
+    } else {
+        tmp.starts_with('/')
+    };
+    let suffix = name.strip_prefix(TMP_PREFIX).unwrap_or_default();
+    if !absolute
         || tmp.contains("..")
         || tmp.chars().any(|c| c.is_control())
-        || !name.starts_with(TMP_PREFIX)
+        || suffix.is_empty()
+        || (windows && !suffix.chars().all(|c| c.is_ascii_alphanumeric()))
     {
         bail!("the remote host returned an unexpected temporary directory: {tmp:?}");
     }
@@ -480,8 +1019,9 @@ fn stage_dir(from: &Path, to: &Path, total: &mut u64, top: bool) -> Result<usize
     Ok(n)
 }
 
-/// Send the profile at `dir` to `remote_dir` on the host (a tar stream over ssh).
-fn upload(r: &Remote, dir: &Path, remote_dir: &str) -> Result<usize> {
+/// Send the profile at `dir` to `remote_dir` on the host (a tar stream over
+/// ssh); `tmp` is the host's temporary directory.
+fn upload(r: &Remote, side: &Side, dir: &Path, remote_dir: &str, tmp: &str) -> Result<usize> {
     let host = r.host.as_str();
     let staged = tempfile::tempdir()?;
     let mut total = 0;
@@ -493,6 +1033,16 @@ fn upload(r: &Remote, dir: &Path, remote_dir: &str) -> Result<usize> {
         })
     );
     let files = stage(dir, staged.path(), &mut total, with_bundle)?;
+    let command = match side {
+        Side::Posix => {
+            let q = sh_quote(remote_dir);
+            format!("mkdir -p {q} && tar -xf - -C {q}")
+        }
+        Side::Windows { .. } => ps_command(&win_upload_script(
+            remote_dir,
+            &side.join(tmp, ".upload.tar"),
+        ))?,
+    };
     let mut tar = Command::new("tar")
         .arg("-cf")
         .arg("-")
@@ -505,8 +1055,7 @@ fn upload(r: &Remote, dir: &Path, remote_dir: &str) -> Result<usize> {
         .spawn()
         .context("could not run `tar`")?;
     let tar_out = tar.stdout.take().context("no stdout from tar")?;
-    let q = sh_quote(remote_dir);
-    let status = ssh(r, &format!("mkdir -p {q} && tar -xf - -C {q}"))
+    let status = ssh(r, &command)
         .stdin(Stdio::from(tar_out))
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -523,14 +1072,20 @@ fn upload(r: &Remote, dir: &Path, remote_dir: &str) -> Result<usize> {
     Ok(files)
 }
 
-/// Run kitbag on the host with `words` (already shell-quoted), output going
-/// straight to this terminal, and return its exit status.
-fn run_kitbag(r: &Remote, bin: &str, words: &[String]) -> Result<i32> {
+/// Run kitbag on the host with `words`, output going straight to this
+/// terminal, and return its exit status.
+fn run_kitbag(r: &Remote, side: &Side, bin: &str, words: &[Word]) -> Result<i32> {
     let host = r.host.as_str();
-    let cmd = std::iter::once(sh_quote(bin))
-        .chain(words.iter().cloned())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let cmd = match side {
+        Side::Posix => std::iter::once(sh_quote(bin))
+            .chain(words.iter().map(Word::posix))
+            .collect::<Vec<_>>()
+            .join(" "),
+        Side::Windows { home } => {
+            let args: Vec<String> = words.iter().map(|w| w.windows(home)).collect();
+            ps_command(&win_run_script(bin, &args))?
+        }
+    };
     let status = ssh(r, &cmd)
         .stdin(Stdio::null())
         .status()
@@ -554,28 +1109,58 @@ fn dir_name(hint: &str) -> String {
     }
 }
 
+/// Find out what the host is and probe it: a temporary directory and the
+/// kitbag there. A host that [`DETECT`] or the POSIX probe reports as Windows
+/// gets the Windows probe.
+fn probe(remote: &Remote) -> Result<(Side, Vec<(String, String)>)> {
+    let host = remote.host.as_str();
+    let mut windows = detect_windows(remote)?;
+    if !windows {
+        let found = run_script(remote, &probe_script(remote.kitbag.as_deref()))?;
+        if get(&found, "tmp").is_some() || !reports_windows(&found) {
+            return Ok((Side::Posix, found));
+        }
+        windows = true;
+    }
+    debug_assert!(windows);
+    let found = run_ps_script(remote, &win_probe_script(remote.kitbag.as_deref())).with_context(
+        || format!("{host} is a Windows host, but kitbag could not prepare its side there with PowerShell (powershell.exe)"),
+    )?;
+    let home = get(&found, "home")
+        .filter(|h| is_win_abs(h))
+        .with_context(|| {
+            format!("{host} did not report a usable user profile directory (USERPROFILE)")
+        })?
+        .to_string();
+    Ok((Side::Windows { home }, found))
+}
+
 /// Probe the host, run `f` with what it found and its temporary directory,
 /// then always remove that directory (success or not).
 fn with_host<T>(
     remote: &Remote,
-    f: impl FnOnce(&[(String, String)], &str) -> Result<T>,
+    f: impl FnOnce(&Side, &[(String, String)], &str) -> Result<T>,
 ) -> Result<T> {
-    if cfg!(windows) {
-        bail!("--remote is not supported on Windows yet; run kitbag from WSL or on a Unix machine");
-    }
     validate_host(&remote.host)?;
     let host = remote.host.as_str();
-    let found = run_script(remote, &probe_script(remote.kitbag.as_deref()))?;
+    let (side, found) = probe(remote)?;
+    let windows = matches!(side, Side::Windows { .. });
     let tmp = get(&found, "tmp")
         .context("the remote host did not report a temporary directory")?
         .to_string();
-    check_tmp(&tmp)?;
-    let result = f(&found, &tmp);
+    check_tmp(&tmp, windows)?;
+    let result = f(&side, &found, &tmp);
     // Always remove what was copied there, success or not.
-    let cleanup = ssh(remote, &format!("rm -rf {}", sh_quote(&tmp)))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .status();
+    let cleanup = match side {
+        Side::Posix => Ok(format!("rm -rf {}", sh_quote(&tmp))),
+        Side::Windows { .. } => ps_command(&win_cleanup_script(&tmp)),
+    };
+    let cleanup = cleanup.and_then(|c| {
+        Ok(ssh(remote, &c)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .status()?)
+    });
     if !matches!(cleanup, Ok(s) if s.success()) {
         eprintln!("warning: could not remove {tmp} on {host}; it holds only the copied profile");
     }
@@ -592,9 +1177,10 @@ pub fn run(
     flow: Flow,
     confirm: &dyn Fn(&str) -> Result<bool>,
 ) -> Result<i32> {
-    with_host(remote, |found, tmp| {
+    with_host(remote, |side, found, tmp| {
         run_in(
             remote,
+            side,
             profile_dir,
             name_hint,
             args,
@@ -609,25 +1195,30 @@ pub fn run(
 /// `kitbag undo` on the host, against the host's own state directory. Nothing
 /// is uploaded and no secret is involved.
 pub fn run_undo(remote: &Remote, id: Option<&str>, force: bool) -> Result<i32> {
-    with_host(remote, |found, tmp| {
+    with_host(remote, |side, found, tmp| {
         let host = remote.host.as_str();
-        let (bin, version) = find_kitbag(remote, found, tmp)?;
+        let (bin, version) = find_kitbag(remote, side, found, tmp)?;
         note_version(host, &bin, &version);
-        let mut words = vec![sh_quote("undo")];
+        let mut words = vec![Word::lit("undo")];
         if force {
-            words.push(sh_quote("--force"));
+            words.push(Word::lit("--force"));
         }
         if let Some(id) = id {
             // After `--`, so an id can never be read as an option.
-            words.push(sh_quote("--"));
-            words.push(sh_quote(id));
+            words.push(Word::lit("--"));
+            words.push(Word::lit(id));
         }
-        run_kitbag(remote, &bin, &words)
+        run_kitbag(remote, side, &bin, &words)
     })
 }
 
 /// The kitbag to run on the host: the probe's, else a verified download.
-fn find_kitbag(remote: &Remote, found: &[(String, String)], tmp: &str) -> Result<(String, String)> {
+fn find_kitbag(
+    remote: &Remote,
+    side: &Side,
+    found: &[(String, String)],
+    tmp: &str,
+) -> Result<(String, String)> {
     let host = remote.host.as_str();
     Ok(match get(found, "kitbag") {
         Some(bin) => (
@@ -640,7 +1231,12 @@ fn find_kitbag(remote: &Remote, found: &[(String, String)], tmp: &str) -> Result
                 "kitbag is not installed on {host}; downloading {tag} there and verifying its checksum"
             );
             let base = format!("{RELEASE_BASE}/{tag}");
-            let got = run_script(remote, &download_script(tmp, &tag, &base, "=https"))?;
+            let got = match side {
+                Side::Posix => run_script(remote, &download_script(tmp, &tag, &base, "=https"))?,
+                Side::Windows { .. } => {
+                    run_ps_script(remote, &download_script_windows(tmp, &tag, &base, false))?
+                }
+            };
             let bin = get(&got, "kitbag")
                 .context("the remote host did not report the downloaded kitbag")?
                 .to_string();
@@ -648,9 +1244,13 @@ fn find_kitbag(remote: &Remote, found: &[(String, String)], tmp: &str) -> Result
             (bin, get(&got, "version").unwrap_or("").to_string())
         }
         None => bail!(
-            "kitbag is not installed on {host} (looked on PATH, ~/.local/bin, ~/.cargo/bin and ~/.local/share/kitbag/bin). \
+            "kitbag is not installed on {host} (looked on PATH, {}). \
              Install it there (see the README), give its path with --remote-kitbag, \
              or add --remote-download to download v{} there with its checksum verified",
+            match side {
+                Side::Posix => "~/.local/bin, ~/.cargo/bin and ~/.local/share/kitbag/bin",
+                Side::Windows { .. } => r"%LOCALAPPDATA%\kitbag\bin and %USERPROFILE%\.cargo\bin",
+            },
             env!("CARGO_PKG_VERSION")
         ),
     })
@@ -673,6 +1273,7 @@ fn note_version(host: &str, bin: &str, version: &str) {
 #[allow(clippy::too_many_arguments)]
 fn run_in(
     remote: &Remote,
+    side: &Side,
     profile_dir: &Path,
     name_hint: &str,
     args: &[String],
@@ -682,14 +1283,14 @@ fn run_in(
     tmp: &str,
 ) -> Result<i32> {
     let host = remote.host.as_str();
-    let (bin, version) = find_kitbag(remote, found, tmp)?;
+    let (bin, version) = find_kitbag(remote, side, found, tmp)?;
     note_version(host, &bin, &version);
     let sub = match flow {
         Flow::Diff { .. } => "diff",
         Flow::Apply { .. } => "apply",
     };
-    let dir = format!("{tmp}/{}", dir_name(name_hint));
-    let files = upload(remote, profile_dir, &dir)?;
+    let dir = side.join(tmp, &dir_name(name_hint));
+    let files = upload(remote, side, profile_dir, &dir, tmp)?;
     println!(
         "Sent the profile ({files} files, no secrets resolved) to {host}; kitbag there: {bin}\n"
     );
@@ -709,35 +1310,32 @@ fn run_in(
     let secrets_words = remote
         .secrets
         .as_ref()
-        .map(|s| s.words(&format!("{dir}/{}", crate::bundle::FILE)))
+        .map(|s| s.args(&side.join(&dir, crate::bundle::FILE)))
         .unwrap_or_default();
-    let command = |extra: &[&str]| -> Vec<String> {
-        let mut v = vec![sh_quote(sub), sh_quote(&dir)];
-        v.extend(args.iter().map(|a| sh_quote(a)));
+    let command = |extra: &[&str]| -> Vec<Word> {
+        let mut v = vec![Word::lit(sub), Word::lit(&dir)];
+        v.extend(args.iter().map(|a| Word::lit(a)));
         if let Some(p) = &remote.project {
-            v.push(sh_quote("--project"));
-            v.push(path_word(p));
+            v.push(Word::lit("--project"));
+            v.push(Word::HostPath(p.clone()));
         }
         v.extend(secrets_words.iter().cloned());
-        v.extend(extra.iter().map(|s| sh_quote(s)));
+        v.extend(extra.iter().map(|s| Word::lit(s)));
         v
     };
+    let run = |words: &[Word]| run_kitbag(remote, side, &bin, words);
     match flow {
-        Flow::Diff { exit_code } => run_kitbag(
-            remote,
-            &bin,
-            &command(if exit_code { &["--exit-code"] } else { &[] }),
-        ),
-        Flow::Apply { dry_run: true, .. } => run_kitbag(remote, &bin, &command(&["--dry-run"])),
+        Flow::Diff { exit_code } => run(&command(if exit_code { &["--exit-code"] } else { &[] })),
+        Flow::Apply { dry_run: true, .. } => run(&command(&["--dry-run"])),
         Flow::Apply { yes: true, .. } => {
-            let code = run_kitbag(remote, &bin, &command(&["--yes"]))?;
+            let code = run(&command(&["--yes"]))?;
             if code == 0 {
                 print_undo_hint(host);
             }
             Ok(code)
         }
         Flow::Apply { .. } => {
-            let code = run_kitbag(remote, &bin, &command(&["--dry-run"]))?;
+            let code = run(&command(&["--dry-run"]))?;
             if code != 0 {
                 return Ok(code);
             }
@@ -745,7 +1343,7 @@ fn run_in(
                 println!("Cancelled; nothing was changed on {host}.");
                 return Ok(1);
             }
-            let code = run_kitbag(remote, &bin, &command(&["--yes"]))?;
+            let code = run(&command(&["--yes"]))?;
             if code == 0 {
                 print_undo_hint(host);
             }
@@ -759,6 +1357,345 @@ fn print_undo_hint(host: &str) {
         "\nUndo on {host} with: kitbag undo --remote {} (or run `kitbag undo` there)",
         sh_quote(host)
     );
+}
+
+#[cfg(test)]
+mod win_tests {
+    use super::*;
+
+    const NASTY: [&str; 9] = [
+        "plain",
+        "it's",
+        "'; Remove-Item -Recurse C:\\ ; '",
+        "$(Remove-Item C:\\x)",
+        "`$env:USERPROFILE`n",
+        "a \"quoted\" word",
+        "smart \u{2018}quotes\u{2019} \u{201A}x\u{201B}",
+        "trailing backslash \\",
+        "C:\\Program Files\\it's \"odd\" \\\\",
+    ];
+
+    fn unbase64(s: &str) -> Vec<u8> {
+        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = Vec::new();
+        for chunk in s.as_bytes().chunks(4) {
+            let pad = chunk.iter().filter(|&&c| c == b'=').count();
+            let mut n = 0u32;
+            for &c in chunk {
+                let v = if c == b'=' {
+                    0
+                } else {
+                    T.iter().position(|&x| x == c).unwrap() as u32
+                };
+                n = (n << 6) | v;
+            }
+            out.push((n >> 16) as u8);
+            if pad < 2 {
+                out.push((n >> 8) as u8);
+            }
+            if pad < 1 {
+                out.push(n as u8);
+            }
+        }
+        out
+    }
+
+    /// PowerShell's reading of a single-quoted literal: `None` if the string
+    /// ends anywhere but at the very end (anything after it would run).
+    fn ps_unquote(lit: &str) -> Option<String> {
+        const Q: [char; 5] = ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'];
+        let mut it = lit.chars().peekable();
+        if !Q.contains(&it.next()?) {
+            return None;
+        }
+        let mut out = String::new();
+        while let Some(c) = it.next() {
+            if Q.contains(&c) {
+                if matches!(it.peek(), Some(n) if Q.contains(n)) {
+                    out.push(it.next().unwrap());
+                } else {
+                    return it.next().is_none().then_some(out);
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        None
+    }
+
+    /// How the MSVC runtime (and Rust on Windows) splits a command line.
+    fn msvc_split(s: &str) -> Vec<String> {
+        let c: Vec<char> = s.chars().collect();
+        let (mut i, mut args) = (0, Vec::new());
+        while i < c.len() {
+            while i < c.len() && (c[i] == ' ' || c[i] == '\t') {
+                i += 1;
+            }
+            if i >= c.len() {
+                break;
+            }
+            let (mut cur, mut quoted) = (String::new(), false);
+            while i < c.len() && (quoted || (c[i] != ' ' && c[i] != '\t')) {
+                if c[i] == '\\' {
+                    let start = i;
+                    while i < c.len() && c[i] == '\\' {
+                        i += 1;
+                    }
+                    let n = i - start;
+                    if i < c.len() && c[i] == '"' {
+                        cur.extend(std::iter::repeat_n('\\', n / 2));
+                        if n % 2 == 1 {
+                            cur.push('"');
+                            i += 1;
+                        }
+                    } else {
+                        cur.extend(std::iter::repeat_n('\\', n));
+                    }
+                } else if c[i] == '"' {
+                    if quoted && c.get(i + 1) == Some(&'"') {
+                        cur.push('"');
+                        i += 2;
+                    } else {
+                        quoted = !quoted;
+                        i += 1;
+                    }
+                } else {
+                    cur.push(c[i]);
+                    i += 1;
+                }
+            }
+            args.push(cur);
+        }
+        args
+    }
+
+    #[test]
+    fn base64_matches_the_standard_vectors() {
+        for (i, o) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(i.as_bytes()), o);
+            assert_eq!(unbase64(o), i.as_bytes());
+        }
+    }
+
+    #[test]
+    fn powershell_literals_never_end_early() {
+        for s in NASTY {
+            let q = ps_quote(s);
+            assert_eq!(ps_unquote(&q).as_deref(), Some(s), "{q}");
+        }
+        assert_eq!(ps_quote("$(x)"), "'$(x)'");
+        assert_eq!(ps_quote("it's"), "'it''s'");
+    }
+
+    #[test]
+    fn windows_command_lines_split_back_into_the_same_arguments() {
+        let mut args: Vec<String> = NASTY.iter().map(|s| s.to_string()).collect();
+        args.push(String::new());
+        args.push("--to".into());
+        args.push("tab\there".into());
+        let line = win_command_line(&args);
+        assert_eq!(msvc_split(&line), args, "{line}");
+        assert_eq!(win_arg(r"C:\a b\"), r#""C:\a b\\""#);
+        assert_eq!(win_arg(r#"a"b"#), r#""a\"b""#);
+    }
+
+    #[test]
+    fn the_ssh_command_for_windows_is_encoded_powershell_and_nothing_else() {
+        let script = win_run_script(r"C:\kb\kitbag.exe", &["diff".into(), "it's $(x)".into()]);
+        let c = ps_command(&script).unwrap();
+        let b64 = c
+            .strip_prefix(
+                "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ",
+            )
+            .unwrap();
+        assert!(
+            b64.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b))
+        );
+        let units: Vec<u16> = unbase64(b64)
+            .chunks(2)
+            .map(|p| u16::from_le_bytes([p[0], p[1]]))
+            .collect();
+        assert_eq!(String::from_utf16(&units).unwrap(), script);
+        // Values only as literals: the command line is one quoted string.
+        assert!(
+            script.contains("$file = 'C:\\kb\\kitbag.exe'\n"),
+            "{script}"
+        );
+        assert!(
+            script.contains("$argline = '\"diff\" \"it''s $(x)\"'\n"),
+            "{script}"
+        );
+        assert!(!script.contains("sh -s"));
+        // Too long for cmd.exe: refused, not cut off.
+        assert!(ps_command(&"x".repeat(4000)).is_err());
+    }
+
+    #[test]
+    fn the_os_check_tells_windows_shells_from_posix_ones() {
+        let says = |out: &str| reports_windows(&marks(out));
+        // cmd.exe, PowerShell, and a POSIX shell, given DETECT.
+        assert!(says("kitbag-remote:os=Windows_NT\\$env:OS\r\n"));
+        assert!(says("banner\r\nkitbag-remote:os=%OS%\\Windows_NT\r\n"));
+        assert!(!says("kitbag-remote:os=%OS%$env:OS\n"));
+        assert!(!says(""));
+        assert!(DETECT.starts_with("echo ") && !DETECT.contains(['\'', '"', '|', '&', ';']));
+    }
+
+    #[test]
+    fn windows_temp_dirs_are_absolute_ours_and_plain() {
+        let ok = r"C:\Users\you\AppData\Local\Temp\kitbag-remote.ab12CD34";
+        assert!(check_tmp(ok, true).is_ok());
+        assert!(check_tmp("C:/Users/you/AppData/Local/Temp/kitbag-remote.ab12", true).is_ok());
+        for bad in [
+            r"C:\Users\you\AppData\Local\Temp\other",
+            r"C:\Users\you\..\kitbag-remote.ab12",
+            r"Temp\kitbag-remote.ab12",
+            r"\\server\share\kitbag-remote.ab12",
+            "C:\\Temp\\kitbag-remote.ab12\n",
+            r"C:\Temp\kitbag-remote.",
+            r"C:\Temp\kitbag-remote.a'b",
+            "/tmp/kitbag-remote.ab12",
+        ] {
+            assert!(check_tmp(bad, true).is_err(), "{bad:?}");
+        }
+        // A POSIX host still needs a leading `/`.
+        assert!(check_tmp(ok, false).is_err());
+    }
+
+    #[test]
+    fn tilde_paths_mean_the_windows_user_profile() {
+        let home = r"C:\Users\you";
+        assert_eq!(
+            win_host_path("~/src/my app", home),
+            r"C:\Users\you\src\my app"
+        );
+        assert_eq!(
+            win_host_path(r"~\vault\s.age", home),
+            r"C:\Users\you\vault\s.age"
+        );
+        assert_eq!(win_host_path(r"D:\work", home), r"D:\work");
+        assert_eq!(
+            Word::HostPath("~/id.txt".into()).windows(home),
+            r"C:\Users\you\id.txt"
+        );
+        assert!(
+            !Word::HostPath("~/id.txt".into())
+                .windows(home)
+                .contains("HOME")
+        );
+        assert_eq!(
+            ps_path_expr("~/bin/kitbag.exe"),
+            r"(Join-Path $env:USERPROFILE 'bin\kitbag.exe')"
+        );
+        assert_eq!(
+            ps_path_expr(r"C:\it's\kitbag.exe"),
+            r"'C:\it''s\kitbag.exe'"
+        );
+        assert!(
+            win_probe_script(Some("~/kb.exe"))
+                .contains("$explicit = (Join-Path $env:USERPROFILE 'kb.exe')\n")
+        );
+    }
+
+    #[test]
+    fn windows_downloads_use_the_msvc_zip_and_its_checksum() {
+        assert_eq!(
+            windows_artifacts("x86_64"),
+            (
+                "kitbag-x86_64-pc-windows-msvc.zip".to_string(),
+                "kitbag-x86_64-pc-windows-msvc.sha256".to_string()
+            )
+        );
+        assert_eq!(
+            windows_artifacts("aarch64").0,
+            "kitbag-aarch64-pc-windows-msvc.zip"
+        );
+        let s = download_script_windows(r"C:\T\kitbag-remote.x", "v1.0.0", RELEASE_BASE, false);
+        for name in [
+            "'kitbag-x86_64-pc-windows-msvc.zip'",
+            "'kitbag-x86_64-pc-windows-msvc.sha256'",
+            "'kitbag-aarch64-pc-windows-msvc.zip'",
+            "'kitbag-aarch64-pc-windows-msvc.sha256'",
+        ] {
+            assert!(s.contains(name), "{name}");
+        }
+        assert!(!s.contains(".tar.gz") && !s.contains("musl"));
+        assert!(s.contains("$local = $false\n"));
+    }
+
+    #[test]
+    fn the_windows_download_checks_before_it_unpacks_or_keeps_anything() {
+        let s = download_script_windows(r"C:\T\kitbag-remote.x", "v1.0.0", RELEASE_BASE, false);
+        let at = |needle: &str| s.find(needle).unwrap_or_else(|| panic!("{needle}"));
+        let checks = [
+            "$expected -cnotmatch '^[0-9a-f]{64}$'",
+            "$actual -cnotmatch '^[0-9a-f]{64}$'",
+            "$expected -cne $actual",
+        ];
+        let unpack = at("Expand-Archive");
+        let keep = at("New-Item -ItemType Directory -Force -Path $keepDir");
+        let ran = at("& $run --version");
+        for c in checks {
+            assert!(at(c) < unpack, "{c}");
+        }
+        assert!(unpack < ran && ran < keep);
+        // Only the keep step touches %LOCALAPPDATA%\kitbag, and only at the end.
+        assert_eq!(s.matches(WIN_KEEP).count(), 1);
+        assert!(at(WIN_KEEP) > ran);
+        // Every check fails by Die, which throws: nothing after it runs.
+        assert!(
+            s.contains("function Die([string]$m) { Say 'error' $m; throw 'kitbag-remote-failed' }")
+        );
+        // No other hasher, no plain-HTTP fetch.
+        assert!(!s.contains("MD5") && !s.contains("SHA1") && !s.contains("http://"));
+        assert!(s.contains("$base.StartsWith('https://')"));
+    }
+
+    /// A PowerShell to run scripts with, if this machine has one.
+    fn powershell() -> Option<&'static str> {
+        ["powershell.exe", "pwsh"].into_iter().find(|p| {
+            Command::new(p)
+                .args(["-NoProfile", "-NonInteractive", "-Command", "exit 0"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        })
+    }
+
+    #[test]
+    fn powershell_runs_quoted_values_as_text() {
+        let Some(ps) = powershell() else {
+            return;
+        };
+        for s in NASTY {
+            // The value comes back Base64-encoded, so no console code page
+            // is involved; nothing in it may have run.
+            let script = format!(
+                "[Console]::Out.Write([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes({})))",
+                ps_quote(s)
+            );
+            let cmd = ps_command(&script).unwrap();
+            let mut words = cmd.split(' ');
+            words.next();
+            let out = Command::new(ps).args(words).output().unwrap();
+            assert!(out.status.success(), "{s:?}: {out:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout).trim(),
+                base64(s.as_bytes()),
+                "{s:?}"
+            );
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -818,11 +1755,11 @@ mod tests {
 
     #[test]
     fn only_our_own_temp_dirs_are_accepted() {
-        assert!(check_tmp("/tmp/kitbag-remote.AbC123").is_ok());
-        assert!(check_tmp("/tmp/other").is_err());
-        assert!(check_tmp("relative/kitbag-remote.x").is_err());
-        assert!(check_tmp("/tmp/../kitbag-remote.x").is_err());
-        assert!(check_tmp("/tmp/kitbag-remote.x\n/etc").is_err());
+        assert!(check_tmp("/tmp/kitbag-remote.AbC123", false).is_ok());
+        assert!(check_tmp("/tmp/other", false).is_err());
+        assert!(check_tmp("relative/kitbag-remote.x", false).is_err());
+        assert!(check_tmp("/tmp/../kitbag-remote.x", false).is_err());
+        assert!(check_tmp("/tmp/kitbag-remote.x\n/etc", false).is_err());
     }
 
     #[test]
