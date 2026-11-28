@@ -2211,6 +2211,60 @@ The count is an estimate: the characters of each tool's name, description and in
 as compact JSON, divided by 4. It is not any model's exact tokenizer, and tools may add some
 wrapping of their own.
 
+## Sessions (saved conversations)
+
+`kitbag sessions` moves one tool's own saved conversations to a local directory and back.
+It is separate from profiles: sessions are never part of a profile, `capture`, `apply`,
+a git source or a profile tarball, and no `--include` option adds them.
+
+```sh
+kitbag sessions export --from claude-code -o ~/session-backup
+kitbag sessions import --to claude-code ~/session-backup
+```
+
+- **What is exported.** The tool's native JSONL transcripts, copied as they are, plus a
+  small `kitbag-sessions.json` manifest (the tool, the kitbag version, whether secrets
+  were redacted, the file list). Claude Code: `projects/<project>/<session-id>.jsonl`
+  under `~/.claude` or `$CLAUDE_CONFIG_DIR`; `--project` limits it to one project, given as
+  the directory name under `projects/` or the working directory's path (Claude Code's
+  name for a very long path is shortened with a hash that kitbag doesn't reproduce, so
+  give the directory name then). Codex CLI: `sessions/YYYY/MM/DD/rollout-*.jsonl` under
+  `~/.codex` or `$CODEX_HOME`; compressed `.zst` rollouts are skipped with a note.
+  Subagent transcripts, spilled tool results and file-history snapshots are not exported.
+- **Same tool only.** `--from claude-code` exports can only be imported with
+  `--to claude-code`, and the same for `codex`; the other way round is refused. There is
+  no conversion between tools. The tools' entry format is internal and changes between
+  versions, so kitbag does not parse it as a schema: it copies the files and works on
+  the JSON strings in each line.
+- **Redaction is on by default.** Every string in every line (messages, tool calls, tool
+  results, headers, file contents) goes through the same redaction as `capture`
+  (`[REDACTED]` / `[REDACTED:<kind>]`), and so does a value under a secret-named key. A line
+  with nothing found is kept byte for byte. Redaction recognises token formats and
+  secret-looking assignments, headers and URLs; it can miss a secret written as plain
+  prose, so treat an export as private anyway. `--no-redact` keeps everything and prints a
+  warning: the transcripts routinely hold file contents, command output and credentials.
+- **Where it goes.** Only into `-o DIR` (created if missing, and it has to be empty unless
+  `--force`; never inside the tool's own directory). Files are private to you on Unix.
+  Keep `DIR` outside any git repository (kitbag warns if it is inside one).
+- **Encrypted archive.** `--encrypt` (or `--secrets-passphrase-file` / `--secrets-recipient`,
+  the flags of the [secrets bundle](#secrets-the-security-model), the same age encryption)
+  writes a single `DIR/sessions.age` and nothing else; the plain files never exist. The
+  passphrase file must not be inside `DIR`. `import` takes `--secrets-passphrase-file` or
+  `--secrets-identity` and decrypts in memory, with no temporary files. The archive is
+  built in memory, so it is limited to 512 MiB.
+- **Import** writes into the destination tool's own directory (`CLAUDE_CONFIG_DIR` /
+  `CODEX_HOME` honoured, `--home` as for every command) and nothing else. A session file
+  that already exists is never replaced without `--force` (the old one is not kept).
+  It does not start the tool or load anything into a session. For Claude Code it prints
+  `claude --resume /absolute/path/to/file.jsonl`, which the
+  [docs](https://code.claude.com/docs/en/sessions) describe; for Codex it names the
+  directory and no resume command, since kitbag doesn't depend on one. What comes back from
+  a redacted export has the markers in place of the secrets. Imports are not recorded for
+  `kitbag undo`.
+
+Not covered yet: Cursor, Gemini CLI, Hermes and other tools (their session locations
+aren't confirmed in official docs), and any conversion between tools.
+
 ## Commands
 
 | Command | What it does |
@@ -2232,6 +2286,8 @@ wrapping of their own.
 | `kitbag secrets set NAME [FILE\|DIR] --value-file PATH [--secrets-passphrase-file PATH \| --secrets-identity PATH --secrets-recipient KEY]` | Add or replace one variable in `secrets.age` (created if missing); the value comes from a file or stdin (`-`), never the command line, and is never shown |
 | `kitbag secrets commit [FILE\|DIR] [--allow-passphrase-commit]` | Opt in to keeping the encrypted `secrets.age` in git: un-ignore and `git add` it (never commits); recipients mode recommended, a passphrase bundle needs the flag and gets a warning |
 | `kitbag secrets rotate [FILE\|DIR] [--secrets-passphrase-file PATH \| --secrets-identity PATH] (--new-secrets-passphrase-file PATH \| --new-secrets-recipient KEY)` | Encrypt `secrets.age` again to a new passphrase or new keys; the same variables and token stores, rewritten in place with no plaintext file |
+| `kitbag sessions export --from claude-code\|codex -o DIR [--project DIR] [--no-redact] [--force] [--encrypt [--secrets-passphrase-file PATH \| --secrets-recipient KEY]]` | Copy one tool's saved conversations into a local directory, secrets redacted; see [Sessions](#sessions-saved-conversations) |
+| `kitbag sessions import --to claude-code\|codex DIR [--force] [--secrets-passphrase-file PATH \| --secrets-identity PATH]` | Put an export back into the same tool's own session directory; starts nothing |
 | `kitbag list-targets [--json]` | Targets, what they support, which are detected, file locations |
 
 Common options:
