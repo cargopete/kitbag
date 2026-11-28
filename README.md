@@ -2078,11 +2078,18 @@ kitbag does not detect or enter containers; `--remote` reaches whatever the `ssh
 reaches. `kitbag undo --remote` reverts a project-scope apply too (the host's state directory is
 the same). The host's own default home and state directory are used.
 
-Limits of this first version, each a follow-up: the source must be a profile or plugin directory
-on this machine (not a git URL; clone it first) (#147), and not on Windows (#148). `--home` and
-`KITBAG_HOME` only affect this machine and are never sent to the host. The host's history records
-the temporary directory as the apply's source, so
-`kitbag status SOURCE` and `sync` there can't compare against it (also #147). Sending secret
+**From a git URL.** The source may also be a git URL (with `--path`, `@ref`, `--require-pin` and
+`--allow-insecure-source` as for a local apply). kitbag fetches it on this machine, then copies the
+checkout as above (no `.git`); the host's kitbag is told the copy is that git source, so it is
+untrusted there exactly as it would be here: hooks, executable bits, risky settings and MCP servers
+need the same `--trust-source` (or `--allow-risky-settings`, `--allow-git-mcp`, `--apply-hooks`),
+and a secrets bundle is never taken from a git source (`--remote-secrets-from` and
+`--remote-include-secrets-age` are refused). The host's history and records hold the git URL and
+the commit, not the temporary directory, so `kitbag status URL@COMMIT` and `sync` there can compare
+against it. (A directory source is still recorded under its local path.)
+
+Limits of this first version: not on Windows (#148). `--home` and
+`KITBAG_HOME` only affect this machine and are never sent to the host. Sending secret
 values is not offered: `--secrets-from` is refused with `--remote`, and a `secrets.age` (unless
 `--remote-include-secrets-age`, encrypted only) and anything named like a plaintext secrets file
 at the top of the profile are not copied to the host.

@@ -456,25 +456,208 @@ esac
         assert_eq!(host.calls(), "");
     }
 
+    const GIT_FILES: [(&str, &str); 2] = [
+        (
+            "kitbag.toml",
+            "kitbag = 1\nname = \"gitprof\"\n\n[mcp_servers.docs]\nurl = \"https://docs.example.com/mcp\"\n",
+        ),
+        ("instructions.md", "Be brief from git.\n"),
+    ];
+
+    fn git_remote(host: &Host) -> (String, String) {
+        let url = host.sb.git_profile("gitprof", &GIT_FILES);
+        let sha = git_out(&host.sb.path("gitprof"), &["rev-parse", "HEAD"]);
+        (url, sha.trim().to_string())
+    }
+
     #[test]
-    fn git_sources_project_scope_and_incompatible_flags_are_refused() {
+    fn apply_remote_from_a_git_url_records_the_url_and_commit_on_the_host() {
+        if !has_git() {
+            return;
+        }
         let host = Host::new();
-        let prof = profile(&host);
-        let url = host
-            .sb
-            .git_profile("gitprof", &[("kitbag.toml", "kitbag = 1\nname = \"g\"\n")]);
+        let (url, sha) = git_remote(&host);
         host.cli()
-            .args([
-                "diff",
-                &url,
-                "--remote",
-                "you@stub-host",
-                "--remote-kitbag",
-                BIN,
-            ])
+            .arg("apply")
+            .arg(&url)
+            .args(remote_args(&["--yes", "--trust-source"]))
+            .assert()
+            .success()
+            .stdout(contains("Wrote"));
+        let claude = host.rhome().join(".claude/CLAUDE.md");
+        assert!(
+            fs::read_to_string(claude)
+                .unwrap()
+                .contains("Be brief from git.")
+        );
+        assert!(tree_text(&host.rhome()).contains("docs.example.com"));
+        assert_eq!(host.leftovers(), Vec::<String>::new());
+        assert!(!host.sb.state().exists());
+
+        let out = host.on_host(&["history", "--json"]);
+        assert!(out.status.success(), "{out:?}");
+        let history = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(history.contains(&url), "{history}");
+        assert!(history.contains(&sha[..7]), "{history}");
+        assert!(!history.contains("kitbag-remote."), "{history}");
+        assert!(!history.contains("rtmp"), "{history}");
+        let records = tree_text(&host.rhome().join(".local/state/kitbag"));
+        assert!(!records.contains("kitbag-remote."), "{records}");
+        assert!(records.contains(&url), "{records}");
+        assert!(records.contains(&sha), "{records}");
+
+        // The recorded source is one `status` and `sync` accept there, and
+        // it is the commit applied, so nothing has drifted.
+        let pinned = format!("{url}@{sha}");
+        let out = host.on_host(&["status", &pinned, "--to", "claude-code", "--exit-code"]);
+        assert!(out.status.success(), "{out:?}");
+        let out = host.on_host(&["sync", &pinned, "--to", "claude-code", "--dry-run"]);
+        assert!(out.status.success(), "{out:?}");
+
+        // Undo there still works.
+        let out = host.on_host(&["undo"]);
+        assert!(out.status.success(), "{out:?}");
+        assert!(!host.rhome().join(".claude/CLAUDE.md").exists());
+    }
+
+    #[test]
+    fn a_git_source_without_trust_is_as_untrusted_on_the_host_as_it_is_here() {
+        if !has_git() {
+            return;
+        }
+        let host = Host::new();
+        let (url, sha) = git_remote(&host);
+        host.cli()
+            .arg("apply")
+            .arg(&url)
+            .args(remote_args(&["--yes"]))
+            .assert()
+            .success()
+            .stdout(contains("not applied"));
+        // Instructions go in; the MCP server of a git source is withheld.
+        assert!(host.rhome().join(".claude/CLAUDE.md").exists());
+        assert!(!tree_text(&host.rhome()).contains("docs.example.com"));
+        let history =
+            String::from_utf8_lossy(&host.on_host(&["history", "--json"]).stdout).into_owned();
+        assert!(history.contains(&sha[..7]), "{history}");
+    }
+
+    #[test]
+    fn git_pin_and_cleartext_rules_are_checked_here_before_anything_is_sent() {
+        if !has_git() {
+            return;
+        }
+        let host = Host::new();
+        let (url, _) = git_remote(&host);
+        host.cli()
+            .arg("diff")
+            .arg(&url)
+            .args(remote_args(&["--require-pin"]))
             .assert()
             .failure()
-            .stderr(contains("not a git URL"));
+            .stderr(contains("not pinned"));
+        host.cli()
+            .arg("diff")
+            .arg("http://127.0.0.1:9/x.git")
+            .args(remote_args(&[]))
+            .assert()
+            .failure()
+            .stderr(contains("without encryption"));
+        assert_eq!(host.calls(), "");
+    }
+
+    #[test]
+    fn a_secrets_bundle_is_never_taken_from_a_git_source() {
+        if !has_git() {
+            return;
+        }
+        let host = Host::new();
+        let (url, _) = git_remote(&host);
+        host.cli()
+            .arg("diff")
+            .arg(&url)
+            .args(remote_args(&[
+                "--remote-include-secrets-age",
+                "--remote-secrets-identity",
+                "/h/id",
+            ]))
+            .assert()
+            .failure()
+            .stderr(contains("git source"));
+        host.cli()
+            .arg("diff")
+            .arg(&url)
+            .args(remote_args(&[
+                "--remote-secrets-from",
+                "/h/s.age",
+                "--remote-secrets-identity",
+                "/h/id",
+            ]))
+            .assert()
+            .failure()
+            .stderr(contains("git source"));
+        host.cli()
+            .arg("diff")
+            .arg(&url)
+            .args(remote_args(&["--secrets-from", "x.age"]))
+            .assert()
+            .failure();
+        assert_eq!(host.calls(), "");
+    }
+
+    #[test]
+    fn a_git_source_with_remote_project_applies_at_the_host_project() {
+        if !has_git() {
+            return;
+        }
+        let host = Host::new();
+        let (url, sha) = git_remote(&host);
+        let proj = host.sb.path("hostproj");
+        fs::create_dir_all(&proj).unwrap();
+        host.cli()
+            .arg("apply")
+            .arg(&url)
+            .args(remote_args(&["--yes", "--remote-project"]))
+            .arg(&proj)
+            .assert()
+            .success();
+        assert!(proj.join("CLAUDE.md").exists() || proj.join(".claude").exists());
+        let history =
+            String::from_utf8_lossy(&host.on_host(&["history", "--json"]).stdout).into_owned();
+        assert!(history.contains(&sha[..7]), "{history}");
+    }
+
+    #[test]
+    fn the_hidden_copy_flags_need_a_real_git_url_and_commit() {
+        let host = Host::new();
+        let prof = profile(&host);
+        let p = prof.to_str().unwrap();
+        for (src, sha) in [
+            ("/etc", "0123456789012345678901234567890123456789"),
+            (
+                "https://u:pw@example.com/o/r.git",
+                "0123456789012345678901234567890123456789",
+            ),
+            ("https://example.com/o/r.git", "abc"),
+        ] {
+            let out = host.on_host(&[
+                "diff",
+                p,
+                "--to",
+                "claude-code",
+                "--copy-of-git",
+                src,
+                "--copy-of-commit",
+                sha,
+            ]);
+            assert!(!out.status.success(), "{src}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn project_scope_and_incompatible_flags_are_refused() {
+        let host = Host::new();
+        let prof = profile(&host);
         host.cli()
             .arg("diff")
             .arg(&prof)
