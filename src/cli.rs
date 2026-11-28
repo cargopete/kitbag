@@ -213,6 +213,25 @@ enum Cmd {
         /// Undo even if files were edited since, or newer applies exist
         #[arg(long)]
         force: bool,
+        /// Undo on this host over ssh (`user@host`), using that host's own
+        /// state directory: the kitbag there reverts its most recent apply (or
+        /// the one with this id). Nothing is uploaded; not Windows
+        #[arg(long, value_name = "HOST")]
+        remote: Option<String>,
+        /// With --remote: path of kitbag on the host (default: kitbag on its
+        /// PATH, else ~/.local/bin, ~/.cargo/bin or ~/.local/share/kitbag/bin)
+        #[arg(
+            long,
+            value_name = "PATH",
+            requires = "remote",
+            conflicts_with = "remote_download"
+        )]
+        remote_kitbag: Option<String>,
+        /// With --remote: if the host has no kitbag, download this version's
+        /// release there from GitHub, check it against the published SHA-256,
+        /// keep it at ~/.local/share/kitbag/bin/kitbag and run it
+        #[arg(long, requires = "remote")]
+        remote_download: bool,
     },
     /// List previous applies that can be undone
     History {
@@ -397,7 +416,8 @@ struct RemoteArgs {
     remote_kitbag: Option<String>,
     /// With --remote: if the host has no kitbag, download this version's release
     /// there from GitHub, check it against the published SHA-256 and only then
-    /// run it (it is removed afterwards; install it there to keep 'undo')
+    /// run it. The verified binary is kept at ~/.local/share/kitbag/bin/kitbag
+    /// there, so 'kitbag undo --remote' can run it later
     #[arg(long, requires = "remote")]
     remote_download: bool,
     /// With --remote: path of a secrets.age on the host (not this machine),
@@ -842,7 +862,32 @@ pub fn run(cli: Cli) -> Result<i32> {
         ),
         Cmd::Disable { args } => cmd_toggle(false, &args),
         Cmd::Enable { args } => cmd_toggle(true, &args),
-        Cmd::Undo { id, force } => cmd_undo(&context(home, None)?, id.as_deref(), force),
+        Cmd::Undo {
+            id,
+            force,
+            remote: Some(host),
+            remote_kitbag,
+            remote_download,
+        } => {
+            if cfg!(windows) {
+                bail!(
+                    "--remote is not supported on Windows yet; run kitbag from WSL or on a Unix machine"
+                );
+            }
+            remote::validate_host(&host)?;
+            remote::run_undo(
+                &remote::Remote {
+                    ssh: "ssh".to_string(),
+                    host,
+                    kitbag: remote_kitbag,
+                    download: remote_download,
+                    secrets: None,
+                },
+                id.as_deref(),
+                force,
+            )
+        }
+        Cmd::Undo { id, force, .. } => cmd_undo(&context(home, None)?, id.as_deref(), force),
         Cmd::History { json } => cmd_history(&context(home, None)?, json),
         Cmd::Doctor {
             why: Some(dir),

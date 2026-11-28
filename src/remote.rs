@@ -230,7 +230,8 @@ if [ -n "$explicit" ]; then
 else
   # A non-interactive ssh shell often lacks ~/.local/bin (where install.sh puts
   # kitbag) on its PATH, so look there and in cargo's bin dir as well.
-  for c in kitbag "$HOME/.local/bin/kitbag" "$HOME/.cargo/bin/kitbag"; do
+  # `--remote-download` keeps its verified copy in the XDG data dir.
+  for c in kitbag "$HOME/.local/bin/kitbag" "$HOME/.cargo/bin/kitbag" "$HOME/.local/share/kitbag/bin/kitbag"; do
     p="$(command -v "$c" 2>/dev/null || true)"
     case "$p" in
       /*) bin="$p"; break ;;
@@ -308,7 +309,15 @@ src="$dl/unpacked/kitbag"
 cp "$src" "$tmp/bin/kitbag"
 chmod 755 "$tmp/bin/kitbag"
 ver="$("$tmp/bin/kitbag" --version 2>/dev/null)" || die "the downloaded kitbag did not run on this host"
-printf 'kitbag-remote:kitbag=%s\n' "$tmp/bin/kitbag"
+# Verified and runs: keep it where a later `undo --remote` (or the probe) finds
+# it. Written to a temporary name and renamed, so a failure here never leaves a
+# half-written kitbag; $tmp itself is removed afterwards.
+keep_dir="$HOME/.local/share/kitbag/bin"
+(umask 022; mkdir -p "$keep_dir") || die "could not create $keep_dir"
+cp "$tmp/bin/kitbag" "$keep_dir/.kitbag.new.$$" || die "could not keep kitbag in $keep_dir"
+chmod 755 "$keep_dir/.kitbag.new.$$"
+mv -f "$keep_dir/.kitbag.new.$$" "$keep_dir/kitbag" || { rm -f "$keep_dir/.kitbag.new.$$"; die "could not keep kitbag in $keep_dir"; }
+printf 'kitbag-remote:kitbag=%s\n' "$keep_dir/kitbag"
 printf 'kitbag-remote:version=%s\n' "$ver"
 "#;
 
@@ -535,16 +544,12 @@ fn dir_name(hint: &str) -> String {
     }
 }
 
-/// Copy `profile_dir` to the host and run `flow` there. `args` are the
-/// `kitbag apply`/`diff` options after the source (`--to ...`).
-pub fn run(
+/// Probe the host, run `f` with what it found and its temporary directory,
+/// then always remove that directory (success or not).
+fn with_host<T>(
     remote: &Remote,
-    profile_dir: &Path,
-    name_hint: &str,
-    args: &[String],
-    flow: Flow,
-    confirm: &dyn Fn(&str) -> Result<bool>,
-) -> Result<i32> {
+    f: impl FnOnce(&[(String, String)], &str) -> Result<T>,
+) -> Result<T> {
     if cfg!(windows) {
         bail!("--remote is not supported on Windows yet; run kitbag from WSL or on a Unix machine");
     }
@@ -555,16 +560,7 @@ pub fn run(
         .context("the remote host did not report a temporary directory")?
         .to_string();
     check_tmp(&tmp)?;
-    let result = run_in(
-        remote,
-        profile_dir,
-        name_hint,
-        args,
-        flow,
-        confirm,
-        &found,
-        &tmp,
-    );
+    let result = f(&found, &tmp);
     // Always remove what was copied there, success or not.
     let cleanup = ssh(remote, &format!("rm -rf {}", sh_quote(&tmp)))
         .stdin(Stdio::null())
@@ -576,20 +572,54 @@ pub fn run(
     result
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_in(
+/// Copy `profile_dir` to the host and run `flow` there. `args` are the
+/// `kitbag apply`/`diff` options after the source (`--to ...`).
+pub fn run(
     remote: &Remote,
     profile_dir: &Path,
     name_hint: &str,
     args: &[String],
     flow: Flow,
     confirm: &dyn Fn(&str) -> Result<bool>,
-    found: &[(String, String)],
-    tmp: &str,
 ) -> Result<i32> {
+    with_host(remote, |found, tmp| {
+        run_in(
+            remote,
+            profile_dir,
+            name_hint,
+            args,
+            flow,
+            confirm,
+            found,
+            tmp,
+        )
+    })
+}
+
+/// `kitbag undo` on the host, against the host's own state directory. Nothing
+/// is uploaded and no secret is involved.
+pub fn run_undo(remote: &Remote, id: Option<&str>, force: bool) -> Result<i32> {
+    with_host(remote, |found, tmp| {
+        let host = remote.host.as_str();
+        let (bin, version) = find_kitbag(remote, found, tmp)?;
+        note_version(host, &bin, &version);
+        let mut words = vec![sh_quote("undo")];
+        if force {
+            words.push(sh_quote("--force"));
+        }
+        if let Some(id) = id {
+            // After `--`, so an id can never be read as an option.
+            words.push(sh_quote("--"));
+            words.push(sh_quote(id));
+        }
+        run_kitbag(remote, &bin, &words)
+    })
+}
+
+/// The kitbag to run on the host: the probe's, else a verified download.
+fn find_kitbag(remote: &Remote, found: &[(String, String)], tmp: &str) -> Result<(String, String)> {
     let host = remote.host.as_str();
-    let local = format!("kitbag {}", env!("CARGO_PKG_VERSION"));
-    let (bin, version) = match get(found, "kitbag") {
+    Ok(match get(found, "kitbag") {
         Some(bin) => (
             bin.to_string(),
             get(found, "version").unwrap_or("").to_string(),
@@ -604,25 +634,46 @@ fn run_in(
             let bin = get(&got, "kitbag")
                 .context("the remote host did not report the downloaded kitbag")?
                 .to_string();
+            eprintln!("kept the verified kitbag at {bin} on {host}");
             (bin, get(&got, "version").unwrap_or("").to_string())
         }
         None => bail!(
-            "kitbag is not installed on {host} (looked on PATH, ~/.local/bin and ~/.cargo/bin). \
+            "kitbag is not installed on {host} (looked on PATH, ~/.local/bin, ~/.cargo/bin and ~/.local/share/kitbag/bin). \
              Install it there (see the README), give its path with --remote-kitbag, \
              or add --remote-download to download v{} there with its checksum verified",
             env!("CARGO_PKG_VERSION")
         ),
-    };
+    })
+}
+
+fn note_version(host: &str, bin: &str, version: &str) {
+    let local = format!("kitbag {}", env!("CARGO_PKG_VERSION"));
     if version != local {
         eprintln!(
             "note: {host} has {} at {bin}, this machine has {local}; a profile written for a newer kitbag may not apply fully there",
             if version.is_empty() {
                 "an unknown kitbag version"
             } else {
-                &version
+                version
             }
         );
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_in(
+    remote: &Remote,
+    profile_dir: &Path,
+    name_hint: &str,
+    args: &[String],
+    flow: Flow,
+    confirm: &dyn Fn(&str) -> Result<bool>,
+    found: &[(String, String)],
+    tmp: &str,
+) -> Result<i32> {
+    let host = remote.host.as_str();
+    let (bin, version) = find_kitbag(remote, found, tmp)?;
+    note_version(host, &bin, &version);
     let sub = match flow {
         Flow::Diff { .. } => "diff",
         Flow::Apply { .. } => "apply",
@@ -661,7 +712,13 @@ fn run_in(
             &command(if exit_code { &["--exit-code"] } else { &[] }),
         ),
         Flow::Apply { dry_run: true, .. } => run_kitbag(remote, &bin, &command(&["--dry-run"])),
-        Flow::Apply { yes: true, .. } => run_kitbag(remote, &bin, &command(&["--yes"])),
+        Flow::Apply { yes: true, .. } => {
+            let code = run_kitbag(remote, &bin, &command(&["--yes"]))?;
+            if code == 0 {
+                print_undo_hint(host);
+            }
+            Ok(code)
+        }
         Flow::Apply { .. } => {
             let code = run_kitbag(remote, &bin, &command(&["--dry-run"]))?;
             if code != 0 {
@@ -673,15 +730,18 @@ fn run_in(
             }
             let code = run_kitbag(remote, &bin, &command(&["--yes"]))?;
             if code == 0 {
-                println!(
-                    "\nUndo on {host} with: ssh {} {} undo",
-                    sh_quote(host),
-                    sh_quote(&bin)
-                );
+                print_undo_hint(host);
             }
             Ok(code)
         }
     }
+}
+
+fn print_undo_hint(host: &str) {
+    println!(
+        "\nUndo on {host} with: kitbag undo --remote {} (or run `kitbag undo` there)",
+        sh_quote(host)
+    );
 }
 
 #[cfg(all(test, unix))]
@@ -941,11 +1001,12 @@ mod tests {
         .unwrap();
     }
 
-    fn run_download(dir: &Path, tmp: &Path) -> (bool, String) {
+    fn run_download(dir: &Path, tmp: &Path, home: &Path) -> (bool, String) {
         let base = format!("file://{}", dir.display());
         let script = download_script(tmp.to_str().unwrap(), "v9.9.9", &base, "=file");
         let mut child = Command::new("sh")
             .arg("-s")
+            .env("HOME", home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -981,11 +1042,31 @@ mod tests {
         }
         let rel = tempfile::tempdir().unwrap();
         let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
         let marker = rel.path().join("ran");
         release(rel.path(), &marker, |h| format!("{h}  kitbag.tar.gz\n"));
-        let (ok, out) = run_download(rel.path(), tmp.path());
+        let (ok, out) = run_download(rel.path(), tmp.path(), home.path());
         assert!(ok, "{out}");
-        assert!(out.contains("kitbag-remote:kitbag="), "{out}");
+        let kept = home.path().join(".local/share/kitbag/bin/kitbag");
+        assert!(
+            out.contains(&format!("kitbag-remote:kitbag={}", kept.display())),
+            "{out}"
+        );
+        assert!(kept.is_file());
+        assert_ne!(fs::metadata(&kept).unwrap().permissions().mode() & 0o111, 0);
+        // The kept copy survives the removal of the temporary directory.
+        let tmp_path = tmp.path().to_path_buf();
+        fs::remove_dir_all(&tmp_path).unwrap();
+        assert!(kept.is_file());
+        assert_eq!(
+            Command::new(&kept)
+                .arg("--version")
+                .output()
+                .unwrap()
+                .stdout,
+            b"kitbag 9.9.9\n"
+        );
+        fs::create_dir_all(&tmp_path).unwrap();
         assert!(out.contains("kitbag-remote:version=kitbag 9.9.9"), "{out}");
         assert!(marker.exists());
     }
@@ -1002,9 +1083,14 @@ mod tests {
         ] {
             let rel = tempfile::tempdir().unwrap();
             let tmp = tempfile::tempdir().unwrap();
+            let home = tempfile::tempdir().unwrap();
             let marker = rel.path().join("ran");
             release(rel.path(), &marker, |_| bad.clone());
-            let (ok, out) = run_download(rel.path(), tmp.path());
+            let (ok, out) = run_download(rel.path(), tmp.path(), home.path());
+            assert!(
+                !home.path().join(".local").exists(),
+                "kept an unverified kitbag"
+            );
             assert!(!ok, "{out}");
             assert!(out.contains("kitbag-remote:error="), "{out}");
             assert!(!marker.exists(), "an unverified download was run");
@@ -1020,11 +1106,13 @@ mod tests {
         }
         let rel = tempfile::tempdir().unwrap();
         let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
         let marker = rel.path().join("ran");
         release(rel.path(), &marker, |h| h.to_string());
         fs::remove_file(rel.path().join(format!("kitbag-{}.sha256", target()))).unwrap();
-        let (ok, out) = run_download(rel.path(), tmp.path());
+        let (ok, out) = run_download(rel.path(), tmp.path(), home.path());
         assert!(!ok, "{out}");
+        assert!(!home.path().join(".local").exists());
         assert!(!marker.exists());
     }
 }

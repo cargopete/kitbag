@@ -15,6 +15,17 @@ fn remote_says_it_is_not_supported_on_windows() {
         .stderr(predicates::str::contains("not supported on Windows"));
 }
 
+#[cfg(windows)]
+#[test]
+fn undo_remote_says_it_is_not_supported_on_windows() {
+    let sb = common::Sandbox::empty();
+    sb.cli()
+        .args(["undo", "--remote", "you@example.com"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not supported on Windows"));
+}
+
 #[cfg(unix)]
 mod unix {
     use std::fs;
@@ -511,6 +522,189 @@ esac
 
     const BUNDLE_VALUE: &str = "fake-bundle-value-for-remote-0139";
     const HOST_PASS: &str = "fake-host-passphrase-not-real";
+
+    fn apply_yes(host: &Host, prof: &Path) {
+        host.cli()
+            .arg("apply")
+            .arg(prof)
+            .args(remote_args(&["--yes"]))
+            .assert()
+            .success();
+    }
+
+    fn undo_args<'a>(extra: &[&'a str]) -> Vec<&'a str> {
+        let mut v = vec!["undo", "--remote", "you@stub-host", "--remote-kitbag", BIN];
+        v.extend_from_slice(extra);
+        v
+    }
+
+    /// Ids of the applies on the host that can still be undone.
+    fn history_ids(host: &Host) -> Vec<String> {
+        let out = host.on_host(&["history", "--json"]);
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        v.as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["status"] == "applied")
+            .map(|e| e["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn undo_remote_reverts_the_hosts_most_recent_apply() {
+        let host = Host::new();
+        let prof = profile(&host);
+        apply_yes(&host, &prof);
+        assert!(host.rhome().join(".claude/CLAUDE.md").exists());
+        assert_eq!(history_ids(&host).len(), 1);
+        let uploads_before = fs::metadata(host.sb.path("upload.tar")).unwrap().len();
+
+        host.cli()
+            .args(undo_args(&[]))
+            .assert()
+            .success()
+            .stdout(contains("Undid"));
+        assert!(!host.rhome().join(".claude/CLAUDE.md").exists());
+        assert!(!host.rhome().join(".claude/rules/style.md").exists());
+        // Nothing was uploaded, nothing is left in the host's tmp, and the
+        // transaction is no longer undoable.
+        assert_eq!(
+            fs::metadata(host.sb.path("upload.tar")).unwrap().len(),
+            uploads_before
+        );
+        assert!(!host.calls().lines().last().unwrap().contains("tar -xf"));
+        assert_eq!(host.leftovers(), Vec::<String>::new());
+        assert_eq!(history_ids(&host).len(), 0);
+        assert!(!host.sb.home().join(".claude").exists());
+        assert!(!host.sb.state().exists());
+    }
+
+    #[test]
+    fn undo_remote_takes_an_id_and_force_like_local_undo() {
+        let host = Host::new();
+        let prof = profile(&host);
+        apply_yes(&host, &prof);
+        let first = history_ids(&host).remove(0);
+        fs::write(prof.join("instructions.md"), "Second apply.\n").unwrap();
+        apply_yes(&host, &prof);
+        assert_eq!(history_ids(&host).len(), 2);
+
+        // The older apply can't be undone while a newer one exists...
+        host.cli().args(undo_args(&[&first])).assert().failure();
+        assert!(host.rhome().join(".claude/CLAUDE.md").exists());
+        // ...unless forced.
+        host.cli()
+            .args(undo_args(&["--force", &first]))
+            .assert()
+            .success()
+            .stdout(contains("Undid"));
+        assert_eq!(history_ids(&host).len(), 1);
+        // Without an id, the most recent one is next; the forced undo changed
+        // its files, so the host asks for --force again.
+        host.cli().args(undo_args(&[])).assert().failure();
+        host.cli().args(undo_args(&["--force"])).assert().success();
+        assert_eq!(history_ids(&host).len(), 0);
+        assert_eq!(host.leftovers(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn undo_remote_passes_the_hosts_failure_on() {
+        let host = Host::new();
+        host.cli()
+            .args(undo_args(&[]))
+            .assert()
+            .failure()
+            .stdout(predicates::str::contains("Undid").not());
+        assert_eq!(host.leftovers(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_kitbag_kept_in_the_data_dir_is_found_by_apply_and_undo() {
+        let host = Host::new();
+        let prof = profile(&host);
+        let dir = host.rhome().join(".local/share/kitbag/bin");
+        fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(BIN, dir.join("kitbag")).unwrap();
+        host.cli()
+            .arg("apply")
+            .arg(&prof)
+            .args(["--remote", "you@stub-host", "--to", "claude-code", "--yes"])
+            .assert()
+            .success()
+            .stdout(
+                contains(".local/share/kitbag/bin/kitbag").and(contains("kitbag undo --remote")),
+            );
+        assert!(host.rhome().join(".claude/CLAUDE.md").exists());
+        host.cli()
+            .args(["undo", "--remote", "you@stub-host"])
+            .assert()
+            .success()
+            .stdout(contains("Undid"));
+        assert!(!host.rhome().join(".claude/CLAUDE.md").exists());
+        assert_eq!(host.leftovers(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn undo_remote_without_a_kitbag_fails_clearly_and_leaves_nothing() {
+        let host = Host::new();
+        host.cli()
+            .args(["undo", "--remote", "you@stub-host"])
+            .assert()
+            .failure()
+            .stderr(
+                contains("not installed")
+                    .and(contains("--remote-kitbag"))
+                    .and(contains("--remote-download")),
+            );
+        let calls = host.calls();
+        assert!(
+            !calls.contains("curl") && !calls.contains("wget"),
+            "{calls}"
+        );
+        assert_eq!(host.leftovers(), Vec::<String>::new());
+        assert!(!host.rhome().join(".local").exists());
+    }
+
+    #[test]
+    fn undo_remote_refuses_option_like_hosts_and_stray_flags_before_ssh() {
+        let host = Host::new();
+        host.cli()
+            .args(["undo", "--remote=-oProxyCommand=touch-x"])
+            .assert()
+            .failure()
+            .stderr(contains("looks like an ssh option"));
+        host.cli()
+            .args(["undo", "--remote-download"])
+            .assert()
+            .failure();
+        host.cli()
+            .args(["undo", "--remote", "h", "--secrets-from", "x"])
+            .assert()
+            .failure();
+        assert_eq!(host.calls(), "");
+    }
+
+    #[test]
+    fn undo_remote_sends_no_local_secret_anywhere() {
+        let host = Host::new();
+        let prof = profile(&host);
+        apply_yes(&host, &prof);
+        let out = host
+            .cli()
+            .args(undo_args(&[]))
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        assert!(!host.calls().contains(FAKE_TOKEN));
+        assert!(!String::from_utf8_lossy(&out.stdout).contains(FAKE_TOKEN));
+        assert!(!String::from_utf8_lossy(&out.stderr).contains(FAKE_TOKEN));
+        let wire = fs::read(host.sb.path("upload.tar")).unwrap();
+        assert!(!String::from_utf8_lossy(&wire).contains(FAKE_TOKEN));
+        assert!(!tree_text(&host.sb.path("rtmp")).contains(FAKE_TOKEN));
+        assert!(!tree_text(&host.rhome()).contains(FAKE_TOKEN));
+        assert!(!tree_text(&host.sb.home()).contains(FAKE_TOKEN));
+    }
 
     fn bundle_profile(host: &Host) -> PathBuf {
         let dir = host.sb.path("bprof");
