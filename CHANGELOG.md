@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-11-28
+
 ### Added
 
 - `kitbag sessions export --from claude-code|codex -o DIR` and `kitbag sessions import --to claude-code|codex DIR` (first slice of sessions and chat history, same tool only). Export copies the tool's native JSONL transcripts (Claude Code's `projects/<project>/<session-id>.jsonl` under `~/.claude` or `$CLAUDE_CONFIG_DIR`, optionally one `--project`; Codex's `sessions/YYYY/MM/DD/rollout-*.jsonl` under `$CODEX_HOME`, `.zst` skipped with a note) and a small manifest into a local directory that must be empty unless `--force`. Redaction is on by default, reusing the `capture` redaction on every string of every line (a line with nothing found stays byte for byte); `--no-redact` warns on stderr. `--encrypt` (or `--secrets-passphrase-file` / `--secrets-recipient`) writes only an age `sessions.age`, built and opened in memory with no temporary files, and `import` opens it with `--secrets-passphrase-file` / `--secrets-identity`. Import writes only into the destination tool's own directory (`CLAUDE_CONFIG_DIR` / `CODEX_HOME` honoured, `--home` as usual), refuses to replace an existing session file without `--force`, refuses an export from the other tool and any path outside the documented layout, never starts a tool or loads a session, and prints `claude --resume /absolute/path.jsonl` for Claude Code. Sessions are never part of a profile, `capture`, `apply` or a tarball. Cursor, Gemini CLI, Hermes and other tools wait on official paths; cross-tool conversion is not offered. Part of (#11)
@@ -330,7 +332,8 @@ All notable changes to this project are documented here. The format follows
 - `capture` with several tools (`--from all`, `detected` or a list) reports a tool whose config can't be read and captures the rest; it fails only if nothing could be read. A single `--from` still fails loudly.
 - `install.sh` and `install.ps1` download `kitbag-<target>.sha256`, the checksum name the release workflow uploads (found in the v0.1.0-rc.1 dry run).
 
-[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.11...HEAD
+[Unreleased]: https://github.com/cargopete/kitbag/compare/v0.1.12...HEAD
+[0.1.12]: https://github.com/cargopete/kitbag/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/cargopete/kitbag/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/cargopete/kitbag/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/cargopete/kitbag/compare/v0.1.8...v0.1.9
