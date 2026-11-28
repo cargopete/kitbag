@@ -215,11 +215,13 @@ enum Cmd {
         force: bool,
         /// Undo on this host over ssh (`user@host`), using that host's own
         /// state directory: the kitbag there reverts its most recent apply (or
-        /// the one with this id). Nothing is uploaded; not Windows
+        /// the one with this id). Nothing is uploaded. The host may be Linux,
+        /// macOS or Windows
         #[arg(long, value_name = "HOST")]
         remote: Option<String>,
         /// With --remote: path of kitbag on the host (default: kitbag on its
-        /// PATH, else ~/.local/bin, ~/.cargo/bin or ~/.local/share/kitbag/bin)
+        /// PATH, else ~/.local/bin, ~/.cargo/bin or ~/.local/share/kitbag/bin;
+        /// on Windows %LOCALAPPDATA%\kitbag\bin or %USERPROFILE%\.cargo\bin)
         #[arg(
             long,
             value_name = "PATH",
@@ -229,7 +231,8 @@ enum Cmd {
         remote_kitbag: Option<String>,
         /// With --remote: if the host has no kitbag, download this version's
         /// release there from GitHub, check it against the published SHA-256,
-        /// keep it at ~/.local/share/kitbag/bin/kitbag and run it
+        /// keep it at ~/.local/share/kitbag/bin/kitbag (on Windows
+        /// %LOCALAPPDATA%\kitbag\bin\kitbag.exe) and run it
         #[arg(long, requires = "remote")]
         remote_download: bool,
     },
@@ -402,11 +405,13 @@ struct RemoteArgs {
     /// profile is copied to a temporary directory there, the kitbag there
     /// plans and applies it, and 'kitbag undo' on that host reverts it.
     /// Uses your ssh config and agent; only `${VAR}` references are sent, never
-    /// their values. A profile directory or git URL; user scope unless --remote-project; not Windows
+    /// their values. A profile directory or git URL; user scope unless --remote-project.
+    /// The host may be Linux, macOS or Windows (OpenSSH Server)
     #[arg(long, value_name = "HOST")]
     remote: Option<String>,
     /// With --remote: path of kitbag on the host (default: kitbag on its PATH,
-    /// else ~/.local/bin or ~/.cargo/bin)
+    /// else ~/.local/bin, ~/.cargo/bin or ~/.local/share/kitbag/bin; on Windows
+    /// %LOCALAPPDATA%\kitbag\bin or %USERPROFILE%\.cargo\bin)
     #[arg(
         long,
         value_name = "PATH",
@@ -417,7 +422,8 @@ struct RemoteArgs {
     /// With --remote: if the host has no kitbag, download this version's release
     /// there from GitHub, check it against the published SHA-256 and only then
     /// run it. The verified binary is kept at ~/.local/share/kitbag/bin/kitbag
-    /// there, so 'kitbag undo --remote' can run it later
+    /// (on Windows %LOCALAPPDATA%\kitbag\bin\kitbag.exe) there, so 'kitbag
+    /// undo --remote' can run it later
     #[arg(long, requires = "remote")]
     remote_download: bool,
     /// With --remote: path of a secrets.age on the host (not this machine),
@@ -883,11 +889,6 @@ pub fn run(cli: Cli) -> Result<i32> {
             remote_kitbag,
             remote_download,
         } => {
-            if cfg!(windows) {
-                bail!(
-                    "--remote is not supported on Windows yet; run kitbag from WSL or on a Unix machine"
-                );
-            }
             remote::validate_host(&host)?;
             remote::run_undo(
                 &remote::Remote {
@@ -1688,9 +1689,6 @@ fn cmd_remote(
     a: &ApplyArgs,
     flow: remote::Flow,
 ) -> Result<i32> {
-    if cfg!(windows) {
-        bail!("--remote is not supported on Windows yet; run kitbag from WSL or on a Unix machine");
-    }
     remote::validate_host(host)?;
     if t.place.scope == Some(Scope::Project) || t.place.project.is_some() {
         bail!(

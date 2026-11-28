@@ -2002,7 +2002,8 @@ what `apply` would change there and writes nothing; with `--exit-code` it exits 
 a difference. The apply is recorded in the **host's** state directory, so you revert it on the
 host: `kitbag undo --remote you@devbox` (add an ID to undo a specific apply, or `--force`, as with a
 local undo), or `ssh you@devbox kitbag undo` there. `undo --remote` runs the host's kitbag against
-the host's own state directory (`~/.local/state/kitbag`, or its `XDG_STATE_HOME`); it uploads
+the host's own state directory (`~/.local/state/kitbag`, or its `XDG_STATE_HOME`;
+`%LOCALAPPDATA%\kitbag` on a Windows host); it uploads
 nothing and sends no secret. It takes `--remote-kitbag PATH` and `--remote-download` like apply;
 `--home` and `KITBAG_HOME` are never passed to the host.
 
@@ -2018,6 +2019,24 @@ malformed or mismatching checksum stops it). Once it has been verified and has r
 there if any check fails), so a later `undo --remote` or `apply --remote` finds it without the flag;
 the rest of the download and the copied profile are deleted. The download runs on the host and needs `curl` or `wget`,
 `tar` and `sha256sum` or `shasum` there.
+
+**Windows hosts.** The host may also run Windows with OpenSSH Server. kitbag first sends
+`echo kitbag-remote:os=%OS%\$env:OS`, which tells Windows apart whatever the host's
+`DefaultShell` is (`cmd.exe`, PowerShell, or Git Bash, where `uname` decides); a Windows host then
+never gets a POSIX script. Every command there is `powershell.exe -NoProfile -NonInteractive
+-ExecutionPolicy Bypass -EncodedCommand <Base64 UTF-16LE>` (the probe and download scripts follow
+on stdin), values go in only as PowerShell single-quoted literals, and the host's kitbag and
+`tar.exe` are started with a command line kitbag quotes itself, so no shell re-reads an argument.
+The profile is unpacked with Windows' own `tar.exe` (Windows 10 or later) into
+`%TEMP%\kitbag-remote.*`, removed afterwards. kitbag is found at `--remote-kitbag`, else
+`kitbag.exe` on `PATH`, `%LOCALAPPDATA%\kitbag\bin\kitbag.exe` (where `install.ps1` puts it) or
+`%USERPROFILE%\.cargo\bin\kitbag.exe`. `--remote-download` fetches
+`kitbag-<x86_64|aarch64>-pc-windows-msvc.zip` and its `.sha256` with PowerShell, refuses a
+missing, malformed or mismatching checksum before unpacking, and once the unpacked `kitbag.exe` has
+run `--version` keeps it at `%LOCALAPPDATA%\kitbag\bin\kitbag.exe`, replacing it atomically as
+`install.ps1` does. On a Windows host `~/` in `--remote-kitbag`, `--remote-project` and
+`--remote-secrets-*` means `%USERPROFILE%`. kitbag itself may run on Windows too, with OpenSSH's
+`ssh` on `PATH`.
 
 What is sent, and what is not:
 
@@ -2088,8 +2107,8 @@ and a secrets bundle is never taken from a git source (`--remote-secrets-from` a
 the commit, not the temporary directory, so `kitbag status URL@COMMIT` and `sync` there can compare
 against it. (A directory source is still recorded under its local path.)
 
-Limits of this first version: not on Windows (#148). `--home` and
-`KITBAG_HOME` only affect this machine and are never sent to the host. Sending secret
+Limits of this first version: `--home` and
+`KITBAG_HOME` only affect this machine (on a Windows host as on any other) and are never sent to the host. Sending secret
 values is not offered: `--secrets-from` is refused with `--remote`, and a `secrets.age` (unless
 `--remote-include-secrets-age`, encrypted only) and anything named like a plaintext secrets file
 at the top of the profile are not copied to the host.
