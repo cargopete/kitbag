@@ -620,6 +620,7 @@ fn context(home_flag: Option<&Path>, place: Option<&Place>) -> Result<Ctx> {
             include_hooks: false,
             include_memory: false,
             include_secrets: false,
+            bundle: Default::default(),
         },
         state_dir,
     })
@@ -1665,14 +1666,39 @@ fn cmd_apply(
 ) -> Result<i32> {
     let (resolved, profile) = load_source(src, t.path.as_deref(), t.fetch())?;
     let targets = select_targets(&t.to, &ctx.env, "to")?;
+    // The bundle is opened in memory before planning. Its values go only
+    // where a tool can't read env references, as values from the
+    // environment do; a file left holding one is kept out of the undo
+    // record (see `engine::keep_out_of_undo`). A token store is written only
+    // to its own tool's documented file, outside the undo record.
+    let mut opened = match secrets_from {
+        Some(from) => {
+            let needed: Vec<String> = profile_io::required_env(&profile).into_keys().collect();
+            Some(secrets_cmd::apply_notes(from, &needed, resolved.remote)?)
+        }
+        None => None,
+    };
+    let with_bundle;
+    let ctx = match opened.as_mut() {
+        Some(b) if !b.values.is_empty() => {
+            with_bundle = Ctx {
+                env: Env {
+                    bundle: std::mem::take(&mut b.values),
+                    ..ctx.env.clone()
+                },
+                state_dir: ctx.state_dir.clone(),
+            };
+            &with_bundle
+        }
+        _ => ctx,
+    };
     let (profile, mut plan) = plan_apply(ctx, &resolved, profile, &targets, a, &BTreeSet::new())?;
+    if matches!(mode, Mode::Apply { .. }) {
+        engine::keep_out_of_undo(&mut plan, &ctx.state_dir)?;
+    }
     let mut tokens = Vec::new();
-    if let Some(from) = secrets_from {
-        // Names only: the bundle is opened in memory to check it, and no
-        // variable's value goes anywhere. A token store is written only to
-        // its own tool's documented file, outside the undo record.
-        let needed: Vec<String> = profile_io::required_env(&profile).into_keys().collect();
-        let (notes, stores) = secrets_cmd::apply_notes(from, &needed, resolved.remote)?;
+    if let Some(opened) = opened {
+        let secrets_cmd::ApplyBundle { notes, stores, .. } = opened;
         plan.notes.extend(notes);
         let ids: Vec<&str> = plan.targets.iter().map(String::as_str).collect();
         let planned = crate::oauth_tokens::plan(stores, &profile, &ids, &ctx.env);
@@ -2710,8 +2736,16 @@ fn present(
                         tokens.len()
                     ));
                 }
+                let undo = if plan.unrecorded.is_empty() {
+                    "Backups are kept; 'kitbag undo' reverts the files.".to_string()
+                } else {
+                    format!(
+                        "Backups are kept; 'kitbag undo' reverts the files, except the {} holding values from the secrets bundle.",
+                        plan.unrecorded.len()
+                    )
+                };
                 if !confirm(&format!(
-                    "Write {} file(s){also}? Backups are kept; 'kitbag undo' reverts the files.",
+                    "Write {} file(s){also}? {undo}",
                     plan.changes.len()
                 ))? {
                     println!("Aborted; nothing written.");
@@ -2735,9 +2769,15 @@ fn present(
                     println!(
                         "\n{} {} file(s). Undo with {}",
                         paint(GREEN, "Wrote"),
-                        tx.entries.len(),
+                        tx.entries.len() + plan.unrecorded.len(),
                         paint(BOLD, format!("kitbag undo {}", tx.id))
                     );
+                    if !plan.unrecorded.is_empty() {
+                        println!(
+                            "{} file(s) holding values from the secrets bundle are not in the undo record; 'kitbag undo' leaves them as they are.",
+                            plan.unrecorded.len()
+                        );
+                    }
                     write_token_stores(tokens)?;
                     print_signins(plan, "Next, sign in to these MCP servers:");
                 }

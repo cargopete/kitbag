@@ -6,6 +6,7 @@
 //! Passphrases come from a file or a terminal prompt, never from the command
 //! line, and nothing here prints a value: only variable names.
 
+use std::collections::BTreeMap;
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
@@ -512,16 +513,13 @@ fn looks_remote(src: &str) -> bool {
         || src.ends_with(".git")
 }
 
-/// `apply --secrets-from`: open the bundle in memory to check it, and say
-/// which of the profile's variables it covers (names only). Returns the
-/// bundle's MCP OAuth token stores too, for [`crate::oauth_tokens::plan`].
-pub fn apply_notes(
-    from: &FromArgs,
-    needed: &[String],
-    git_source: bool,
-) -> Result<(Vec<Note>, Vec<bundle::TokenStore>)> {
+/// `apply --secrets-from`: open the bundle in memory, and say which of the
+/// profile's variables it covers (names only). Returns its values, for the
+/// tools that can't read env references, and its MCP OAuth token stores, for
+/// [`crate::oauth_tokens::plan`].
+pub fn apply_notes(from: &FromArgs, needed: &[String], git_source: bool) -> Result<ApplyBundle> {
     let Some(path) = &from.secrets_from else {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(ApplyBundle::default());
     };
     if git_source {
         bail!(
@@ -536,8 +534,12 @@ pub fn apply_notes(
     let mut b = open_bundle(path, &from.unlock_args())?;
     let stores = b.take_token_stores();
     let held = b.names();
-    drop(b);
     let held: Vec<String> = held.into_iter().map(|(n, _)| n).collect();
+    let values: BTreeMap<String, bundle::Secret> = held
+        .iter()
+        .filter_map(|n| b.get(n).map(|v| (n.clone(), v.clone())))
+        .collect();
+    drop(b);
     let covered: Vec<&String> = needed.iter().filter(|n| held.contains(n)).collect();
     let lacking: Vec<&String> = needed.iter().filter(|n| !held.contains(n)).collect();
     let list = |v: &[&String]| v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
@@ -545,14 +547,9 @@ pub fn apply_notes(
         level: Level::Info,
         target: "secrets".to_string(),
         message: format!(
-            "{} holds {} variable(s); it was decrypted in memory to check it, and no {} was written into any tool or kept in the undo record. Tools get ${{VAR}} references as before: set the variables in your environment{}",
+            "{} holds {} variable(s); it was decrypted in memory only. Its values are written only where a tool can't read env references (each one is named in a warning), never into the plan, the diff, the output or a backup; tools that read env references get ${{VAR}} references as before: set the variables in your environment{}",
             path.display(),
             held.len(),
-            if stores.is_empty() {
-                "value"
-            } else {
-                "variable's value"
-            },
             if covered.is_empty() {
                 String::new()
             } else {
@@ -570,5 +567,21 @@ pub fn apply_notes(
             ),
         });
     }
-    Ok((notes, stores))
+    Ok(ApplyBundle {
+        notes,
+        stores,
+        values,
+    })
+}
+
+/// What `apply --secrets-from` takes from the bundle (see [`apply_notes()`]).
+#[derive(Debug, Default)]
+pub struct ApplyBundle {
+    /// What the plan says about it (names only).
+    pub notes: Vec<Note>,
+    /// Token stores, written only to their own tool's documented file.
+    pub stores: Vec<bundle::TokenStore>,
+    /// Every variable it holds, in memory only, for the tools that can't
+    /// read env references (see [`crate::adapters::Env::bundle`]).
+    pub values: BTreeMap<String, bundle::Secret>,
 }

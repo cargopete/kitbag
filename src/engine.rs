@@ -352,6 +352,14 @@ pub struct Plan {
     pub private: BTreeSet<PathBuf>,
     /// Files to write with the executable bit (skill scripts), Unix only.
     pub executable: BTreeSet<PathBuf>,
+    /// Files the plan writes that will hold a value from the secrets bundle
+    /// (`apply --secrets-from`). Remembered by path only, so a later write to
+    /// one is kept out of the undo record (see [`crate::txn::Store::bundle_files`]).
+    pub holds_bundle: BTreeSet<PathBuf>,
+    /// Files written outside the undo record (no backup, no entry), because
+    /// what they hold now has a value from the secrets bundle in it. `kitbag
+    /// undo` leaves them as they are. See [`keep_out_of_undo()`].
+    pub unrecorded: BTreeSet<PathBuf>,
     /// The instruction blocks and rule files kitbag manages, as they are now
     /// and as the plan leaves them (for `status` and `sync`).
     pub items: Vec<Item>,
@@ -691,6 +699,33 @@ pub fn plan(
             ));
         }
     }
+    // Values from the secrets bundle: a file that receives one is private,
+    // and one that holds one now must not be backed up into the state
+    // directory. A file that holds none yet is backed up as it is now, so
+    // undo puts back the content without the value.
+    let bundle_values: BTreeSet<String> = env
+        .bundle
+        .values()
+        .map(|v| v.expose().to_string())
+        .collect();
+    let holds = |b: &Option<Vec<u8>>| {
+        b.as_ref().is_some_and(|b| {
+            crate::secrets::contains_any(&String::from_utf8_lossy(b), &bundle_values)
+        })
+    };
+    let holds_bundle: BTreeSet<PathBuf> = changes
+        .iter()
+        .filter(|c| holds(&c.after))
+        .map(|c| c.path.clone())
+        .collect();
+    let unrecorded: BTreeSet<PathBuf> = changes
+        .iter()
+        .filter(|c| holds(&c.before))
+        .map(|c| c.path.clone())
+        .collect();
+    drop(bundle_values);
+    let mut private = private;
+    private.extend(holds_bundle.iter().cloned());
     let mut notes: Vec<Note> = Vec::new();
     for n in work.notes {
         if !notes.contains(&n) {
@@ -702,6 +737,8 @@ pub fn plan(
         changes,
         private,
         executable,
+        holds_bundle,
+        unrecorded,
         notes,
         targets: applied,
         skipped,
@@ -1066,6 +1103,48 @@ pub fn plan_untrusted(
 }
 
 /// Write a plan to disk as an undoable transaction. Returns `None` when there is nothing to do.
+/// Decide which of `plan`'s files are written outside the undo record: those
+/// whose current content holds a value from the secrets bundle (found while
+/// planning with `apply --secrets-from`), and those an earlier apply wrote a
+/// bundle value into (remembered by path in `state_dir`, so this holds without
+/// the bundle too). A backup of either would put the value in the state
+/// directory. Each one gets a note; [`commit()`] writes them without a backup.
+pub fn keep_out_of_undo(plan: &mut Plan, state_dir: &Path) -> Result<()> {
+    let marked = Store::new(state_dir).bundle_files()?;
+    let found = std::mem::take(&mut plan.unrecorded);
+    // A file that isn't there has nothing to back up; undo just removes it.
+    plan.unrecorded = plan
+        .changes
+        .iter()
+        .filter(|c| c.before.is_some())
+        .filter(|c| found.contains(&c.path) || marked.contains(&c.path))
+        .map(|c| c.path.clone())
+        .collect();
+    for path in &plan.unrecorded {
+        plan.notes.push(note(
+            Level::Warn,
+            "apply",
+            format!(
+                "{} is left out of the undo record: it holds a value from the secrets bundle, so no backup of it is kept and 'kitbag undo' leaves it as it is",
+                path.display()
+            ),
+        ));
+    }
+    for path in &plan.holds_bundle {
+        if !plan.unrecorded.contains(path) {
+            plan.notes.push(note(
+                Level::Info,
+                "apply",
+                format!(
+                    "{} will hold values from the secrets bundle; its backup keeps only what it holds now, without them, and 'kitbag undo' puts that back",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn commit(plan: &Plan, description: &str, state_dir: &Path) -> Result<Option<Transaction>> {
     commit_from(plan, description, state_dir, None)
 }
@@ -1090,6 +1169,8 @@ pub fn commit_from(
             private,
             executable: plan.executable.clone(),
             confine_to: plan.confine_to.clone(),
+            unrecorded: plan.unrecorded.clone(),
+            holds_bundle: plan.holds_bundle.clone(),
         },
         git,
     )?;
