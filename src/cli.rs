@@ -23,6 +23,7 @@ use crate::remote;
 use crate::schema;
 use crate::secrets::{RefStyle, RenderState, render_refs};
 use crate::secrets_cmd::{self, FromArgs, SealArgs, SecretsCmd};
+use crate::sessions::{self, SessionsCmd};
 use crate::source;
 use crate::txn::{Status, Store};
 use crate::ui::{self, BOLD, CYAN, DIM, GREEN, RED, YELLOW, paint, tildify, visible, visible_line};
@@ -304,6 +305,12 @@ enum Cmd {
     Secrets {
         #[command(subcommand)]
         cmd: SecretsCmd,
+    },
+    /// Export or import one tool's saved conversations (same tool only,
+    /// redacted by default; never part of a profile)
+    Sessions {
+        #[command(subcommand)]
+        cmd: SessionsCmd,
     },
     ListTargets {
         #[command(flatten)]
@@ -960,6 +967,33 @@ pub fn run(cli: Cli) -> Result<i32> {
                 allow_passphrase_commit,
             } => secrets_cmd::commit(file.as_deref(), allow_passphrase_commit),
         },
+        Cmd::Sessions { cmd } => {
+            let ctx = context(home, None)?;
+            match cmd {
+                SessionsCmd::Export {
+                    from,
+                    output,
+                    project,
+                    no_redact,
+                    force,
+                    seal,
+                } => sessions::export(&sessions::ExportOpts {
+                    env: &ctx.env,
+                    from,
+                    output: &output,
+                    project: project.as_deref(),
+                    no_redact,
+                    force,
+                    seal: &seal,
+                }),
+                SessionsCmd::Import {
+                    to,
+                    dir,
+                    force,
+                    unlock,
+                } => sessions::import(&ctx.env, to, &dir, force, &unlock),
+            }
+        }
         Cmd::ListTargets { place, json } => cmd_list_targets(&context(home, Some(&place))?, json),
     }
 }

@@ -31,6 +31,7 @@ pub mod remote;
 pub mod schema;
 pub mod secrets;
 pub mod secrets_cmd;
+pub mod sessions;
 pub mod source;
 pub mod sync;
 pub mod toggle;

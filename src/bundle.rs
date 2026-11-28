@@ -419,6 +419,68 @@ struct WireRef<'a> {
     token_stores: &'a [TokenStore],
 }
 
+/// Encrypt arbitrary bytes the way a bundle is (age: a passphrase or keys).
+/// Used by `kitbag sessions export --encrypt`.
+pub fn seal_bytes(plain: &[u8], how: &Seal) -> Result<Vec<u8>> {
+    let encryptor = match how {
+        Seal::Passphrase(p) => age::Encryptor::with_user_passphrase(p.clone()),
+        Seal::Keys(keys) => {
+            age::Encryptor::with_recipients(keys.iter().map(|k| k.as_ref() as &dyn age::Recipient))
+                .map_err(|e| anyhow::anyhow!("could not encrypt to those recipients: {e}"))?
+        }
+    };
+    let mut out = Vec::new();
+    let mut w = encryptor.wrap_output(&mut out)?;
+    w.write_all(plain)?;
+    w.finish()?;
+    Ok(out)
+}
+
+/// Decrypt age bytes in memory, at most `limit` bytes of plaintext. The
+/// result is zeroed when dropped.
+pub fn open_bytes(bytes: &[u8], how: &Unlock, limit: u64) -> Result<Zeroizing<Vec<u8>>> {
+    if !looks_like_age(bytes) {
+        bail!("not an age-encrypted file");
+    }
+    let decryptor =
+        age::Decryptor::new(bytes).map_err(|e| anyhow::anyhow!("not a readable age file: {e}"))?;
+    let mut scrypt;
+    let mut ids: Vec<&dyn age::Identity> = Vec::new();
+    if decryptor.is_scrypt() {
+        let Some(p) = &how.passphrase else {
+            bail!(
+                "this archive is encrypted to a passphrase: give --secrets-passphrase-file, or run in a terminal to be asked"
+            );
+        };
+        scrypt = age::scrypt::Identity::new(p.clone());
+        scrypt.set_max_work_factor(MAX_WORK_FACTOR);
+        ids.push(&scrypt);
+    } else {
+        if how.identities.is_empty() {
+            bail!(
+                "this archive is encrypted to keys: give --secrets-identity with the matching age identity file or SSH key"
+            );
+        }
+        ids.extend(
+            how.identities
+                .iter()
+                .map(|i| i.as_ref() as &dyn age::Identity),
+        );
+    }
+    let reader = decryptor
+        .decrypt(ids.into_iter())
+        .map_err(|e| anyhow::anyhow!("could not decrypt the archive: {e}"))?;
+    let mut plain = Zeroizing::new(Vec::new());
+    reader
+        .take(limit + 1)
+        .read_to_end(&mut plain)
+        .map_err(|e| anyhow::anyhow!("could not decrypt the archive: {e}"))?;
+    if plain.len() as u64 > limit {
+        bail!("the decrypted archive is larger than kitbag writes");
+    }
+    Ok(plain)
+}
+
 /// Does `bytes` start like an age file (binary or armored)?
 pub fn looks_like_age(bytes: &[u8]) -> bool {
     bytes.starts_with(b"age-encryption.org/v1\n")
