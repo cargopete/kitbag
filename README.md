@@ -202,7 +202,7 @@ my-profile/
 │   └── typecheck.sh       # scripts the [[hooks]] of kitbag.toml run (optional)
 ├── memory/
 │   └── claude-code/…      # memory notes, only with `capture --include memory` (optional)
-└── secrets.age            # encrypted secret values, only with `capture --include secrets` (optional, never in git)
+└── secrets.age            # encrypted secret values, only with `capture --include secrets` (optional, gitignored unless you run `kitbag secrets commit`)
 ```
 
 Every file is optional except `kitbag.toml`. A directory without one but with `rules/` at its
@@ -1711,7 +1711,8 @@ after the plugin directory is gone.
      is never printed.
    - **Where it goes.** `secrets.age` is written `0600` on Unix (on Windows it keeps the access
      of the folder it is in), and kitbag adds it to the profile's `.gitignore`, creating one if
-     needed. Committing it is opt-in and not done here (#138). Capturing again with `--force` and
+     needed. Keeping it out of git stays the default; committing it is opt-in with
+     `kitbag secrets commit` (below). Capturing again with `--force` and
      `--include secrets` replaces it; a bare re-capture leaves it as it is.
    - **Memory only.** Values are in memory only while a bundle is sealed or opened (zeroed on
      drop, and printed as `<redacted>` by every `Debug`). `apply --secrets-from PATH` decrypts
@@ -1753,16 +1754,31 @@ after the plugin directory is gone.
      the current `--secrets-passphrase-file` / `--secrets-identity` and writes the same variables
      and token stores encrypted to `--new-secrets-passphrase-file` or `--new-secrets-recipient`
      (one of them is required, never both, and a new passphrase must differ from the old one).
-   - Both write the new ciphertext to a temporary file in the same directory and rename it over
+   - **`kitbag secrets commit [FILE|DIR]`** is the opt-in way to keep the already encrypted
+     `secrets.age` in git (capture never does it, and never commits). It refuses a missing file, a
+     file that isn't age-encrypted, a git URL, and a profile directory holding a plaintext secrets
+     file (`.env`, `secrets.json` ...); it never stages a passphrase file, identity file or any
+     sidecar. **Recommended: encrypt to keys** (`--secrets-recipient`, or `kitbag secrets rotate
+     --new-secrets-recipient KEY`): only a holder of a matching identity can open it. For such a
+     bundle it removes kitbag's `secrets.age` line from `.gitignore` (every other line stays) and,
+     if the directory is a git repository, runs `git add` on `secrets.age` and `.gitignore` only,
+     then prints the `git commit` to run; with no repository it skips `git add` and says so.
+     Running it again once the file is tracked does nothing. **A passphrase-encrypted bundle
+     gets a loud warning**: anyone who gets the repository (a clone, a backup, its history) can
+     attack the passphrase offline. It is refused unless you also pass `--allow-passphrase-commit`
+     (`--yes` doesn't count), and the warning is printed even then. Like the other `secrets`
+     commands it writes no undo record and has no `--remote`.
+   - Both `set` and `rotate` write the new ciphertext to a temporary file in the same directory and rename it over
      the old one, so a failure leaves the bundle as it was and no plaintext file, backup or
      sidecar is ever written. They work on a file on this machine only (a git URL is refused),
      have no `--remote`, and write no undo record.
    - **`kitbag doctor SOURCE`** fails when the profile directory holds a plaintext secrets file
      (`secrets.json`, `secrets.toml`, `secrets.decrypted`, `.env` ...), when `secrets.age` isn't an
      age file, or when `kitbag.toml` itself holds a literal secret, and warns when a git
-     repository doesn't ignore `secrets.age`.
-   - **Left as follow-ups, so #9 can close:** committing the encrypted file (#138), and
-     opening a bundle on a `--remote` host (#139). An OS keychain or helper is a dated skip (2026-11-27): official docs name none
+     repository neither ignores nor tracks `secrets.age`. A tracked, age-encrypted `secrets.age`
+     (the `secrets commit` opt-in) isn't nagged about, except for a warning when it is passphrase
+     encrypted; a tracked file that isn't age-encrypted still fails.
+   - **Left as follow-ups, so #9 can close:** opening a bundle on a `--remote` host (#139). An OS keychain or helper is a dated skip (2026-11-27): official docs name none
      kitbag should write. Gemini CLI's MCP OAuth token file is carried (#18, see
      [MCP OAuth tokens in the secrets bundle](#mcp-oauth-tokens-in-the-secrets-bundle)); other
      tools' tokens are not.
@@ -2128,6 +2144,7 @@ wrapping of their own.
 | `kitbag doctor --why [DIR] [--to IDS]` | Which instruction files each tool loads in `DIR` (default: the current directory), in order, which it skips and why, and known traps |
 | `kitbag secrets list [FILE\|DIR] [--secrets-passphrase-file PATH \| --secrets-identity PATH]` | The variable names in an encrypted `secrets.age` (never values) |
 | `kitbag secrets set NAME [FILE\|DIR] --value-file PATH [--secrets-passphrase-file PATH \| --secrets-identity PATH --secrets-recipient KEY]` | Add or replace one variable in `secrets.age` (created if missing); the value comes from a file or stdin (`-`), never the command line, and is never shown |
+| `kitbag secrets commit [FILE\|DIR] [--allow-passphrase-commit]` | Opt in to keeping the encrypted `secrets.age` in git: un-ignore and `git add` it (never commits); recipients mode recommended, a passphrase bundle needs the flag and gets a warning |
 | `kitbag secrets rotate [FILE\|DIR] [--secrets-passphrase-file PATH \| --secrets-identity PATH] (--new-secrets-passphrase-file PATH \| --new-secrets-recipient KEY)` | Encrypt `secrets.age` again to a new passphrase or new keys; the same variables and token stores, rewritten in place with no plaintext file |
 | `kitbag list-targets [--json]` | Targets, what they support, which are detected, file locations |
 
