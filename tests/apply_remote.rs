@@ -278,6 +278,7 @@ esac
             kitbag: Some(BIN.into()),
             download: false,
             secrets: None,
+            project: None,
         };
         let args = vec!["--to".to_string(), "claude-code".to_string()];
         let asked = std::cell::Cell::new(false);
@@ -480,7 +481,7 @@ esac
             .args(["--remote", "you@stub-host", "--scope", "project"])
             .assert()
             .failure()
-            .stderr(contains("user scope only"));
+            .stderr(contains("--remote-project"));
         host.cli()
             .arg("diff")
             .arg(&prof)
@@ -515,6 +516,175 @@ esac
         for line in host.calls().lines() {
             assert!(line.starts_with("-- you@stub-host "), "{line}");
         }
+    }
+
+    // ---- Project paths on the host (#146).
+
+    fn host_project(host: &Host) -> PathBuf {
+        let p = host.rhome().join("work/myapp");
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn remote_project_writes_project_scope_files_under_that_host_path() {
+        let host = Host::new();
+        let prof = profile(&host);
+        let proj = host_project(&host);
+        let p = proj.display().to_string();
+        host.cli()
+            .arg("apply")
+            .arg(&prof)
+            .args(remote_args(&["--remote-project", &p, "--yes"]))
+            .assert()
+            .success()
+            .stdout(contains("Project scope").and(contains("Wrote")));
+        let written = tree_text(&proj);
+        assert!(written.contains("Be brief on the remote."), "{written}");
+        assert!(proj.join(".claude/rules/style.md").exists());
+        // Not user scope, not this machine.
+        assert!(!host.rhome().join(".claude/CLAUDE.md").exists());
+        assert!(!host.rhome().join(".claude/rules").exists());
+        assert!(!host.sb.home().join(".claude").exists());
+        assert_eq!(host.leftovers(), Vec::<String>::new());
+        assert!(host.calls().contains("'--project'"), "{}", host.calls());
+
+        // The host's own undo reverts it.
+        let out = host.on_host(&["undo"]);
+        assert!(out.status.success(), "{out:?}");
+        assert!(!proj.join(".claude/rules/style.md").exists());
+    }
+
+    #[test]
+    fn undo_remote_reverts_a_project_scope_apply() {
+        let host = Host::new();
+        let prof = profile(&host);
+        let proj = host_project(&host);
+        let p = proj.display().to_string();
+        host.cli()
+            .arg("apply")
+            .arg(&prof)
+            .args(remote_args(&["--remote-project", &p, "--yes"]))
+            .assert()
+            .success();
+        assert!(proj.join(".claude/rules/style.md").exists());
+        host.cli()
+            .args(["undo", "--remote", "you@stub-host", "--remote-kitbag", BIN])
+            .assert()
+            .success();
+        assert!(!proj.join(".claude/rules/style.md").exists());
+    }
+
+    #[test]
+    fn diff_remote_project_plans_against_that_path_and_writes_nothing() {
+        let host = Host::new();
+        let prof = profile(&host);
+        let proj = host_project(&host);
+        let p = proj.display().to_string();
+        host.cli()
+            .arg("diff")
+            .arg(&prof)
+            .args(remote_args(&["--remote-project", &p]))
+            .assert()
+            .success()
+            .stdout(contains("style.md"));
+        assert_eq!(fs::read_dir(&proj).unwrap().count(), 0);
+        assert!(!host.rhome().join(".claude").exists());
+        assert_eq!(host.leftovers(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn local_project_flags_are_refused_with_remote_and_point_at_remote_project() {
+        let host = Host::new();
+        let prof = profile(&host);
+        let here = host.sb.path("localproj");
+        fs::create_dir_all(&here).unwrap();
+        for extra in [
+            vec!["--project", here.to_str().unwrap()],
+            vec!["--scope", "project"],
+        ] {
+            host.cli()
+                .arg("diff")
+                .arg(&prof)
+                .args(remote_args(&extra))
+                .assert()
+                .failure()
+                .stderr(contains("--remote-project"));
+        }
+        host.cli()
+            .arg("diff")
+            .arg(&prof)
+            .args(remote_args(&["--remote-project", "/x", "--scope", "user"]))
+            .assert()
+            .failure();
+        // Needs --remote.
+        host.cli()
+            .arg("diff")
+            .arg(&prof)
+            .args(["--remote-project", "/x"])
+            .assert()
+            .code(2);
+        assert_eq!(host.calls(), "");
+    }
+
+    #[test]
+    fn remote_project_that_looks_like_an_option_is_refused_before_ssh() {
+        let host = Host::new();
+        let prof = profile(&host);
+        for bad in ["", "-oProxyCommand=x", "--home", "/a\nb"] {
+            host.cli()
+                .arg("diff")
+                .arg(&prof)
+                .args(remote_args(&["--remote-project", bad]))
+                .assert()
+                .failure();
+        }
+        assert_eq!(host.calls(), "");
+    }
+
+    #[test]
+    fn remote_project_tilde_means_the_host_home_and_odd_names_are_quoted() {
+        let host = Host::new();
+        let prof = profile(&host);
+        let odd = host.rhome().join("it's $(touch pwned) app");
+        fs::create_dir_all(&odd).unwrap();
+        host.cli()
+            .arg("apply")
+            .arg(&prof)
+            .args(remote_args(&[
+                "--remote-project",
+                "~/it's $(touch pwned) app",
+                "--yes",
+            ]))
+            .assert()
+            .success();
+        assert!(odd.join(".claude/rules/style.md").exists());
+        assert!(!host.rhome().join("pwned").exists());
+        assert!(!Path::new("pwned").exists());
+    }
+
+    #[test]
+    fn local_home_is_never_sent_as_the_hosts_home() {
+        let host = Host::new();
+        let prof = profile(&host);
+        let proj = host_project(&host);
+        let p = proj.display().to_string();
+        let mine = host.sb.path("my-local-home");
+        fs::create_dir_all(&mine).unwrap();
+        host.cli()
+            .env("KITBAG_HOME", &mine)
+            .arg("apply")
+            .arg(&prof)
+            .args(remote_args(&["--remote-project", &p, "--yes"]))
+            .arg("--home")
+            .arg(&mine)
+            .assert()
+            .success();
+        let calls = host.calls();
+        assert!(!calls.contains("--home"), "{calls}");
+        assert!(!calls.contains("my-local-home"), "{calls}");
+        assert!(proj.join(".claude/rules/style.md").exists());
+        assert!(!mine.join(".claude").exists());
     }
 
     // ---- Secrets bundles opened on the host (#139). Every value, passphrase
