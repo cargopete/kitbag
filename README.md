@@ -2000,16 +2000,23 @@ kitbag there to show you the plan and diff in your terminal, asks you to confirm
 that; `--dry-run` stops after the plan), applies, and removes the copy. `diff --remote` shows
 what `apply` would change there and writes nothing; with `--exit-code` it exits 1 when there is
 a difference. The apply is recorded in the **host's** state directory, so you revert it on the
-host: `ssh you@devbox kitbag undo` (the path of the kitbag it used is printed after an apply).
+host: `kitbag undo --remote you@devbox` (add an ID to undo a specific apply, or `--force`, as with a
+local undo), or `ssh you@devbox kitbag undo` there. `undo --remote` runs the host's kitbag against
+the host's own state directory (`~/.local/state/kitbag`, or its `XDG_STATE_HOME`); it uploads
+nothing and sends no secret. It takes `--remote-kitbag PATH` and `--remote-download` like apply;
+`--home` and `KITBAG_HOME` are never passed to the host.
 
 Which kitbag runs on the host: `--remote-kitbag PATH` if you give one; otherwise `kitbag` on its
-`PATH`, or in `~/.local/bin` or `~/.cargo/bin` (where `install.sh` and `cargo install` put it,
-though a non-interactive ssh shell often lacks them on `PATH`). If there is none, kitbag stops and
+`PATH`, or in `~/.local/bin`, `~/.cargo/bin` (where `install.sh` and `cargo install` put it,
+though a non-interactive ssh shell often lacks them on `PATH`) or `~/.local/share/kitbag/bin`
+(where a `--remote-download` copy is kept, below). If there is none, kitbag stops and
 says so. Only with `--remote-download` does it fetch this version's release (the same
 `kitbag-<target>.tar.gz` that `install.sh` uses, for the host's OS and CPU) onto the host, check it
 against the published `kitbag-<target>.sha256` and unpack and run it only if they match (a missing,
-malformed or mismatching checksum stops it); that copy is deleted afterwards, so install kitbag on
-the host if you want `undo` there later. The download runs on the host and needs `curl` or `wget`,
+malformed or mismatching checksum stops it). Once it has been verified and has run
+`--version` there, it is kept at `~/.local/share/kitbag/bin/kitbag` (mode 0755; nothing is written
+there if any check fails), so a later `undo --remote` or `apply --remote` finds it without the flag;
+the rest of the download and the copied profile are deleted. The download runs on the host and needs `curl` or `wget`,
 `tar` and `sha256sum` or `shasum` there.
 
 What is sent, and what is not:
@@ -2057,8 +2064,7 @@ on this machine (not a git URL; clone it first) (#147), at user scope (`--projec
 to a path on the host, so SSH remote-development workspaces and devcontainer paths are not
 handled yet) (#146), and not on Windows (#148). `--home` and `KITBAG_HOME` only affect this
 machine. The host's history records the temporary directory as the apply's source, so
-`kitbag status SOURCE` and `sync` there can't compare against it (also #147). There is no
-`undo --remote`, and a `--remote-download` copy is deleted afterwards (#145). Sending secret
+`kitbag status SOURCE` and `sync` there can't compare against it (also #147). Sending secret
 values is not offered: `--secrets-from` is refused with `--remote`, and a `secrets.age` (unless
 `--remote-include-secrets-age`, encrypted only) and anything named like a plaintext secrets file
 at the top of the profile are not copied to the host.
@@ -2173,7 +2179,7 @@ wrapping of their own.
 | `kitbag inspect <SOURCE> [--to IDS] [--json]` | What a profile or plugin holds, what in it runs commands, reads env vars, installs executables or connects to the network, and (for the tools in `--to`, default `detected`) which files `apply` would write; never writes or starts anything |
 | `kitbag status [SOURCE] [--to IDS] [--exit-code [--strict]] [--json]` | Which managed instructions and rules differ from the profile, or changed since the last apply; never writes |
 | `kitbag sync <SOURCE> [--to IDS] [--from ID [--adopt] \| --overwrite]` | Apply without overwriting instructions edited in a tool; pull an edit back with `--from`, and what is only in that tool with `--adopt` |
-| `kitbag undo [ID] [--force]` | Revert the latest (or a specific) apply; with an ID, also an interrupted one |
+| `kitbag undo [ID] [--force] [--remote HOST [--remote-kitbag PATH \| --remote-download]]` | Revert the latest (or a specific) apply; with an ID, also an interrupted one. With `--remote`, undoes on the host, using its state directory; uploads nothing |
 | `kitbag history [--json]` | List applies |
 | `kitbag doctor [SOURCE]` | Check installed tools' configs, a profile, required env vars, risky settings, interrupted applies |
 | `kitbag doctor [SOURCE] --mcp-tokens [--mcp-timeout SECS] [--allow-git-mcp [NAMES]] [--trust-source]` | Also start each local MCP server to list its tools, and estimate the tokens its tool definitions take up in each tool |
