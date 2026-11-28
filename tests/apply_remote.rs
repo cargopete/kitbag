@@ -266,6 +266,7 @@ esac
             host: "you@stub-host".into(),
             kitbag: Some(BIN.into()),
             download: false,
+            secrets: None,
         };
         let args = vec!["--to".to_string(), "claude-code".to_string()];
         let asked = std::cell::Cell::new(false);
@@ -503,5 +504,357 @@ esac
         for line in host.calls().lines() {
             assert!(line.starts_with("-- you@stub-host "), "{line}");
         }
+    }
+
+    // ---- Secrets bundles opened on the host (#139). Every value, passphrase
+    // and key below is made up.
+
+    const BUNDLE_VALUE: &str = "fake-bundle-value-for-remote-0139";
+    const HOST_PASS: &str = "fake-host-passphrase-not-real";
+
+    fn bundle_profile(host: &Host) -> PathBuf {
+        let dir = host.sb.path("bprof");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("kitbag.toml"),
+            "kitbag = 1\nname = \"bprof\"\n\n[mcp_servers.github]\ncommand = \"npx\"\nargs = [\"-y\", \"server-github\"]\nenv = { GITHUB_TOKEN = \"${GITHUB_TOKEN}\" }\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    fn sealed(seal: &kitbag::bundle::Seal) -> Vec<u8> {
+        let mut b = kitbag::bundle::Bundle::default();
+        b.insert(
+            "GITHUB_TOKEN",
+            kitbag::bundle::Secret::new(BUNDLE_VALUE),
+            "test",
+        )
+        .unwrap();
+        kitbag::bundle::seal(&b, seal).unwrap()
+    }
+
+    fn pass_sealed() -> Vec<u8> {
+        sealed(&kitbag::bundle::Seal::Passphrase(
+            age::secrecy::SecretString::from(HOST_PASS.to_string()),
+        ))
+    }
+
+    /// Bytes under `dir`, every file, for leak checks.
+    fn all_bytes(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut out = Vec::new();
+        if let Ok(rd) = fs::read_dir(dir) {
+            for e in rd.flatten() {
+                if e.file_type().unwrap().is_dir() {
+                    out.extend(all_bytes(&e.path()));
+                } else if let Ok(b) = fs::read(e.path()) {
+                    out.push((e.path(), b));
+                }
+            }
+        }
+        out
+    }
+
+    fn holds(hay: &[u8], needle: &str) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle.as_bytes())
+    }
+
+    #[track_caller]
+    fn assert_no_leak(host: &Host, outs: &[&std::process::Output], needles: &[&str]) {
+        let calls = host.calls();
+        for n in needles {
+            assert!(!calls.contains(n), "ssh argv shows a secret: {calls}");
+            for out in outs {
+                assert!(!holds(&out.stdout, n), "local stdout shows a secret");
+                assert!(!holds(&out.stderr, n), "local stderr shows a secret");
+            }
+            if let Ok(wire) = fs::read(host.sb.path("upload.tar")) {
+                assert!(!holds(&wire, n), "the upload holds a secret in clear");
+            }
+            // Nothing on this machine's side either.
+            for dir in [host.sb.home(), host.sb.state()] {
+                for (p, b) in all_bytes(&dir) {
+                    assert!(!holds(&b, n), "{} holds a secret", p.display());
+                }
+            }
+            // The host's undo records hold no value.
+            for (p, b) in all_bytes(&host.rhome().join(".local/state/kitbag")) {
+                assert!(!holds(&b, n), "host undo record {} holds it", p.display());
+            }
+        }
+    }
+
+    fn desktop_config_on_host(host: &Host) -> Option<Vec<u8>> {
+        all_bytes(&host.rhome())
+            .into_iter()
+            .find(|(p, _)| p.ends_with("claude_desktop_config.json"))
+            .map(|(_, b)| b)
+    }
+
+    fn upload_listing(host: &Host) -> String {
+        let out = Command::new("tar")
+            .arg("-tf")
+            .arg(host.sb.path("upload.tar"))
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[test]
+    fn local_secrets_from_is_still_refused_with_remote() {
+        let host = Host::new();
+        let prof = bundle_profile(&host);
+        fs::write(prof.join("secrets.age"), pass_sealed()).unwrap();
+        fs::write(host.sb.path("pass.txt"), format!("{HOST_PASS}\n")).unwrap();
+        for sub in ["apply", "diff"] {
+            let out = host
+                .cli()
+                .arg(sub)
+                .arg(&prof)
+                .args(remote_args(&["--secrets-from"]))
+                .arg(prof.join("secrets.age"))
+                .arg("--secrets-passphrase-file")
+                .arg(host.sb.path("pass.txt"))
+                .assert()
+                .failure()
+                .stderr(contains("--secrets-from can't be used with --remote"))
+                .stderr(contains("--remote-secrets-from"))
+                .get_output()
+                .clone();
+            assert_no_leak(&host, &[&out], &[BUNDLE_VALUE, HOST_PASS]);
+        }
+        assert_eq!(host.calls(), "");
+    }
+
+    #[test]
+    fn a_bundle_on_the_host_is_opened_there_and_nothing_secret_crosses_ssh() {
+        let host = Host::new();
+        let prof = bundle_profile(&host);
+        // A bundle next to the profile here is not the one used, and stays.
+        fs::write(prof.join("secrets.age"), pass_sealed()).unwrap();
+        fs::create_dir_all(host.rhome().join("vault")).unwrap();
+        fs::write(host.rhome().join("vault/secrets.age"), pass_sealed()).unwrap();
+        fs::write(
+            host.rhome().join("vault/pass.txt"),
+            format!("{HOST_PASS}\n"),
+        )
+        .unwrap();
+        let bundle_path = host.rhome().join("vault/secrets.age");
+        let pass_path = host.rhome().join("vault/pass.txt");
+        let flags = |sub: &str, extra: &[&str]| {
+            let mut c = host.cli();
+            c.arg(sub)
+                .arg(&prof)
+                .args([
+                    "--remote",
+                    "you@stub-host",
+                    "--remote-kitbag",
+                    BIN,
+                    "--to",
+                    "claude-desktop",
+                    "--remote-secrets-from",
+                ])
+                .arg(&bundle_path)
+                .arg("--remote-secrets-passphrase-file")
+                .arg(&pass_path)
+                .args(extra);
+            c
+        };
+
+        // diff on the host: it opened the bundle, and the value is masked.
+        let diff = flags("diff", &[])
+            .assert()
+            .success()
+            .stdout(contains("holds 1 variable(s)"))
+            .stdout(contains("GITHUB_TOKEN"))
+            .stdout(contains("••••"))
+            .get_output()
+            .clone();
+        assert!(desktop_config_on_host(&host).is_none(), "diff wrote");
+        let dry = flags("apply", &["--dry-run"])
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let applied = flags("apply", &["--yes"])
+            .assert()
+            .success()
+            .stdout(contains("opened on you@stub-host from"))
+            .get_output()
+            .clone();
+
+        // The host opened it: Claude Desktop there got the value.
+        let desktop = desktop_config_on_host(&host).expect("written on the host");
+        assert!(holds(&desktop, BUNDLE_VALUE));
+        // The host paths went over ssh, quoted; no value or passphrase did.
+        let calls = host.calls();
+        assert!(calls.contains("'--secrets-from'"), "{calls}");
+        assert!(
+            calls.contains(&format!("'{}'", bundle_path.display())),
+            "{calls}"
+        );
+        assert!(calls.contains("'--secrets-passphrase-file'"), "{calls}");
+        assert_no_leak(&host, &[&diff, &dry, &applied], &[BUNDLE_VALUE, HOST_PASS]);
+        // The local bundle stayed behind.
+        assert!(!upload_listing(&host).contains("secrets.age"));
+        assert_eq!(host.leftovers(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_profiles_encrypted_bundle_is_sent_only_with_the_include_flag() {
+        let host = Host::new();
+        let prof = bundle_profile(&host);
+        let id = age::x25519::Identity::generate();
+        let recipient = id.to_public().to_string();
+        let id_text = {
+            use age::secrecy::ExposeSecret;
+            id.to_string().expose_secret().to_string()
+        };
+        let keys = kitbag::bundle::parse_recipients(&recipient).unwrap();
+        fs::write(
+            prof.join("secrets.age"),
+            sealed(&kitbag::bundle::Seal::Keys(keys)),
+        )
+        .unwrap();
+        fs::write(host.rhome().join("id.txt"), format!("{id_text}\n")).unwrap();
+
+        // Without the flag, it stays here.
+        host.cli()
+            .arg("diff")
+            .arg(&prof)
+            .args(remote_args(&[]))
+            .assert()
+            .success();
+        assert!(!upload_listing(&host).contains("secrets.age"));
+
+        // With it, the ciphertext is sent and opened with the host's own
+        // identity (a `~/` path means the host's home).
+        let out = host
+            .cli()
+            .arg("apply")
+            .arg(&prof)
+            .args([
+                "--remote",
+                "you@stub-host",
+                "--remote-kitbag",
+                BIN,
+                "--to",
+                "claude-desktop",
+                "--remote-include-secrets-age",
+                "--remote-secrets-identity",
+                "~/id.txt",
+                "--yes",
+            ])
+            .assert()
+            .success()
+            .stdout(contains("encrypted secrets.age was sent"))
+            .get_output()
+            .clone();
+        assert!(upload_listing(&host).contains("secrets.age"));
+        let wire = fs::read(host.sb.path("upload.tar")).unwrap();
+        assert!(holds(&wire, "age-encryption.org/v1"));
+        let desktop = desktop_config_on_host(&host).expect("written on the host");
+        assert!(holds(&desktop, BUNDLE_VALUE));
+        assert!(host.calls().contains("\"$HOME\"'/id.txt'"));
+        assert_no_leak(&host, &[&out], &[BUNDLE_VALUE, &id_text]);
+        assert_eq!(host.leftovers(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_include_flag_refuses_a_plaintext_bundle_or_sidecar_and_sends_nothing() {
+        for case in ["plain", "sidecar", "missing"] {
+            let host = Host::new();
+            let prof = bundle_profile(&host);
+            match case {
+                "plain" => fs::write(
+                    prof.join("secrets.age"),
+                    format!("GITHUB_TOKEN={BUNDLE_VALUE}\n"),
+                )
+                .unwrap(),
+                "sidecar" => {
+                    fs::write(prof.join("secrets.age"), pass_sealed()).unwrap();
+                    fs::write(
+                        prof.join("secrets.decrypted"),
+                        format!("GITHUB_TOKEN={BUNDLE_VALUE}\n"),
+                    )
+                    .unwrap();
+                }
+                _ => {}
+            }
+            let out = host
+                .cli()
+                .arg("apply")
+                .arg(&prof)
+                .args(remote_args(&[
+                    "--remote-include-secrets-age",
+                    "--remote-secrets-passphrase-file",
+                    "/srv/pass.txt",
+                    "--yes",
+                ]))
+                .assert()
+                .failure()
+                .get_output()
+                .clone();
+            let err = String::from_utf8_lossy(&out.stderr).into_owned();
+            assert!(
+                err.contains("not sending") || err.contains("not found"),
+                "{case}: {err}"
+            );
+            assert!(!host.sb.path("upload.tar").exists(), "{case}: sent");
+            assert!(!host.calls().contains("mkdir -p"), "{case}");
+            assert_no_leak(&host, &[&out], &[BUNDLE_VALUE]);
+            assert_eq!(host.leftovers(), Vec::<String>::new());
+        }
+    }
+
+    #[test]
+    fn remote_secret_flags_need_a_host_unlock_path_and_each_other() {
+        let host = Host::new();
+        let prof = bundle_profile(&host);
+        // No way to open it on the host: refused before ssh.
+        host.cli()
+            .arg("diff")
+            .arg(&prof)
+            .args(remote_args(&["--remote-secrets-from", "/srv/secrets.age"]))
+            .assert()
+            .failure()
+            .stderr(contains("--remote-secrets-identity"));
+        // An unlock path without a bundle, both bundle flags, or no --remote.
+        for args in [
+            &["--remote-secrets-passphrase-file", "/srv/p"][..],
+            &[
+                "--remote-secrets-from",
+                "/srv/s.age",
+                "--remote-include-secrets-age",
+                "--remote-secrets-identity",
+                "/srv/id",
+            ][..],
+        ] {
+            host.cli()
+                .arg("diff")
+                .arg(&prof)
+                .args(remote_args(args))
+                .assert()
+                .code(2);
+        }
+        host.cli()
+            .arg("diff")
+            .arg(&prof)
+            .args(["--remote-secrets-from", "/srv/s.age"])
+            .assert()
+            .code(2);
+        // A host path that looks like an option.
+        host.cli()
+            .arg("diff")
+            .arg(&prof)
+            .args(remote_args(&[
+                "--remote-secrets-from=-oProxyCommand=x",
+                "--remote-secrets-identity",
+                "/srv/id",
+            ]))
+            .assert()
+            .failure()
+            .stderr(contains("not a usable path on the host"));
+        assert_eq!(host.calls(), "");
     }
 }

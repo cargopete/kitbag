@@ -579,11 +579,14 @@ flag, and a bare capture never reads a token file.
 - **Not in undo, plan, diff or logs.** The file is written after the other files and outside
   the undo transaction, so no token is in the plan, the diff, the output or the state directory.
   The plan names only the tool and the path. **`kitbag undo` does not remove or revert it:** sign
-  out in Gemini CLI, or delete the file. `kitbag diff` and `kitbag inspect` never open the bundle.
+  out in Gemini CLI, or delete the file. `kitbag diff` opens the bundle only with
+  `--secrets-from` and never writes the token file; `kitbag inspect` never opens it.
 - **`kitbag secrets list`** names the store (`gemini-cli MCP OAuth tokens
   (~/.gemini/mcp-oauth-tokens.json)`), never its content.
-- **Never from git, never to `--remote`.** As for every bundle, `--secrets-from` is refused for a
-  git source and with `--remote`; nothing is copied to the host.
+- **Never from git; on a `--remote` host only from a bundle opened there.** As for every bundle,
+  `--secrets-from` is refused for a git source and with `--remote`; with `--remote-secrets-from`
+  the host's kitbag opens a bundle on the host and writes the token file there (see
+  [Applying on a remote host over SSH](#applying-on-a-remote-host-over-ssh)).
 - A bundle with a token store is format 2; one without is still written as format 1, and both
   open.
 
@@ -1738,7 +1741,10 @@ after the plugin directory is gone.
      removes the file. The undo record keeps only a SHA-256 of each file as written, never its
      content.
    - `--secrets-from` is a local file only: it is refused for a git source (a profile you didn't
-     write could name any variable) and with `--remote` (nothing is sent to the host).
+     write could name any variable) and with `--remote` (nothing is sent to the host). A bundle
+     can be opened **on** the host instead, with `--remote-secrets-from` (see
+     [Applying on a remote host over SSH](#applying-on-a-remote-host-over-ssh)). `kitbag diff`
+     takes `--secrets-from` too and shows the bundle's values masked.
    - **`kitbag secrets list [FILE|DIR]`** prints variable names and capture locations, and any
      MCP OAuth token store by tool and path, never values.
    - **`kitbag secrets set NAME [FILE|DIR] --value-file PATH`** adds a variable, or replaces
@@ -1778,7 +1784,7 @@ after the plugin directory is gone.
      repository neither ignores nor tracks `secrets.age`. A tracked, age-encrypted `secrets.age`
      (the `secrets commit` opt-in) isn't nagged about, except for a warning when it is passphrase
      encrypted; a tracked file that isn't age-encrypted still fails.
-   - **Left as follow-ups, so #9 can close:** opening a bundle on a `--remote` host (#139). An OS keychain or helper is a dated skip (2026-11-27): official docs name none
+   - **Left as follow-ups, so #9 can close:** an OS keychain or helper is a dated skip (2026-11-27): official docs name none
      kitbag should write. Gemini CLI's MCP OAuth token file is carried (#18, see
      [MCP OAuth tokens in the secrets bundle](#mcp-oauth-tokens-in-the-secrets-bundle)); other
      tools' tokens are not.
@@ -2016,16 +2022,46 @@ What is sent, and what is not:
   no option to send values.
 - Only the host name given to `--remote` reaches `ssh`; one starting with `-` is refused.
 
+**Secrets bundles on the host.** `--secrets-from` names a file on this machine, so it is refused
+with `--remote`: nothing is decrypted here, and no passphrase, key or value is sent. Instead, let the
+host's kitbag open a bundle **on the host**, with the host's own key or passphrase file:
+
+```sh
+# A secrets.age already on the host, opened there with an identity file there:
+kitbag apply ~/dotagents --remote you@devbox --to claude-desktop \
+  --remote-secrets-from '~/vault/secrets.age' --remote-secrets-identity '~/.config/kitbag/id.txt'
+```
+
+- `--remote-secrets-from HOST_PATH` is the path of a `secrets.age` on the host; the host's
+  kitbag runs `apply --secrets-from` (or `diff --secrets-from`) on it, so it behaves exactly as
+  there: values go only into tools that can't read env references, never into the plan, the diff
+  or the host's undo records, and the plan and diff printed here show them masked.
+- `--remote-secrets-identity HOST_PATH` (repeatable) or `--remote-secrets-passphrase-file
+  HOST_PATH` says how the host opens it; one is required, as there is no terminal there to ask.
+  These are paths on the host: kitbag never reads them here, and only the paths (shell-quoted;
+  a quoted `~/` means the host's home) go over ssh. An identity file on the host is the
+  recommended way.
+- `--remote-include-secrets-age` also copies the profile's own `secrets.age` with the profile,
+  and opens that copy on the host. Only an age-encrypted regular file is sent; the run is
+  refused (nothing sent) when it is missing or not age-encrypted, when a plaintext secrets file
+  sits next to it, or when the profile holds what looks like an age identity or private key.
+  The passphrase or identity is never copied, so the host still needs its own
+  `--remote-secrets-identity` or `--remote-secrets-passphrase-file`. Encrypt a bundle you send
+  this way to the host's key (`capture --include secrets --secrets-recipient` or `secrets rotate
+  --new-secrets-recipient`) rather than to a passphrase, and do not copy passphrase files to the
+  host. The copy is removed with the rest of the temporary directory. Without this flag,
+  `secrets.age` stays behind as before.
+
 Limits of this first version, each a follow-up: the source must be a profile or plugin directory
 on this machine (not a git URL; clone it first) (#147), at user scope (`--project` is not mapped
 to a path on the host, so SSH remote-development workspaces and devcontainer paths are not
 handled yet) (#146), and not on Windows (#148). `--home` and `KITBAG_HOME` only affect this
 machine. The host's history records the temporary directory as the apply's source, so
 `kitbag status SOURCE` and `sync` there can't compare against it (also #147). There is no
-`undo --remote`, and a `--remote-download` copy is deleted afterwards (#145). Sending secrets
-themselves is not offered: `--secrets-from` is refused with `--remote`, and a `secrets.age`
-(and anything named like a plaintext secrets file) at the top of the profile is not copied to
-the host. Opening a bundle on the host is #139.
+`undo --remote`, and a `--remote-download` copy is deleted afterwards (#145). Sending secret
+values is not offered: `--secrets-from` is refused with `--remote`, and a `secrets.age` (unless
+`--remote-include-secrets-age`, encrypted only) and anything named like a plaintext secrets file
+at the top of the profile are not copied to the host.
 
 ## Which instruction files does a tool load?
 
@@ -2132,8 +2168,8 @@ wrapping of their own.
 | `kitbag init [DIR]` | Write a commented starter profile |
 | `kitbag capture [--from IDS] [-o DIR] [--dry-run] [--force] [--prune] [--include hooks,memory,secrets] [--secrets-passphrase-file PATH \| --secrets-recipient KEY]` | Read the current setup into a profile (secrets redacted). Writes only into a new or empty directory. `--force` replaces an existing profile's files and leaves anything else in the directory alone; the profile's MCP servers (and rules, commands, skills and agents with `targets` / `disabled_on`) found in no tool are kept unless `--prune`. With several tools, one whose config can't be read is reported and the rest are captured |
 | `kitbag disable ITEM [--on IDS] [PROFILE]`, `kitbag enable ...` | Turn an MCP server, rule, command, skill, agent or output style off or on for some tools (default: all) by editing its `targets` / `disabled_on` in a local profile; applies nothing |
-| `kitbag diff <SOURCE> [--to IDS] [--exit-code] [--remote HOST]` | Show exactly what `apply` would change; never writes. With `--remote`, on that host over ssh ([details](#applying-on-a-remote-host-over-ssh)) |
-| `kitbag apply <SOURCE> [--to IDS] [--yes] [--dry-run] [--apply-hooks] [--secrets-from PATH] [--remote HOST [--remote-kitbag PATH \| --remote-download]]` | Plan, confirm, write with backups; hooks only with `--apply-hooks` (and, from a git source, `--trust-source`). With `--remote`, copies the profile to the host over ssh and applies it there, with the host's own undo |
+| `kitbag diff <SOURCE> [--to IDS] [--exit-code] [--secrets-from PATH] [--remote HOST [--remote-secrets-from HOST_PATH]]` | Show exactly what `apply` would change; never writes. With `--remote`, on that host over ssh ([details](#applying-on-a-remote-host-over-ssh)) |
+| `kitbag apply <SOURCE> [--to IDS] [--yes] [--dry-run] [--apply-hooks] [--secrets-from PATH] [--remote HOST [--remote-kitbag PATH \| --remote-download] [--remote-secrets-from HOST_PATH \| --remote-include-secrets-age]]` | Plan, confirm, write with backups; hooks only with `--apply-hooks` (and, from a git source, `--trust-source`). With `--remote`, copies the profile to the host over ssh and applies it there, with the host's own undo |
 | `kitbag inspect <SOURCE> [--to IDS] [--json]` | What a profile or plugin holds, what in it runs commands, reads env vars, installs executables or connects to the network, and (for the tools in `--to`, default `detected`) which files `apply` would write; never writes or starts anything |
 | `kitbag status [SOURCE] [--to IDS] [--exit-code [--strict]] [--json]` | Which managed instructions and rules differ from the profile, or changed since the last apply; never writes |
 | `kitbag sync <SOURCE> [--to IDS] [--from ID [--adopt] \| --overwrite]` | Apply without overwriting instructions edited in a tool; pull an edit back with `--from`, and what is only in that tool with `--adopt` |
