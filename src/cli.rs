@@ -153,6 +153,8 @@ enum Cmd {
         /// Exit with status 1 when there are differences (for CI drift checks)
         #[arg(long)]
         exit_code: bool,
+        #[command(flatten)]
+        secrets_from: FromArgs,
     },
     /// Show what a profile or plugin holds, what in it runs commands, reads
     /// env vars or connects to the network, and (for the tools in --to) which
@@ -398,6 +400,37 @@ struct RemoteArgs {
     /// run it (it is removed afterwards; install it there to keep 'undo')
     #[arg(long, requires = "remote")]
     remote_download: bool,
+    /// With --remote: path of a secrets.age on the host (not this machine),
+    /// opened there by the host's kitbag as with 'apply --secrets-from'. Needs
+    /// --remote-secrets-passphrase-file or --remote-secrets-identity; nothing
+    /// is read or sent from here
+    #[arg(
+        long,
+        value_name = "HOST_PATH",
+        requires = "remote",
+        group = "remote_bundle"
+    )]
+    remote_secrets_from: Option<String>,
+    /// With --remote: also copy the profile's own secrets.age (only if it is
+    /// age-encrypted; never a plaintext file, passphrase or identity) and open
+    /// it on the host. The host still needs its own
+    /// --remote-secrets-passphrase-file or --remote-secrets-identity
+    #[arg(long, requires = "remote", group = "remote_bundle")]
+    remote_include_secrets_age: bool,
+    /// With --remote-secrets-from or --remote-include-secrets-age: a file on
+    /// the host whose first line is the bundle's passphrase. Never read here
+    #[arg(
+        long,
+        value_name = "HOST_PATH",
+        requires = "remote_bundle",
+        conflicts_with = "remote_secrets_identity"
+    )]
+    remote_secrets_passphrase_file: Option<String>,
+    /// With --remote-secrets-from or --remote-include-secrets-age: an age
+    /// identity file or unprotected SSH private key on the host the bundle was
+    /// encrypted to. Never read here. Repeatable
+    #[arg(long, value_name = "HOST_PATH", requires = "remote_bundle")]
+    remote_secrets_identity: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -732,18 +765,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             remote,
             secrets_from,
         } => {
-            if secrets_from.secrets_from.is_some() {
-                if remote.remote.is_some() {
-                    bail!(
-                        "--secrets-from can't be used with --remote: no secret value is sent to another machine (apply there with its own variables set)"
-                    );
-                }
-                if looks_remote(&source) {
-                    bail!(
-                        "--secrets-from isn't used with a git source: a profile you didn't write could name any variable. Clone it, review it, and apply the directory"
-                    );
-                }
-            }
+            check_secrets_from(&secrets_from, &remote, &source)?;
             if let Some(host) = remote.remote.clone() {
                 return cmd_remote(
                     &host,
@@ -769,7 +791,9 @@ pub fn run(cli: Cli) -> Result<i32> {
             apply,
             exit_code,
             remote,
+            secrets_from,
         } => {
+            check_secrets_from(&secrets_from, &remote, &source)?;
             if let Some(host) = remote.remote.clone() {
                 return cmd_remote(
                     &host,
@@ -786,7 +810,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                 &targets,
                 &apply,
                 Mode::Diff { exit_code },
-                None,
+                Some(&secrets_from),
             )
         }
         Cmd::Inspect {
@@ -1576,6 +1600,25 @@ fn print_plan_extras(plan: &Plan, remote: bool) {
     }
 }
 
+/// `--secrets-from` names a file on this machine: never sent with `--remote`
+/// (`--remote-secrets-from` names one on the host), never with a git source.
+fn check_secrets_from(from: &FromArgs, remote: &RemoteArgs, source: &str) -> Result<()> {
+    if from.secrets_from.is_none() {
+        return Ok(());
+    }
+    if remote.remote.is_some() {
+        bail!(
+            "--secrets-from can't be used with --remote: it is a file on this machine, and no secret value is sent to another machine. Open a bundle on the host with --remote-secrets-from HOST_PATH (or --remote-include-secrets-age) and the host's own --remote-secrets-identity or --remote-secrets-passphrase-file"
+        );
+    }
+    if looks_remote(source) {
+        bail!(
+            "--secrets-from isn't used with a git source: a profile you didn't write could name any variable. Clone it, review it, and apply the directory"
+        );
+    }
+    Ok(())
+}
+
 /// `apply --remote` / `diff --remote`: run on another machine over ssh.
 fn cmd_remote(
     host: &str,
@@ -1644,11 +1687,13 @@ fn cmd_remote(
             "not writing without confirmation in a non-interactive session; review with 'kitbag diff --remote', then pass --yes"
         );
     }
+    let secrets = remote_secrets(r)?;
     let remote = remote::Remote {
         ssh: "ssh".to_string(),
         host: host.to_string(),
         kitbag: r.remote_kitbag.clone(),
         download: r.remote_download,
+        secrets,
     };
     remote::run(
         &remote,
@@ -1658,6 +1703,28 @@ fn cmd_remote(
         flow,
         &confirm,
     )
+}
+
+/// How the host opens a bundle, from the `--remote-secrets-*` flags: paths
+/// on the host only, which are never read here.
+fn remote_secrets(r: &RemoteArgs) -> Result<Option<remote::HostSecrets>> {
+    let from = match (&r.remote_secrets_from, r.remote_include_secrets_age) {
+        (Some(p), _) => remote::BundleOnHost::Path(p.clone()),
+        (None, true) => remote::BundleOnHost::Copied,
+        (None, false) => return Ok(None),
+    };
+    if r.remote_secrets_passphrase_file.is_none() && r.remote_secrets_identity.is_empty() {
+        bail!(
+            "the host needs a way to open the bundle: give --remote-secrets-identity HOST_PATH (recommended) or --remote-secrets-passphrase-file HOST_PATH, a file on the host. There is no terminal there to ask, and nothing is sent from here"
+        );
+    }
+    let s = remote::HostSecrets {
+        from,
+        passphrase_file: r.remote_secrets_passphrase_file.clone(),
+        identities: r.remote_secrets_identity.clone(),
+    };
+    s.validate()?;
+    Ok(Some(s))
 }
 
 fn cmd_apply(

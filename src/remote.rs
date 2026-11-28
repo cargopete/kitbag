@@ -12,6 +12,11 @@
 //! Nothing resolved is sent: the profile holds `${VAR}` references, a profile
 //! that holds what looks like a literal secret is refused, and the remote
 //! kitbag resolves references from the remote host's environment.
+//!
+//! A secrets bundle is opened on the host, never here: [`HostSecrets`] names
+//! a `secrets.age` there (or the profile's own, copied only when it is
+//! age-encrypted) and the host's passphrase file or identity, as paths on the
+//! host. kitbag never reads those files, and only their paths go over ssh.
 
 use std::fs;
 use std::io::Write;
@@ -44,6 +49,71 @@ pub struct Remote {
     /// If the remote host has no kitbag, download the release matching this
     /// kitbag there, after verifying its checksum.
     pub download: bool,
+    /// Open a secrets bundle on the host (`--remote-secrets-*`).
+    pub secrets: Option<HostSecrets>,
+}
+
+/// Which bundle the host's kitbag opens.
+#[derive(Debug, Clone)]
+pub enum BundleOnHost {
+    /// A `secrets.age` already on the host, at this path there.
+    Path(String),
+    /// The profile's own `secrets.age`, copied with the profile (it must be
+    /// age-encrypted).
+    Copied,
+}
+
+/// How the host opens a bundle: paths on the host only. None of these files
+/// is read on this machine, and no passphrase, key or value is sent.
+#[derive(Debug, Clone)]
+pub struct HostSecrets {
+    pub from: BundleOnHost,
+    /// A passphrase file on the host.
+    pub passphrase_file: Option<String>,
+    /// Identity files on the host.
+    pub identities: Vec<String>,
+}
+
+impl HostSecrets {
+    /// Every host path is a plain, non-empty path: not an option, no control
+    /// characters (they are shell-quoted when sent).
+    pub fn validate(&self) -> Result<()> {
+        let mut paths: Vec<(&str, &str)> = Vec::new();
+        if let BundleOnHost::Path(p) = &self.from {
+            paths.push(("--remote-secrets-from", p));
+        }
+        if let Some(p) = &self.passphrase_file {
+            paths.push(("--remote-secrets-passphrase-file", p));
+        }
+        for p in &self.identities {
+            paths.push(("--remote-secrets-identity", p));
+        }
+        for (flag, p) in paths {
+            if p.is_empty() || p.starts_with('-') || p.chars().any(|c| c.is_control()) {
+                bail!("{flag} {p:?} is not a usable path on the host");
+            }
+        }
+        Ok(())
+    }
+
+    /// The host kitbag's `--secrets-*` options, as shell words; `bundle` is
+    /// the copied file's path there for [`BundleOnHost::Copied`].
+    fn words(&self, copied: &str) -> Vec<String> {
+        let from = match &self.from {
+            BundleOnHost::Path(p) => path_word(p),
+            BundleOnHost::Copied => sh_quote(copied),
+        };
+        let mut v = vec![sh_quote("--secrets-from"), from];
+        if let Some(p) = &self.passphrase_file {
+            v.push(sh_quote("--secrets-passphrase-file"));
+            v.push(path_word(p));
+        }
+        for p in &self.identities {
+            v.push(sh_quote("--secrets-identity"));
+            v.push(path_word(p));
+        }
+        v
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -133,8 +203,9 @@ fn get<'a>(found: &'a [(String, String)], key: &str) -> Option<&'a str> {
         .filter(|v| !v.is_empty())
 }
 
-/// Shell word for a path given with `--remote-kitbag`; `~/` means the remote
-/// home, which a quoted `~` would not.
+/// Shell word for a path on the host (`--remote-kitbag`,
+/// `--remote-secrets-*`); `~/` means the remote home, which a quoted `~` would
+/// not.
 fn path_word(p: &str) -> String {
     match p.strip_prefix("~/") {
         Some(rest) => format!("\"$HOME\"{}", sh_quote(&format!("/{rest}"))),
@@ -275,13 +346,81 @@ fn check_tmp(tmp: &str) -> Result<()> {
 /// Copy the profile into `stage` for sending: regular files only, without
 /// `.git` or `.env*` files, which are not part of a profile and may hold
 /// secrets. Returns the number of files.
-fn stage(from: &Path, to: &Path, total: &mut u64) -> Result<usize> {
-    stage_dir(from, to, total, true)
+///
+/// The profile's `secrets.age` stays behind unless `with_bundle`; then it is
+/// copied only if it is an age-encrypted regular file, and the profile is
+/// refused if it also holds a plaintext secrets file or what looks like an
+/// age identity or private key (the host must use its own).
+fn stage(from: &Path, to: &Path, total: &mut u64, with_bundle: bool) -> Result<usize> {
+    let mut n = stage_dir(from, to, total, true)?;
+    if with_bundle {
+        let plain = crate::bundle::plaintext_secret_files(from);
+        if !plain.is_empty() {
+            bail!(
+                "not sending secrets.age: the profile also holds plaintext secrets file(s) ({}); remove them first",
+                plain.join(", ")
+            );
+        }
+        if has_private_key(to)? {
+            bail!(
+                "not sending secrets.age: the profile holds what looks like an age identity or private key; keep it on the host and point --remote-secrets-identity at it there"
+            );
+        }
+        let src = from.join(crate::bundle::FILE);
+        let meta = fs::symlink_metadata(&src).with_context(|| {
+            format!("--remote-include-secrets-age: {} not found", src.display())
+        })?;
+        if !meta.file_type().is_file() {
+            bail!(
+                "--remote-include-secrets-age: {} is not a regular file; not sending it",
+                src.display()
+            );
+        }
+        let bytes = crate::bundle::read_bundle(&src)?;
+        if !crate::bundle::looks_like_age(&bytes) {
+            bail!(
+                "--remote-include-secrets-age: {} is not age-encrypted; not sending it",
+                src.display()
+            );
+        }
+        *total += bytes.len() as u64;
+        let dest = to.join(crate::bundle::FILE);
+        fs::write(&dest, &bytes)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&dest, fs::Permissions::from_mode(0o600))?;
+        }
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Does any staged file look like an age identity or a PEM private key?
+fn has_private_key(dir: &Path) -> Result<bool> {
+    const MARKS: [&[u8]; 2] = [b"AGE-SECRET-KEY-", b"PRIVATE KEY-----"];
+    for e in fs::read_dir(dir)? {
+        let e = e?;
+        if e.file_type()?.is_dir() {
+            if has_private_key(&e.path())? {
+                return Ok(true);
+            }
+            continue;
+        }
+        let b = fs::read(e.path())?;
+        if MARKS
+            .iter()
+            .any(|m| b.windows(m.len()).any(|w| w.eq_ignore_ascii_case(m)))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// [`stage`] for one directory; `top` is the profile's own folder, where the
 /// encrypted secrets bundle (and anything that looks like a plaintext one)
-/// stays behind: no secret, even encrypted, is sent to the host.
+/// stays behind: no secret, even encrypted, is sent to the host here.
 fn stage_dir(from: &Path, to: &Path, total: &mut u64, top: bool) -> Result<usize> {
     let mut n = 0;
     fs::create_dir_all(to)?;
@@ -327,7 +466,14 @@ fn upload(r: &Remote, dir: &Path, remote_dir: &str) -> Result<usize> {
     let host = r.host.as_str();
     let staged = tempfile::tempdir()?;
     let mut total = 0;
-    let files = stage(dir, staged.path(), &mut total)?;
+    let with_bundle = matches!(
+        r.secrets,
+        Some(HostSecrets {
+            from: BundleOnHost::Copied,
+            ..
+        })
+    );
+    let files = stage(dir, staged.path(), &mut total, with_bundle)?;
     let mut tar = Command::new("tar")
         .arg("-cf")
         .arg("-")
@@ -358,12 +504,12 @@ fn upload(r: &Remote, dir: &Path, remote_dir: &str) -> Result<usize> {
     Ok(files)
 }
 
-/// Run kitbag on the host with `args` (already shell-quoted words), output
-/// going straight to this terminal, and return its exit status.
-fn run_kitbag(r: &Remote, bin: &str, args: &[String]) -> Result<i32> {
+/// Run kitbag on the host with `words` (already shell-quoted), output going
+/// straight to this terminal, and return its exit status.
+fn run_kitbag(r: &Remote, bin: &str, words: &[String]) -> Result<i32> {
     let host = r.host.as_str();
     let cmd = std::iter::once(sh_quote(bin))
-        .chain(args.iter().map(|a| sh_quote(a)))
+        .chain(words.iter().cloned())
         .collect::<Vec<_>>()
         .join(" ");
     let status = ssh(r, &cmd)
@@ -486,10 +632,26 @@ fn run_in(
     println!(
         "Sent the profile ({files} files, no secrets resolved) to {host}; kitbag there: {bin}\n"
     );
+    if let Some(s) = &remote.secrets {
+        match &s.from {
+            BundleOnHost::Path(p) => println!(
+                "The secrets bundle is opened on {host} from {p}, with that host's own passphrase file or identity\n"
+            ),
+            BundleOnHost::Copied => println!(
+                "The profile's encrypted secrets.age was sent with it and is opened on {host} with that host's own passphrase file or identity\n"
+            ),
+        }
+    }
+    let secrets_words = remote
+        .secrets
+        .as_ref()
+        .map(|s| s.words(&format!("{dir}/{}", crate::bundle::FILE)))
+        .unwrap_or_default();
     let command = |extra: &[&str]| -> Vec<String> {
-        let mut v = vec![sub.to_string(), dir.clone()];
-        v.extend(args.iter().cloned());
-        v.extend(extra.iter().map(|s| s.to_string()));
+        let mut v = vec![sh_quote(sub), sh_quote(&dir)];
+        v.extend(args.iter().map(|a| sh_quote(a)));
+        v.extend(secrets_words.iter().cloned());
+        v.extend(extra.iter().map(|s| sh_quote(s)));
         v
     };
     match flow {
@@ -529,9 +691,13 @@ mod tests {
     use std::path::PathBuf;
 
     fn staged_files(dir: &Path) -> Result<Vec<PathBuf>> {
+        staged_files_with(dir, false)
+    }
+
+    fn staged_files_with(dir: &Path, with_bundle: bool) -> Result<Vec<PathBuf>> {
         let t = tempfile::tempdir()?;
         let mut total = 0;
-        stage(dir, t.path(), &mut total)?;
+        stage(dir, t.path(), &mut total, with_bundle)?;
         let mut out = Vec::new();
         fn walk(base: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
             for e in fs::read_dir(dir)? {
@@ -608,6 +774,117 @@ mod tests {
                 PathBuf::from("rules/secrets.md")
             ]
         );
+    }
+
+    const AGE_HEAD: &str = "age-encryption.org/v1\n-> X25519 fake\n";
+
+    fn bundle_profile() -> tempfile::TempDir {
+        let src = tempfile::tempdir().unwrap();
+        fs::write(src.path().join("kitbag.toml"), "name = \"x\"\n").unwrap();
+        src
+    }
+
+    #[test]
+    fn with_the_include_flag_only_an_age_encrypted_bundle_is_staged() {
+        let src = bundle_profile();
+        let p = src.path();
+        fs::write(p.join("secrets.age"), AGE_HEAD).unwrap();
+        // Without the flag it stays behind, as before.
+        assert_eq!(staged_files(p).unwrap(), vec![PathBuf::from("kitbag.toml")]);
+        assert_eq!(
+            staged_files_with(p, true).unwrap(),
+            vec![PathBuf::from("kitbag.toml"), PathBuf::from("secrets.age")]
+        );
+        let t = tempfile::tempdir().unwrap();
+        stage(p, t.path(), &mut 0, true).unwrap();
+        let mode = fs::metadata(t.path().join("secrets.age"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn with_the_include_flag_anything_but_an_encrypted_bundle_is_refused() {
+        // Missing.
+        let src = bundle_profile();
+        let err = staged_files_with(src.path(), true).unwrap_err();
+        assert!(format!("{err:#}").contains("not found"), "{err:#}");
+        // Not age-encrypted.
+        let src = bundle_profile();
+        fs::write(src.path().join("secrets.age"), "GITHUB_TOKEN=fake-plain\n").unwrap();
+        let err = staged_files_with(src.path(), true).unwrap_err();
+        assert!(format!("{err:#}").contains("not age-encrypted"), "{err:#}");
+        // A link to one.
+        let src = bundle_profile();
+        let real = src.path().join("elsewhere.bin");
+        fs::write(&real, AGE_HEAD).unwrap();
+        std::os::unix::fs::symlink(&real, src.path().join("secrets.age")).unwrap();
+        let err = staged_files_with(src.path(), true).unwrap_err();
+        assert!(format!("{err:#}").contains("not a regular file"), "{err:#}");
+        // A plaintext sidecar next to it.
+        let src = bundle_profile();
+        fs::write(src.path().join("secrets.age"), AGE_HEAD).unwrap();
+        fs::write(src.path().join("secrets.json"), "{}").unwrap();
+        let err = staged_files_with(src.path(), true).unwrap_err();
+        assert!(format!("{err:#}").contains("secrets.json"), "{err:#}");
+        // An identity or private key anywhere in the profile.
+        for (name, text) in [
+            ("id.txt", "AGE-SECRET-KEY-1FAKEFAKEFAKE\n"),
+            (
+                "keys/id_ed25519",
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n",
+            ),
+        ] {
+            let src = bundle_profile();
+            fs::write(src.path().join("secrets.age"), AGE_HEAD).unwrap();
+            let f = src.path().join(name);
+            fs::create_dir_all(f.parent().unwrap()).unwrap();
+            fs::write(f, text).unwrap();
+            let err = staged_files_with(src.path(), true).unwrap_err();
+            assert!(format!("{err:#}").contains("identity"), "{err:#}");
+        }
+    }
+
+    #[test]
+    fn host_secret_paths_are_quoted_words_and_never_options() {
+        let s = HostSecrets {
+            from: BundleOnHost::Path("~/vault/secrets.age".into()),
+            passphrase_file: None,
+            identities: vec!["/etc/it's/id.txt".into()],
+        };
+        s.validate().unwrap();
+        assert_eq!(
+            s.words("/unused"),
+            vec![
+                "'--secrets-from'".to_string(),
+                "\"$HOME\"'/vault/secrets.age'".to_string(),
+                "'--secrets-identity'".to_string(),
+                r"'/etc/it'\''s/id.txt'".to_string(),
+            ]
+        );
+        let copied = HostSecrets {
+            from: BundleOnHost::Copied,
+            passphrase_file: Some("/srv/pass.txt".into()),
+            identities: vec![],
+        };
+        assert_eq!(
+            copied.words("/tmp/kitbag-remote.x/p/secrets.age"),
+            vec![
+                "'--secrets-from'".to_string(),
+                "'/tmp/kitbag-remote.x/p/secrets.age'".to_string(),
+                "'--secrets-passphrase-file'".to_string(),
+                "'/srv/pass.txt'".to_string(),
+            ]
+        );
+        for bad in ["", "-oProxyCommand=x", "a\nb"] {
+            let s = HostSecrets {
+                from: BundleOnHost::Path(bad.into()),
+                passphrase_file: None,
+                identities: vec!["/id".into()],
+            };
+            assert!(s.validate().is_err(), "{bad:?}");
+        }
     }
 
     fn target() -> String {

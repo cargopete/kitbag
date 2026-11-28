@@ -1502,6 +1502,37 @@ fn secrets_never_with_a_bundle_writes_no_value() {
 }
 
 #[test]
+fn diff_with_secrets_from_masks_bundle_values_and_writes_nothing() {
+    // `diff --remote-secrets-from` runs this on the host.
+    let sb = Sandbox::empty();
+    let pass = resolve_setup(&sb, "\"-y\", \"server-github\"");
+    let out = sb
+        .cli()
+        .env("ONLY_IN_ENV", ENV_ONLY)
+        .arg("diff")
+        .arg(sb.path("prof"))
+        .args(["--to", "claude-desktop", "--secrets-from"])
+        .arg(sb.path("prof/secrets.age"))
+        .arg("--secrets-passphrase-file")
+        .arg(&pass)
+        .assert()
+        .success()
+        .stdout(contains("holds 1 variable(s)"))
+        .get_output()
+        .clone();
+    assert_nothing_leaked(&sb, &[&out]);
+    assert!(bytes_under(&sb.home()).is_empty(), "diff wrote");
+    // Not with a git source either.
+    let url = sb.git_profile("g", &[("kitbag.toml", "kitbag = 1\nname = \"g\"\n")]);
+    sb.cli()
+        .args(["diff", &url, "--secrets-from"])
+        .arg(sb.path("prof/secrets.age"))
+        .assert()
+        .failure()
+        .stderr(contains("git source"));
+}
+
+#[test]
 fn a_file_holding_a_bundle_value_is_never_backed_up() {
     let sb = Sandbox::empty();
     let pass = resolve_setup(&sb, "\"-y\", \"server-github\"");
