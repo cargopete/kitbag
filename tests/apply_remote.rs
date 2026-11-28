@@ -143,6 +143,14 @@ mod windows_powershell {
         }
     }
 
+    /// Compare a PowerShell-printed path with a sandbox path canonically, so
+    /// 8.3 short names (`RUNNER~1`) and long names count as equal.
+    fn assert_same_path(got: Option<String>, want: &Path, out: &str) {
+        let got = got.unwrap_or_default();
+        let want = want.to_string_lossy();
+        assert_eq!(canon(&got), canon(&want), "got {got} want {want}\n{out}");
+    }
+
     fn mark(out: &str, key: &str) -> Option<String> {
         out.lines()
             .filter_map(|l| l.strip_prefix(&format!("kitbag-remote:{key}=")))
@@ -175,16 +183,9 @@ mod windows_powershell {
             "{tmp}"
         );
         assert!(Path::new(&tmp).is_dir());
-        assert_eq!(
-            mark(&out, "kitbag").map(PathBuf::from),
-            Some(w.keep()),
-            "{out}"
-        );
+        assert_same_path(mark(&out, "kitbag"), &w.keep(), &out);
         assert!(mark(&out, "version").unwrap().starts_with("kitbag "));
-        assert_eq!(
-            mark(&out, "home").map(PathBuf::from),
-            Some(w.sb.path("profile"))
-        );
+        assert_same_path(mark(&out, "home"), &w.sb.path("profile"), &out);
 
         // An explicit path that isn't there is an error, and its temp dir goes.
         let (ok, out2) = w.script(&remote::win_probe_script(Some("~/nowhere/kitbag.exe")));
@@ -299,11 +300,7 @@ mod windows_powershell {
         let rel = release(&w, |h| format!("{h}  kitbag.zip\n"));
         let (ok, out, tmp) = download(&w, &rel);
         assert!(ok, "{out}");
-        assert_eq!(
-            mark(&out, "kitbag").map(PathBuf::from),
-            Some(w.keep()),
-            "{out}"
-        );
+        assert_same_path(mark(&out, "kitbag"), &w.keep(), &out);
         assert!(mark(&out, "version").unwrap().starts_with("kitbag "));
         fs::remove_dir_all(&tmp).unwrap();
         assert!(w.keep().is_file());
